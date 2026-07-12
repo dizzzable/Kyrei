@@ -11,6 +11,8 @@ export type Decision = "allow" | "ask" | "deny";
 export interface ActionContext {
   tool: string; // e.g. "run_command", "write_file", "edit_file"
   command?: string; // for run_command
+  /** Public URL/query for browser tools, available to explicit permission rules. */
+  target?: string;
   destructive?: boolean;
 }
 
@@ -36,7 +38,11 @@ function matchRules(cfg: PermissionConfig, key: string): Decision | null {
 }
 
 export function decide(cfg: PermissionConfig, action: ActionContext): Decision {
-  const key = action.command ? `${action.tool}:${action.command}` : action.tool;
+  const key = action.command
+    ? `${action.tool}:${action.command}`
+    : action.target
+      ? `${action.tool}:${action.target}`
+      : action.tool;
 
   // 1. Explicit rules (deny-wins).
   const ruled = matchRules(cfg, key);
@@ -55,13 +61,24 @@ export function decide(cfg: PermissionConfig, action: ActionContext): Decision {
     return ruled ?? "allow";
   }
 
-  // 3. Writes: gate by review policy.
+  // Agent-only public web. A precise allow rule may opt one action in while
+  // the global mode is off; private/local hosts are blocked by the web client.
+  if (action.tool === "web_search") {
+    if (cfg.web === "off") return ruled ?? "deny";
+    return ruled ?? "allow";
+  }
+  if (action.tool === "web_fetch") {
+    if (cfg.web !== "read") return ruled ?? "deny";
+    return ruled ?? "allow";
+  }
+
+  // 4. Writes: gate by review policy.
   if (action.tool === "write_file" || action.tool === "edit_file") {
     if (ruled === "allow") return "allow";
     if (cfg.review === "always") return "ask";
     return ruled ?? "allow"; // "agent"/"request" let the agent proceed (UI still reviews diffs)
   }
 
-  // 4. Read-only tools default allow.
+  // 5. Read-only tools default allow.
   return ruled ?? "allow";
 }

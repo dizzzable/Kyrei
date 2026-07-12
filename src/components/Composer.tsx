@@ -38,7 +38,7 @@ interface ComposerProps {
   onSend: (text: string) => void;
   onStop: () => void;
   onCommand: (name: string, arg?: string) => void;
-  onModelChange: (model: string) => void;
+  onModelChange: (providerId: string, modelId: string) => void;
 }
 
 interface MentionState {

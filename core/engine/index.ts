@@ -38,6 +38,19 @@ export type { Logger, LogLevel } from "./observability/logger.js";
 export { buildSystemPrompt, PROMPT_VERSION, PROMPT_CHANGELOG } from "./prompt/system.js";
 export { TOOL_DESCRIPTIONS } from "./prompt/tool-descriptions.js";
 export { resolveEngineConfig, EngineConfigSchema } from "./config/schema.js";
+export { createWebBrowser, assertPublicWebUrl, fetchPublicWebPage } from "./web/browser.js";
+export type { WebBrowser, WebPage, WebSearchResult } from "./web/browser.js";
+export {
+  analyzeProjectImpact,
+  buildProjectIndex,
+  formatProjectImpact,
+  formatProjectIndex,
+  loadProjectIndex,
+  persistProjectIndex,
+} from "./intel/project-index.js";
+export type { ProjectEdge, ProjectImpact, ProjectIndex, ProjectNode } from "./intel/project-index.js";
+export { createOpenVikingClient } from "./memory/openviking.js";
+export type { OpenVikingClient, OpenVikingOptions } from "./memory/openviking.js";
 
 export const ENGINE_VERSION = "2.0.0-dev";
 

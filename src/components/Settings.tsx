@@ -17,6 +17,7 @@ import { Button, Input } from "@/components/ui";
 import { BoolField, EnumField, Field, NumberField, TextField } from "@/components/settings/ConfigField";
 import { ThemeGrid } from "@/components/settings/ThemeGrid";
 import { KeybindPanel } from "@/components/settings/KeybindPanel";
+import { ProviderManager } from "@/components/settings/ProviderManager";
 import { applyTheme, getTheme } from "@/lib/theme";
 import { applyCustomTheme, clearCustomTheme, isCustomThemeActive, parseVscodeTheme } from "@/lib/vscode-theme";
 import { isSpeechRecognitionSupported, isSpeechSynthesisSupported, speak } from "@/lib/speech";
@@ -300,6 +301,15 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
                         {models.map((m) => <option key={`${m.provider}:${m.id}`} value={m.id}>{m.provider}</option>)}
                       </datalist>
                     </Field>
+                    <ProviderManager
+                      config={config}
+                      onSaved={(next) => {
+                        setProvider(next.provider);
+                        setModel(next.model);
+                        onSaved(next);
+                        flash();
+                      }}
+                    />
                     <Field label="Модели для ролей" hint="Названия моделей для основного ответа, коротких задач и планирования. Движок использует их при запуске оркестрации." stacked>
                       <div className="grid gap-2 xl:grid-cols-3">
                         <label className="space-y-1 text-[11px] text-muted">
@@ -365,6 +375,17 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
                         { value: "strict", label: "Strict" },
                       ]}
                       onChange={(v) => setEngineField("sandbox", v)}
+                    />
+                    <EnumField
+                      label="Интернет для агента"
+                      hint="Внутренний текстовый браузер для поиска и чтения публичных страниц. Локальные и приватные адреса всегда заблокированы."
+                      value={String(getEngineField("permissions.web", "read")) as "off" | "search" | "read"}
+                      options={[
+                        { value: "off", label: "Off" },
+                        { value: "search", label: "Только поиск" },
+                        { value: "read", label: "Поиск и чтение" },
+                      ]}
+                      onChange={(v) => setEngineField("permissions.web", v)}
                     />
                     <NumberField
                       label="Таймаут команды"

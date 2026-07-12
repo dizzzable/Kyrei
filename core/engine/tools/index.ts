@@ -26,6 +26,7 @@ import { applyPatch, ApplyError } from "../apply/apply.js";
 import { renderFileDiff } from "../apply/diff.js";
 import { createSnapshotStore } from "../apply/snapshot.js";
 import { detectEcosystem, runVerify } from "../reliability/verify.js";
+import { buildProjectIntelTools } from "./project-intel.js";
 
 export interface ToolMeta {
   inlineDiff?: string;
@@ -183,6 +184,7 @@ export function buildTools(
   };
 
   return {
+    ...buildProjectIntelTools(workspace),
     list_dir: tool({
       description: TOOL_DESCRIPTIONS.list_dir,
       inputSchema: z.object({

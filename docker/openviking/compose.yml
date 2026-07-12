@@ -1,0 +1,21 @@
+services:
+  openviking:
+    # Pin the adapter target; update deliberately after reading OpenViking's
+    # release notes rather than silently pulling a moving latest tag.
+    image: ghcr.io/volcengine/openviking:0.3.21
+    container_name: kyrei-openviking
+    init: true
+    restart: unless-stopped
+    ports:
+      # Never expose a personal memory service directly to the LAN/Internet.
+      - "127.0.0.1:${OPENVIKING_PORT:-1933}:1933"
+    environment:
+      OPENVIKING_WITH_BOT: "0"
+    volumes:
+      # Docker-managed volume keeps root_api_key/provider credentials outside
+      # the repository and its normal Git workflow.
+      - "openviking-data:/app/.openviking"
+
+volumes:
+  openviking-data:
+    name: kyrei-openviking-data

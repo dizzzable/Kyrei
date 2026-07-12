@@ -70,6 +70,8 @@ export interface ToolResult {
 /** Autonomy / permission policy (two-axis, requirements §8.2). */
 export interface PermissionConfig {
   terminal: "off" | "auto" | "turbo";
+  /** Internal agent-only web capability: disabled, search-only, or read public pages. */
+  web: "off" | "search" | "read";
   review: "always" | "agent" | "request";
   rules: Array<{ pattern: string; action: "allow" | "ask" | "deny" }>;
 }
@@ -97,7 +99,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   commandTimeoutMs: 60_000,
   maxToolOutput: 12_000,
   contextBudget: { softPct: 0.75, hardPct: 0.9 },
-  permissions: { terminal: "auto", review: "agent", rules: [] },
+  permissions: { terminal: "auto", web: "read", review: "agent", rules: [] },
   providerRoles: { default: "default", small: "small", plan: "plan" },
   fallbackChain: [],
   sandbox: "off",
@@ -121,9 +123,17 @@ export interface RunKyreiChatOpts {
   emit: (event: KyreiEvent) => void;
   messages: ModelMessage[];
   providerBase: string;
+  /** Stable provider-registry id for events and model preset separation. */
+  providerId?: string;
+  /** Non-secret provider headers configured locally by the user. */
+  providerHeaders?: Record<string, string>;
+  /** Local OpenAI-compatible servers may intentionally accept no API key. */
+  requiresApiKey?: boolean;
   apiKey: string;
   model: string;
   workspace?: string;
+  /** Gateway-owned local audit location; never supplied by the renderer. */
+  auditLogPath?: string;
   abortSignal?: AbortSignal;
   config?: Partial<EngineConfig>;
   /** Reasoning/effort tuning applied to the provider request (opt-in). */

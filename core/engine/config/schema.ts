@@ -23,6 +23,7 @@ const PermissionRuleSchema = z.object({
 
 const PermissionConfigSchema = z.object({
   terminal: z.enum(["off", "auto", "turbo"]).default(DEFAULT_ENGINE_CONFIG.permissions.terminal),
+  web: z.enum(["off", "search", "read"]).default(DEFAULT_ENGINE_CONFIG.permissions.web),
   review: z.enum(["always", "agent", "request"]).default(DEFAULT_ENGINE_CONFIG.permissions.review),
   rules: z.array(PermissionRuleSchema).default([]),
 });

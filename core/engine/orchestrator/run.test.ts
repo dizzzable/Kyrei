@@ -7,6 +7,7 @@ const isWorkspaceDirMock = vi.fn();
 const openStreamMock = vi.fn();
 const bridgeStreamMock = vi.fn();
 const buildToolsMock = vi.fn();
+const resolveModelMock = vi.fn();
 
 vi.mock("ai", () => ({
   streamText: streamTextMock,
@@ -19,9 +20,9 @@ vi.mock("../config/schema.js", () => ({
       commandTimeoutMs: 60_000,
       maxToolOutput: 12_000,
       contextBudget: { softPct: 0.75, hardPct: 0.9 },
-      permissions: { terminal: "auto", review: "agent", rules: [] },
+      permissions: { terminal: "auto", web: "off", review: "agent", rules: [] },
       providerRoles: { default: "default", small: "small", plan: "plan" },
-      fallbackChain: [],
+      fallbackChain: ["fallback-model"],
       sandbox: "off",
       apiMaxRetries: 2,
       personality: "",
@@ -37,12 +38,15 @@ vi.mock("../provider/build.js", () => ({
 }));
 
 vi.mock("../provider/registry.js", () => ({
-  resolve: (id: string, hint?: { baseURL?: string; id?: string }) => ({
+  resolve: (id: string, hint?: { baseURL?: string; id?: string; provider?: string }) => {
+    resolveModelMock(id, hint);
+    return ({
     id: hint?.id ?? id,
-    provider: "mock-provider",
+    provider: hint?.provider ?? "mock-provider",
     baseURL: hint?.baseURL ?? "http://mock",
     limits: { contextWindow: 128_000, maxOutput: 8_192 },
-  }),
+    });
+  },
 }));
 
 vi.mock("../provider/keys.js", () => ({
@@ -179,5 +183,22 @@ describe("runKyreiChat project context wiring", () => {
         projectContext: undefined,
       }),
     );
+  });
+
+  it("pins fallback models to the active provider endpoint", async () => {
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "https://active.example/v1",
+      providerId: "active",
+      apiKey: "key",
+      model: "primary-model",
+    });
+
+    expect(resolveModelMock).toHaveBeenCalledWith("fallback-model", {
+      baseURL: "https://active.example/v1",
+      provider: "active",
+    });
   });
 });

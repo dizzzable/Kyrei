@@ -174,7 +174,7 @@ export function App() {
       { id: assistantId, role: "assistant", parts: [], pending: true },
     ]);
     setStreaming(true);
-    const preset = config ? getModelPreset(config.provider, config.model) : {};
+    const preset = config ? getModelPreset(config.activeProviderId, config.model) : {};
     const modelParams = (() => {
       const { thinking, effort, fast } = preset;
       if (thinking === undefined && effort === undefined && fast === undefined) return undefined;
@@ -369,12 +369,12 @@ export function App() {
             disabled={!config}
             sessionId={currentId}
             model={config?.model ?? ""}
-            provider={config?.provider ?? ""}
+            provider={config?.activeProviderId ?? ""}
             hasWorkspace={Boolean(config?.workspace)}
             onSend={send}
             onStop={stop}
             onCommand={runCommand}
-            onModelChange={(m) => gateway.setConfig({ model: m }).then(setConfig).catch(() => {})}
+            onModelChange={(providerId, modelId) => gateway.setConfig({ activeProviderId: providerId, model: modelId }).then(setConfig).catch(() => {})}
           />
         </main>
 
@@ -388,7 +388,7 @@ export function App() {
 
       <StatusBar
         model={config?.model ?? ""}
-        provider={config?.provider ?? ""}
+        provider={config?.activeProviderName || config?.provider || ""}
         hasKey={Boolean(config?.hasKey)}
         connected={Boolean(config)}
         streaming={streaming}

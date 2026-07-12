@@ -15,6 +15,7 @@ export interface BuildModelOpts {
   baseURL: string;
   apiKey: string;
   model: string;
+  headers?: Record<string, string>;
   fetch?: typeof fetch;
 }
 
@@ -24,7 +25,7 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
     baseURL: opts.baseURL.replace(/\/+$/, ""),
     apiKey: opts.apiKey || "kyrei",
     includeUsage: true,
-    headers: { "X-Kyrei-Engine": "v2" },
+    headers: { "X-Kyrei-Engine": "v2", ...(opts.headers ?? {}) },
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   return provider(opts.model);

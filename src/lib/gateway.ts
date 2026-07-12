@@ -1,9 +1,11 @@
-import type { AppConfig, ChatMessage, GatewayEvent, SessionInfo } from "./types";
+import type { AppConfig, ChatMessage, GatewayEvent, ProviderProfile, SessionInfo } from "./types";
 
 /** A model entry from the engine registry (`GET /api/models`). */
 export interface ModelCatalogEntry {
   id: string;
+  name?: string;
   provider: string;
+  providerName?: string;
   baseURL: string;
   limits?: { contextWindow: number; maxOutput: number };
   cost?: { inputPerM: number; outputPerM: number };
@@ -17,17 +19,21 @@ export interface ModelParams {
   reasoning?: boolean;
 }
 
+const launchParams = new URLSearchParams(location.search);
+
 function resolveBase(): string {
-  const port = new URLSearchParams(location.search).get("port") || "8765";
+  const port = launchParams.get("port") || "8765";
   return `http://127.0.0.1:${port}`;
 }
 
 const BASE = resolveBase();
+const GATEWAY_TOKEN = launchParams.get("gatewayToken") || "";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!GATEWAY_TOKEN) throw new Error("Kyrei gateway capability is unavailable. Restart the desktop app.");
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers: { "Content-Type": "application/json", "X-Kyrei-Gateway-Token": GATEWAY_TOKEN, ...(init?.headers || {}) },
   });
   if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => res.statusText)}`);
   return res.json() as Promise<T>;
@@ -37,8 +43,28 @@ export const gateway = {
   base: BASE,
 
   getConfig: () => json<AppConfig>("/api/config"),
-  setConfig: (patch: Partial<{ provider: string; apiKey: string; model: string; workspace: string; engine: Record<string, unknown> }>) =>
+  setConfig: (patch: Partial<{
+    provider: string;
+    apiKey: string;
+    clearApiKey: boolean;
+    model: string;
+    activeModelId: string;
+    activeProviderId: string;
+    workspace: string;
+    engine: Record<string, unknown>;
+  }>) =>
     json<AppConfig>("/api/config", { method: "PUT", body: JSON.stringify(patch) }),
+  getProviders: () => json<{ providers: ProviderProfile[]; activeProviderId: string; activeModelId: string }>("/api/providers"),
+  createProvider: (provider: Partial<ProviderProfile>, apiKey?: string, activate = true) =>
+    json<AppConfig>("/api/providers", { method: "POST", body: JSON.stringify({ provider, ...(apiKey ? { apiKey } : {}), activate }) }),
+  updateProvider: (id: string, provider: Partial<ProviderProfile>) =>
+    json<AppConfig>(`/api/providers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ provider }) }),
+  deleteProvider: (id: string) =>
+    json<AppConfig>(`/api/providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  setProviderSecret: (id: string, apiKey: string) =>
+    json<AppConfig>(`/api/providers/${encodeURIComponent(id)}/secret`, { method: "PUT", body: JSON.stringify({ apiKey }) }),
+  clearProviderSecret: (id: string) =>
+    json<AppConfig>(`/api/providers/${encodeURIComponent(id)}/secret`, { method: "DELETE" }),
   chooseFolder: () => json<{ folder: string } & AppConfig>("/api/choose-folder", { method: "POST" }),
 
   listSessions: () => json<{ sessions: SessionInfo[] }>("/api/sessions").then(r => r.sessions),
@@ -75,7 +101,13 @@ export const gateway = {
 
   /** Subscribe to a session's event stream. Returns an unsubscribe function. */
   subscribe(session: string, onEvent: (event: GatewayEvent) => void): () => void {
-    const es = new EventSource(`${BASE}/api/events?session=${encodeURIComponent(session)}`);
+    if (!GATEWAY_TOKEN) throw new Error("Kyrei gateway capability is unavailable. Restart the desktop app.");
+    const url = new URL(`${BASE}/api/events`);
+    url.searchParams.set("session", session);
+    // EventSource cannot send custom headers, so its scoped stream uses the
+    // same per-launch capability in a query value accepted only on this route.
+    url.searchParams.set("token", GATEWAY_TOKEN);
+    const es = new EventSource(url.href);
     es.onmessage = e => {
       try { onEvent(JSON.parse(e.data)); } catch { /* ignore keepalive/comments */ }
     };

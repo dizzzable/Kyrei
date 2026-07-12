@@ -47,6 +47,16 @@ describe("layers precedence", () => {
     expect(ctx.indexOf("AGENTS.md")).toBeLessThan(ctx.indexOf("MEMORY.md"));
     expect(ctx).toContain("steering-правило");
   });
+  it("does not elevate a workspace project index into system instructions", async () => {
+    await mkdir(join(ws, ".kyrei", "memory"), { recursive: true });
+    await mkdir(join(ws, ".kyrei", "intel"), { recursive: true });
+    await writeFile(join(ws, ".kyrei", "memory", "MEMORY.md"), "durable memory", "utf8");
+    await writeFile(join(ws, ".kyrei", "intel", "PROJECT.md"), "project map", "utf8");
+    const ctx = await assembleSystemContext({ workspace: ws });
+    expect(ctx).toContain("durable memory");
+    expect(ctx).not.toContain("PROJECT.md");
+    expect(ctx).not.toContain("project map");
+  });
 });
 
 describe("writer enforced paths", () => {

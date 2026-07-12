@@ -77,7 +77,7 @@ function ModelRow({
 }: {
   entry: ModelCatalogEntry;
   active: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (providerId: string, modelId: string) => void;
   closeMenu: () => void;
 }) {
   const preset = useModelPreset(entry.provider, entry.id);
@@ -92,7 +92,7 @@ function ModelRow({
       <DropdownMenuSubTrigger
         hideChevron
         className={cn(active && "text-foreground")}
-        onClick={() => { onSelect(entry.id); closeMenu(); }}
+        onClick={() => { onSelect(entry.provider, entry.id); closeMenu(); }}
       >
         <span className="min-w-0 flex-1 truncate">
           {modelDisplayParts(entry.id).name}
@@ -112,7 +112,7 @@ export function ModelPill({
 }: {
   model: string;
   provider: string;
-  onModelChange: (model: string) => void;
+  onModelChange: (providerId: string, modelId: string) => void;
 }) {
   const preset = useModelPreset(provider, model);
   const [open, setOpen] = useState(false);
@@ -176,12 +176,12 @@ export function ModelPill({
           ) : (
             groups.map(([prov, list]) => (
               <div key={prov} className="py-0.5">
-                <DropdownMenuLabel>{prov}</DropdownMenuLabel>
+                <DropdownMenuLabel>{list[0]?.providerName ?? prov}</DropdownMenuLabel>
                 {list.map((m) => (
                   <ModelRow
                     key={`${m.provider}:${m.id}`}
                     entry={m}
-                    active={m.id === model}
+                    active={m.id === model && m.provider === provider}
                     onSelect={onModelChange}
                     closeMenu={() => setOpen(false)}
                   />

@@ -15,6 +15,7 @@ import { resolve as resolveModel } from "../provider/registry.js";
 import { KeyPool } from "../provider/keys.js";
 import { openStream, type StreamLike } from "../provider/open-stream.js";
 import { buildTools, type ToolMeta } from "../tools/index.js";
+import { buildWebTools } from "../tools/web.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { assembleSystemContext } from "../memory/layers.js";
@@ -24,19 +25,22 @@ import { makePrepareStep } from "./prepare-step.js";
 import { emitNoKeyGuidance } from "./no-key-guidance.js";
 import { bridgeStream } from "../stream-bridge/bridge.js";
 import { toParts } from "./persist.js";
+import { createAuditLog } from "../security/audit.js";
 
 export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
   const { config: cfg, warnings } = resolveEngineConfig(opts.config);
   if (warnings.length) console.warn("[kyrei v2] config:", warnings.join("; "));
   opts.emit({ type: "message.start" });
 
-  if (!opts.apiKey) return emitNoKeyGuidance(opts.emit);
+  if (opts.requiresApiKey !== false && !opts.apiKey) return emitNoKeyGuidance(opts.emit);
 
   const workspaceReady = Boolean(opts.workspace) && (await isWorkspaceDir(opts.workspace!));
   const toolMeta = new Map<string, ToolMeta>();
   const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
   let tools = workspaceReady ? buildTools(opts.workspace!, cfg, toolMeta, opts.abortSignal) : undefined;
   if (tools && ccr) tools = { ...tools, retrieve: makeRetrieveTool(ccr) };
+  const webTools = buildWebTools(cfg, opts.auditLogPath ? { audit: createAuditLog(opts.auditLogPath) } : {});
+  if (Object.keys(webTools).length) tools = { ...(tools ?? {}), ...webTools };
 
   let projectContext: string | undefined;
   if (workspaceReady) {
@@ -54,9 +58,15 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     projectContext,
   });
 
-  // Candidate models: primary (from settings) + configured fallback chain.
-  const primary = resolveModel(opts.model, { baseURL: opts.providerBase, id: opts.model });
-  const entries = [primary, ...cfg.fallbackChain.map((id) => resolveModel(id))];
+  // Candidate models: primary (from settings) + provider-local fallbacks.
+  // A fallback must never move the active provider's API key or custom headers
+  // to an unrelated endpoint. Until fallback credentials are stored per
+  // provider, every candidate deliberately stays on the primary endpoint.
+  const primary = resolveModel(opts.model, { baseURL: opts.providerBase, id: opts.model, provider: opts.providerId });
+  const entries = [
+    primary,
+    ...cfg.fallbackChain.map((id) => resolveModel(id, { baseURL: primary.baseURL, provider: primary.provider })),
+  ];
   const keyPool = new KeyPool({ keys: [opts.apiKey] });
   const prepareStep = ccr ? makePrepareStep(cfg, primary.id, primary.limits.contextWindow, ccr) : undefined;
   const providerOptions = buildProviderOptions(opts.modelParams);
@@ -67,6 +77,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       baseURL: entry.baseURL,
       apiKey: opts.apiKey,
       model: entry.id,
+      headers: opts.providerHeaders,
       ...(keyPool.isMulti() ? { fetch: keyPool.fetchMiddleware() } : {}),
     });
     const result = streamText({

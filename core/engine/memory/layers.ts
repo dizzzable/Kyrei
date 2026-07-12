@@ -48,6 +48,10 @@ export async function assembleSystemContext(opts: AssembleOpts): Promise<string>
   for (const s of await readAlwaysSteering(workspace)) layers.push({ name: "steering", body: s });
   const mem = await readIfExists(join(workspace, ".kyrei", "memory", "MEMORY.md"));
   if (mem) layers.push({ name: "MEMORY.md", body: mem });
+  // Project intelligence is deliberately *not* added as an instruction layer.
+  // A repository may contain stale or malicious `.kyrei/intel` files; agents
+  // access the deterministic graph through project_map/project_impact tool
+  // results, which are explicitly untrusted data rather than system policy.
   if (opts.globalDir) {
     const g = await readIfExists(join(opts.globalDir, "GLOBAL.md"));
     if (g) layers.push({ name: "GLOBAL.md", body: g });

@@ -7,7 +7,7 @@ const here = fileURLToPath(new URL(".", import.meta.url));
 const appIcon = join(here, "..", "assets", "icon.png");
 
 let windowRef;
-let gateway; // { port, close }
+let gateway; // { port, token, close }
 
 async function chooseFolder() {
   const result = await dialog.showOpenDialog(windowRef, {
@@ -16,7 +16,7 @@ async function chooseFolder() {
   return result.canceled ? "" : result.filePaths[0] ?? "";
 }
 
-async function createWindow(port) {
+async function createWindow(port, gatewayToken) {
   // macOS keeps its standard application menu; Windows/Linux use our compact
   // title strip instead of a second menu bar.
   if (process.platform !== "darwin") Menu.setApplicationMenu(null);
@@ -53,18 +53,28 @@ async function createWindow(port) {
 
   const devUrl = process.env.KYREI_RENDERER_URL;
   if (devUrl) {
-    await windowRef.loadURL(`${devUrl}?port=${port}`);
+    const renderer = new URL(devUrl);
+    renderer.searchParams.set("port", String(port));
+    renderer.searchParams.set("gatewayToken", gatewayToken);
+    await windowRef.loadURL(renderer.href);
   } else {
     await windowRef.loadFile(join(app.getAppPath(), "dist", "renderer", "index.html"), {
-      search: `port=${port}`,
+      search: new URLSearchParams({ port: String(port), gatewayToken }).toString(),
     });
   }
 }
 
 app.whenReady().then(async () => {
   try {
-    gateway = await startGateway({ dataDir: join(app.getPath("userData"), "kyrei"), chooseFolder, preferredPort: 8765 });
-    await createWindow(gateway.port);
+    const devUrl = process.env.KYREI_RENDERER_URL;
+    const rendererOrigin = devUrl ? new URL(devUrl).origin : "null";
+    gateway = await startGateway({
+      dataDir: join(app.getPath("userData"), "kyrei"),
+      chooseFolder,
+      preferredPort: 8765,
+      rendererOrigin,
+    });
+    await createWindow(gateway.port, gateway.token);
   } catch (error) {
     dialog.showErrorBox("Kyrei", error.message);
     app.quit();
@@ -72,5 +82,5 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0 && gateway) createWindow(gateway.port); });
+app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0 && gateway) createWindow(gateway.port, gateway.token); });
 app.on("before-quit", () => { if (gateway && typeof gateway.close === "function") gateway.close(); });

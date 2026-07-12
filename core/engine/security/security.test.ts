@@ -23,7 +23,7 @@ describe("jail hardening (Property 12)", () => {
 });
 
 describe("permissions engine (deny-wins, two-axis)", () => {
-  const base: PermissionConfig = { terminal: "auto", review: "agent", rules: [] };
+  const base: PermissionConfig = { terminal: "auto", web: "read", review: "agent", rules: [] };
   it("auto gates destructive + network commands", () => {
     expect(decide(base, { tool: "run_command", command: "ls" })).toBe("allow");
     expect(decide(base, { tool: "run_command", command: "rm -rf /" })).toBe("ask");
@@ -42,6 +42,11 @@ describe("permissions engine (deny-wins, two-axis)", () => {
   it("review=always gates writes", () => {
     const cfg: PermissionConfig = { ...base, review: "always" };
     expect(decide(cfg, { tool: "write_file" })).toBe("ask");
+  });
+  it("web capability is independently scoped", () => {
+    expect(decide(base, { tool: "web_search", target: "framework docs" })).toBe("allow");
+    expect(decide({ ...base, web: "search" }, { tool: "web_fetch", target: "https://example.com" })).toBe("deny");
+    expect(decide({ ...base, web: "off" }, { tool: "web_search", target: "framework docs" })).toBe("deny");
   });
 });
 

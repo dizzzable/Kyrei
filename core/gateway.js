@@ -1,7 +1,18 @@
 import { createServer } from "node:http";
-import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { chmod, readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { join, resolve, relative } from "node:path";
 import { SessionStore } from "./session-store.js";
+import {
+  createProviderId,
+  getActiveProvider,
+  normalizeGatewayConfig,
+  normalizeProviderSecrets,
+  publicGatewayConfig,
+  removeProvider,
+  selectProviderModel,
+  upsertProvider,
+} from "./provider-config.js";
 
 /**
  * Kyrei gateway — local HTTP server that the renderer talks to.
@@ -26,14 +37,13 @@ import { SessionStore } from "./session-store.js";
  *   POST /api/cancel   { session }       -> cancel the running turn
  */
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
+const CORS_BASE = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, X-Kyrei-Gateway-Token",
 };
 
 function sendJson(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...CORS });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...(res.kyreiCors ?? {}) });
   res.end(JSON.stringify(body));
 }
 
@@ -46,13 +56,48 @@ function readBody(req) {
   });
 }
 
-export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765 } = {}) {
+export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765, authToken, rendererOrigin = "null" } = {}) {
+  // The local port is not an authentication boundary: any web page can target
+  // loopback. Every API request carries this per-launch capability token.
+  const gatewayToken = typeof authToken === "string" && authToken.length >= 32
+    ? authToken
+    : randomBytes(32).toString("base64url");
+
+  const tokenMatches = (candidate) => {
+    if (typeof candidate !== "string") return false;
+    const actual = Buffer.from(candidate);
+    const expected = Buffer.from(gatewayToken);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  };
+  const isLoopbackHost = (host) => /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(String(host ?? ""));
+  // Chromium normally serializes file origins as `null`; accept `file://` as
+  // well for platform variants. Both still require the launch capability.
+  const allowedOrigins = new Set(rendererOrigin === "null" ? ["null", "file://"] : [rendererOrigin]);
+  const isExpectedOrigin = (origin) => !origin || allowedOrigins.has(origin);
+  const corsFor = (origin) => allowedOrigins.has(origin)
+    ? { ...CORS_BASE, "Access-Control-Allow-Origin": origin, Vary: "Origin" }
+    : {};
   await mkdir(dataDir, { recursive: true });
   const configPath = join(dataDir, "kyrei-config.json");
 
-  let config = { provider: "https://api.openai.com/v1", apiKey: "", model: "gpt-4o-mini", workspace: "" };
-  try { Object.assign(config, JSON.parse(await readFile(configPath, "utf8"))); } catch { /* first run */ }
-  const saveConfig = () => writeFile(configPath, JSON.stringify(config, null, 2), "utf8").catch(() => {});
+  const secretsPath = join(dataDir, "kyrei-secrets.json");
+  let rawConfig = {};
+  try { rawConfig = JSON.parse(await readFile(configPath, "utf8")); } catch { /* first run */ }
+  let config = normalizeGatewayConfig(rawConfig);
+  let secrets = {};
+  try { secrets = normalizeProviderSecrets(JSON.parse(await readFile(secretsPath, "utf8"))); } catch { secrets = normalizeProviderSecrets({}); }
+  const legacyApiKey = typeof rawConfig.apiKey === "string" ? rawConfig.apiKey : "";
+  if (legacyApiKey && !secrets.providers[config.activeProviderId]?.apiKey) {
+    secrets.providers[config.activeProviderId] = { apiKey: legacyApiKey };
+  }
+  const saveConfig = async () => {
+    await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
+    await writeFile(secretsPath, JSON.stringify(secrets, null, 2), { encoding: "utf8", mode: 0o600 });
+    // `mode` affects only newly created files. Reassert Unix permissions after
+    // every write; Windows ACL/keychain hardening remains a platform follow-up.
+    if (process.platform !== "win32") await chmod(secretsPath, 0o600);
+  };
+  await saveConfig();
 
   const store = new SessionStore({ runtimeDir: dataDir });
   await store.load();
@@ -80,13 +125,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
     // `engine` tuning is non-secret (permissions/roles/budgets), so it is safe
     // to echo back for the settings Advanced pane. The apiKey is never exposed —
     // only `hasKey`.
-    return {
-      provider: config.provider,
-      model: config.model,
-      workspace: config.workspace,
-      hasKey: Boolean(config.apiKey),
-      engine: config.engine && typeof config.engine === "object" ? config.engine : {},
-    };
+    return publicGatewayConfig(config, secrets);
   }
 
   function convoFor(sessionId) {
@@ -105,13 +144,23 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
     }
 
+    const activeProvider = getActiveProvider(config);
+    if (!activeProvider) {
+      emitTo(sessionId, { type: "error", payload: { message: "No provider is configured." } });
+      emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "error" } });
+      return;
+    }
     const common = {
       emit: event => emitTo(sessionId, event),
       messages: convoFor(sessionId),
-      providerBase: config.provider,
-      apiKey: config.apiKey,
-      model: config.model,
+      providerBase: activeProvider.baseURL,
+      providerId: activeProvider.id,
+      providerHeaders: activeProvider.headers,
+      requiresApiKey: activeProvider.requiresApiKey,
+      apiKey: secrets.providers[activeProvider.id]?.apiKey ?? "",
+      model: config.activeModelId,
       workspace: config.workspace,
+      auditLogPath: join(dataDir, "audit.jsonl"),
     };
 
     const controller = new AbortController();
@@ -154,9 +203,29 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
   }
 
   const server = createServer(async (req, res) => {
-    if (req.method === "OPTIONS") { res.writeHead(204, CORS); res.end(); return; }
     const url = new URL(req.url, "http://127.0.0.1");
     const path = url.pathname;
+    const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+    res.kyreiCors = corsFor(origin);
+
+    // Bind only to loopback and reject spoofed browser origins before any
+    // response that a page could read. The bearer token remains mandatory even
+    // for file:// (Origin: null) renderers.
+    if (!isLoopbackHost(req.headers.host)) return sendJson(res, 421, { error: "loopback host required" });
+    if (!isExpectedOrigin(origin)) return sendJson(res, 403, { error: "unexpected origin" });
+    if (req.method === "OPTIONS") {
+      if (!origin) return sendJson(res, 403, { error: "origin required" });
+      res.writeHead(204, res.kyreiCors);
+      res.end();
+      return;
+    }
+    const headerToken = Array.isArray(req.headers["x-kyrei-gateway-token"])
+      ? req.headers["x-kyrei-gateway-token"][0]
+      : req.headers["x-kyrei-gateway-token"];
+    const eventToken = path === "/api/events" ? url.searchParams.get("token") : null;
+    if (path !== "/health" && !tokenMatches(headerToken) && !tokenMatches(eventToken)) {
+      return sendJson(res, 401, { error: "gateway authentication required" });
+    }
 
     try {
       if (req.method === "GET" && path === "/health") return sendJson(res, 200, { ok: true });
@@ -169,13 +238,89 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
         if (req.method === "GET") return sendJson(res, 200, publicConfig());
         if (req.method === "PUT") {
           const body = await readBody(req);
-          if (typeof body.provider === "string") config.provider = body.provider.trim();
-          if (typeof body.apiKey === "string") config.apiKey = body.apiKey;
-          if (typeof body.model === "string") config.model = body.model.trim();
+          const active = getActiveProvider(config);
+          if (typeof body.provider === "string" && active) {
+            ({ config } = upsertProvider(config, { ...active, baseURL: body.provider }, active.id));
+          }
+          const requestedProviderId = typeof body.activeProviderId === "string" ? body.activeProviderId : config.activeProviderId;
+          const requestedModel = typeof body.activeModelId === "string"
+            ? body.activeModelId
+            : typeof body.model === "string"
+              ? body.model
+              : config.activeModelId;
+          if (requestedProviderId || requestedModel) {
+            config = selectProviderModel(config, requestedProviderId || config.activeProviderId, requestedModel);
+          }
+          if (typeof body.apiKey === "string" && body.apiKey.trim()) {
+            secrets.providers[config.activeProviderId] = { apiKey: body.apiKey.trim() };
+          }
+          if (body.clearApiKey === true) delete secrets.providers[config.activeProviderId];
           if (typeof body.workspace === "string") config.workspace = body.workspace;
           // Engine tuning (permissions/roles/fallbackChain/budgets). Validated
           // engine-side by resolveEngineConfig (fail-open), so we store as-is.
           if (body.engine && typeof body.engine === "object") config.engine = body.engine;
+          await saveConfig();
+          return sendJson(res, 200, publicConfig());
+        }
+      }
+
+      if (path === "/api/providers") {
+        if (req.method === "GET") {
+          const snapshot = publicConfig();
+          return sendJson(res, 200, {
+            providers: snapshot.providers,
+            activeProviderId: snapshot.activeProviderId,
+            activeModelId: snapshot.activeModelId,
+          });
+        }
+        if (req.method === "POST") {
+          const body = await readBody(req);
+          const input = body.provider && typeof body.provider === "object" ? body.provider : body;
+          const id = createProviderId(String(input.name || input.id || "provider"), config.providers);
+          const added = upsertProvider(config, { ...input, id }, id);
+          config = added.config;
+          if (typeof body.apiKey === "string" && body.apiKey.trim()) secrets.providers[added.provider.id] = { apiKey: body.apiKey.trim() };
+          if (body.activate !== false) config = selectProviderModel(config, added.provider.id, input.model || added.provider.models[0]?.id);
+          await saveConfig();
+          return sendJson(res, 201, publicConfig());
+        }
+      }
+
+      const providerMatch = path.match(/^\/api\/providers\/([^/]+)(\/secret)?$/);
+      if (providerMatch) {
+        const providerId = decodeURIComponent(providerMatch[1]);
+        const secretPath = Boolean(providerMatch[2]);
+        const existing = config.providers.find((provider) => provider.id === providerId);
+        if (!existing) return sendJson(res, 404, { error: "provider not found" });
+        if (secretPath) {
+          if (req.method === "PUT") {
+            const body = await readBody(req);
+            const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+            if (!apiKey) return sendJson(res, 400, { error: "apiKey required" });
+            secrets.providers[providerId] = { apiKey };
+            await saveConfig();
+            return sendJson(res, 200, publicConfig());
+          }
+          if (req.method === "DELETE") {
+            delete secrets.providers[providerId];
+            await saveConfig();
+            return sendJson(res, 200, publicConfig());
+          }
+        }
+        if (req.method === "PATCH") {
+          const body = await readBody(req);
+          const patch = body.provider && typeof body.provider === "object" ? body.provider : body;
+          ({ config } = upsertProvider(config, { ...existing, ...patch, id: providerId }, providerId));
+          await saveConfig();
+          return sendJson(res, 200, publicConfig());
+        }
+        if (req.method === "DELETE") {
+          try {
+            config = removeProvider(config, providerId);
+          } catch (error) {
+            return sendJson(res, 409, { error: error.message });
+          }
+          delete secrets.providers[providerId];
           await saveConfig();
           return sendJson(res, 200, publicConfig());
         }
@@ -220,7 +365,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache, no-transform",
           Connection: "keep-alive",
-          ...CORS,
+          ...(res.kyreiCors ?? {}),
         });
         res.write(`data: ${JSON.stringify({ type: "gateway.ready" })}\n\n`);
         if (!subscribers.has(sessionId)) subscribers.set(sessionId, new Set());
@@ -305,7 +450,22 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
           const mod = await getEngine();
           models = typeof mod.listModels === "function" ? mod.listModels() : [];
         } catch { /* engine bundle unavailable — degrade to manual entry */ }
-        return sendJson(res, 200, { models, current: config.model, provider: config.provider });
+        const configuredModels = config.providers.flatMap((provider) => provider.models.map((model) => ({
+          id: model.id,
+          name: model.name ?? model.id,
+          provider: provider.id,
+          providerName: provider.name,
+          baseURL: provider.baseURL,
+          limits: { contextWindow: 32_000, maxOutput: 4_096 },
+          cost: { inputPerM: 0, outputPerM: 0 },
+          caps: { tools: true, reasoning: false, streaming: true, vision: false },
+        })));
+        return sendJson(res, 200, {
+          models: configuredModels.length ? configuredModels : models,
+          current: config.activeModelId,
+          provider: config.activeProviderId,
+          activeProviderId: config.activeProviderId,
+        });
       }
 
       // ── Path autocompletion for @-mentions (jail-safe) ───────────────
@@ -349,12 +509,12 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       if (error.code === "EADDRINUSE" && server.listening === false) {
         server.removeListener("error", onError);
         server.once("error", reject);
-        server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, close: () => server.close() }));
+        server.listen(0, "127.0.0.1", () => resolve({ port: server.address().port, token: gatewayToken, close: () => server.close() }));
         return;
       }
       reject(error);
     };
     server.once("error", onError);
-    server.listen(preferredPort, "127.0.0.1", () => resolve({ port: server.address().port, close: () => server.close() }));
+    server.listen(preferredPort, "127.0.0.1", () => resolve({ port: server.address().port, token: gatewayToken, close: () => server.close() }));
   });
 }
