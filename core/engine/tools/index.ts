@@ -140,7 +140,7 @@ export function buildTools(
     return entries.length ? entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).sort().join("\n") : "(пусто)";
   };
   const execReadFile = async (path: string): Promise<string> =>
-    clip(await readFile(safePath(workspace, path), "utf8"), cfg.maxToolOutput);
+    clip(await readFile(safePath(workspace, path), "utf8"), cfg.fileReadMaxChars);
   const execGrep = async (a: { query: string; path?: string; glob?: string; maxResults?: number }): Promise<string> => {
     const base = safePath(workspace, a.path || ".");
     const args = ["--json", "--line-number", "-m", String(a.maxResults ?? 100), "--smart-case"];

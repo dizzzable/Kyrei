@@ -9,7 +9,7 @@
 import { streamText } from "ai";
 import { join } from "node:path";
 import type { RunKyreiChatOpts, RunKyreiChatResult, MessagePart } from "../types.js";
-import { buildModel } from "../provider/build.js";
+import { buildModel, buildProviderOptions } from "../provider/build.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { KeyPool } from "../provider/keys.js";
@@ -36,13 +36,14 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const ccr = toolsEnabled ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
   let tools = toolsEnabled ? buildTools(opts.workspace!, cfg, toolMeta, opts.abortSignal) : undefined;
   if (tools && ccr) tools = { ...tools, retrieve: makeRetrieveTool(ccr) };
-  const system = buildSystemPrompt({ workspace: opts.workspace, hasTools: Boolean(tools) });
+  const system = buildSystemPrompt({ workspace: opts.workspace, hasTools: Boolean(tools), personality: cfg.personality });
 
   // Candidate models: primary (from settings) + configured fallback chain.
   const primary = resolveModel(opts.model, { baseURL: opts.providerBase, id: opts.model });
   const entries = [primary, ...cfg.fallbackChain.map((id) => resolveModel(id))];
   const keyPool = new KeyPool({ keys: [opts.apiKey] });
   const prepareStep = ccr ? makePrepareStep(cfg, primary.id, primary.limits.contextWindow, ccr) : undefined;
+  const providerOptions = buildProviderOptions(opts.modelParams);
 
   const start = (ci: number, useTools: boolean): StreamLike => {
     const entry = entries[ci] ?? primary;
@@ -58,8 +59,9 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       messages: opts.messages,
       ...(useTools && tools ? { tools, stopWhen: buildStopWhen(cfg) } : {}),
       ...(useTools && tools && prepareStep ? { prepareStep } : {}),
+      ...(providerOptions ? { providerOptions } : {}),
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
-      maxRetries: 2,
+      maxRetries: cfg.apiMaxRetries,
       onError: ({ error }: { error: unknown }) => {
         console.error("[kyrei v2] stream error:", error);
       },

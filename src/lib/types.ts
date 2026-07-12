@@ -20,6 +20,8 @@ export interface ToolPart {
   error?: string;
   running: boolean;
   durationS?: number;
+  /** Live progress text streamed while the tool runs (tool.progress). */
+  progress?: string;
 }
 
 export type MessagePart = TextPart | ReasoningPart | ToolPart;
@@ -36,6 +38,8 @@ export interface SessionInfo {
   title?: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Runtime turn status from the gateway (absent = idle). */
+  status?: "idle" | "working";
 }
 
 export interface AppConfig {
@@ -43,6 +47,8 @@ export interface AppConfig {
   model: string;
   workspace: string;
   hasKey: boolean;
+  /** Non-secret engine tuning (permissions/roles/budgets); shown in Advanced. */
+  engine?: Record<string, unknown>;
 }
 
 /** Event frames streamed from the gateway (Server-Sent Events). */

@@ -21,7 +21,4 @@ jobs:
       # Native module (better-sqlite3) prebuilt is fetched by npm; rebuild if needed.
       - run: npm rebuild better-sqlite3
         continue-on-error: true
-      - run: npm run typecheck:engine
-      - run: npm run build:engine
-      - run: npm run check:js
-      - run: npm run test
+      - run: npm run gate

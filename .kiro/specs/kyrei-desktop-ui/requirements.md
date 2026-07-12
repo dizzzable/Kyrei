@@ -58,11 +58,11 @@ Kyrei Desktop UI/UX и настройки.
 
 #### Acceptance Criteria
 1. THE SYSTEM SHALL поддерживать прикрепление контекста через кнопку «+»: файлы, папки, изображения, вставка картинки из буфера, URL, готовые prompt-сниппеты; прикреплённое отображается карточками-чипами с превью и возможностью удаления.
-2. THE SYSTEM SHALL поддерживать **@-меншены** (@file/@folder/@url/@image) с автодополнением из рабочей папки (через gateway) и **slash-команды** из реестра с popover-подсказкой и двухшаговым выбором аргумента.
+2. THE SYSTEM SHALL поддерживать **@-меншены** (@file/@folder/@url/@image; опц. @tool/@git) с автодополнением из рабочей папки через gateway `POST /api/complete-path` (обязательно jail-safe через движковый `safePath`) и **slash-команды** из реестра с popover-подсказкой и двухшаговым выбором аргумента.
 3. WHEN идёт генерация и пользователь отправляет новое сообщение THE SYSTEM SHALL ставить его в **очередь** (per-session, с редактированием/удалением/переупорядочиванием и авто-дренажом по завершении хода).
 4. THE SYSTEM SHALL хранить **черновик per-session** (текст в localStorage, вложения в памяти) и восстанавливать при возврате к сессии.
 5. THE SYSTEM SHALL поддерживать навигацию по **истории отправленных сообщений** стрелками ↑/↓ в пустом композере.
-6. THE SYSTEM SHALL поддерживать **голос**: диктовку (STT → вставка в композер) и озвучивание ответов (Auto-speak TTS) с очисткой текста от кода/ссылок/эмодзи перед синтезом. WHERE голосовой бэкенд недоступен THE SYSTEM SHALL скрывать/дизейблить контролы без ошибок.
+6. THE SYSTEM SHALL поддерживать **голос**: диктовку (STT → вставка в композер) и озвучивание ответов (Auto-speak TTS) с очисткой текста от кода/ссылок/эмодзи перед синтезом. THE SYSTEM SHALL использовать браузерный **Web Speech API** (`webkitSpeechRecognition` + `speechSynthesis`) — явно разрешён владельцем проекта (распознавание может задействовать облачный сервис платформы; это принятый компромис). Голос **выключен по умолчанию**. WHERE голосовой бэкенд/поддержка недоступны THE SYSTEM SHALL скрывать/дизейблить контролы без ошибок.
 7. THE SYSTEM SHALL отправлять по Enter, переносить строку по Shift+Enter, поддерживать IME (не отправлять во время композиции), останавливать генерацию по Esc/кнопке Stop.
 8. (Опц.) THE SYSTEM SHALL поддерживать «steer» (Cmd/Ctrl+Enter — подрулить текущим запуском) и «popout» (плавающий композер).
 
@@ -71,11 +71,12 @@ Kyrei Desktop UI/UX и настройки.
 **User Story:** Как пользователь, я хочу быстро переключать модель и её режим прямо из композера.
 
 #### Acceptance Criteria
-1. THE SYSTEM SHALL показывать в композере пилюлю модели с меткой вида «Модель · Max» (имя + effort/fast).
-2. THE SYSTEM SHALL открывать меню выбора модели со списком провайдеров/моделей из каталога gateway (`model.options` или REST-эквивалент), с поиском.
-3. THE SYSTEM SHALL позволять на модель настраивать **Thinking** (вкл/выкл), **Fast** (если поддерживается), **Effort** (minimal/low/medium/high/xhigh=Max) и запоминать пресет per `provider::model` (localStorage).
+1. THE SYSTEM SHALL показывать в композере пилюлю модели с меткой вида «Модель · Max» (имя + effort/fast). Примечание: effort/fast/thinking хранятся как per-`provider::model` UI-пресет (localStorage); **до появления проводки `RunKyreiChatOpts.modelParams` в движок эти значения не влияют на вызов модели** (косметика) — проводка в движок описана как отдельная задача (Фаза 3).
+2. THE SYSTEM SHALL открывать меню выбора модели со списком из `GET /api/models` (аддитивный эндпоинт, отдающий известный движку реестр `provider/registry.ts` + текущую модель) с поиском. Каталог отражает **известные** движку модели, не произвольные модели провайдера.
+3. THE SYSTEM SHALL позволять на модель настраивать **Thinking** (вкл/выкл), **Fast** (если поддерживается), **Effort** (minimal/low/medium/high/xhigh=Max) и запоминать пресет per `provider::model` (localStorage) как UI-метку. WHERE движок/gateway поддерживает reasoning/fast per-session THE SYSTEM SHALL применять пресет к активной сессии; иначе пресет остаётся UI-меткой без движкового эффекта.
 4. THE SYSTEM SHALL поддерживать **видимость моделей** (какие показывать в списке) с дефолтом «топ-N на провайдера» и кастомизацией.
-5. WHERE каталог моделей недоступен THE SYSTEM SHALL деградировать до ручного ввода имени модели без падения.
+5. WHERE каталог моделей недоступен или пуст THE SYSTEM SHALL деградировать до ручного ввода имени модели без падения.
+6. THE SYSTEM SHALL: новые gateway-эндпоинты (`GET /api/models`, `POST /api/complete-path`) — local-only, без внешних вызовов; автодополнение путей ограничено рабочей папкой через движковый `safePath` (не слабой проверкой `startsWith('..')`).
 
 ### Requirement 5: Рендеринг сообщений
 
@@ -87,7 +88,7 @@ Kyrei Desktop UI/UX и настройки.
 3. THE SYSTEM SHALL рендерить **диффы** в стиле Cursor: tint add/remove + 2px гуттер, подсветка по языку, номера строк опционально, счётчик `+N −M`.
 4. THE SYSTEM SHALL рендерить **reasoning** в сворачиваемом блоке «Размышление» с таймером/шиммером во время генерации и авто-сворачиванием по завершении; пустой reasoning не показывать.
 5. THE SYSTEM SHALL плавно раскрывать стриминг-текст (smooth reveal) и НЕ блокировать ввод/скролл во время стриминга (deferred rendering).
-6. THE SYSTEM SHALL показывать статусы: загрузка ответа, «залипание» стрима (>2с тишины), ожидание ввода/одобрения.
+6. THE SYSTEM SHALL показывать статусы: загрузка ответа, «залипание» стрима (>2с тишины), ожидание ввода/одобрения. Примечание: событие `approval.request` определено в контракте движка, но пока **не эмитится** (approval-flow — non-goal текущих волн); до его реализации состояние «нужен ввод» не показывается.
 7. THE SYSTEM SHALL показывать действия над сообщением ассистента (копировать, повторить, читать вслух) по наведению, не сдвигая layout.
 
 ### Requirement 6: Навигация и управление сессиями
@@ -97,8 +98,8 @@ Kyrei Desktop UI/UX и настройки.
 #### Acceptance Criteria
 1. THE SYSTEM SHALL показывать левый сайдбар с секциями: **New session**, список сессий, **Pinned** (закреплённые), с иконочным rail-навигатором вверху.
 2. THE SYSTEM SHALL поддерживать **поиск** по сессиям (локальный по title/preview/id; серверный FTS — опционально).
-3. THE SYSTEM SHALL поддерживать меню действий строки: переименовать, удалить, закрепить/открепить, экспортировать в JSON, копировать id.
-4. THE SYSTEM SHALL показывать индикаторы состояния строки: «работает» (акцентный пульс) и «нужен ввод» (amber), с приоритетом «нужен ввод».
+3. THE SYSTEM SHALL поддерживать меню действий строки: переименовать, удалить, **архивировать**, закрепить/открепить, экспортировать в JSON, копировать id. (Опц.) ветвление сессии (branch).
+4. THE SYSTEM SHALL показывать индикаторы состояния строки: «работает» (акцентный пульс, из per-session runtime-статуса gateway) и «нужен ввод» (amber, зависит от approval-flow — см. R5.6), с приоритетом «нужен ввод».
 5. THE SYSTEM SHALL сохранять список сессий консистентным при рефетче (не терять активную/закреплённую/только-что-завершённую).
 6. THE SYSTEM SHALL поддерживать **Command Palette** (Cmd/Ctrl+K) с ранжированным поиском по действиям (новый чат, настройки, темы, переход к сессии) и **Session switcher** (Ctrl+Tab).
 
@@ -108,18 +109,30 @@ Kyrei Desktop UI/UX и настройки.
 
 #### Acceptance Criteria
 1. THE SYSTEM SHALL предоставлять двухпанельный settings-overlay (слева навигация по разделам, справа контент) с deep-link по разделу и авто-сохранением (debounce).
-2. THE SYSTEM SHALL предоставлять действия Экспорт / Импорт / Сброс конфигурации (JSON).
-3. THE SYSTEM SHALL рендерить настройки **схема-driven** (`ConfigField`: boolean→Switch, enum→Select, number→Input, list→CSV, text→Input/Textarea) из описания разделов с лейблами/описаниями.
-4. THE SYSTEM SHALL включать разделы: **Model** (провайдер/модель/effort/fast, fallback), **Chat** (личность, показ reasoning), **Appearance** (тема/режим/язык/масштаб/прозрачность/tool-view), **Workspace** (рабочая папка, лимиты), **Safety** (режим одобрений, redact secrets, allowlist), **Memory & Context** (память, компакция), **Voice** (TTS/STT провайдеры и поля), **Advanced** (движковые лимиты: maxSteps/timeouts/sandbox/budgets — маппятся на `EngineConfig` через gateway `/api/config` `engine`), а также **Providers/Keys** (API-ключи по провайдерам), **Sessions** (архив/дефолтная папка), **About** (версия/обновления).
+2. THE SYSTEM SHALL предоставлять действия Экспорт / Импорт / Сброс конфигурации (JSON). THE SYSTEM SHALL **редактировать секреты** при экспорте (через движковый `redact`) и НЕ включать `apiKey` и абсолютные пути в экспорт конфига/сессии.
+3. THE SYSTEM SHALL рендерить настройки **схема-driven** (`ConfigField`: boolean→Switch, enum→Select, number→Input, list→CSV, object→JSON-textarea, text→Input/Textarea) из описания разделов с лейблами/описаниями; enum-варианты задаются оверрайдами.
+4. THE SYSTEM SHALL включать разделы:
+   - **Model**: провайдер/модель/Apply, профильные effort/fast, `model_context_length`, `fallback_providers`; (опц.) auxiliary-модели по задачам и MoA-пресеты.
+   - **Chat**: личность (набор встроенных), `timezone`, показ reasoning, `image_input_mode`.
+   - **Appearance**: тема (грид+режим), язык, UI-масштаб, прозрачность, tool-view (Product/Technical), embeds (Ask/Always/Off).
+   - **Workspace**: рабочая папка, `code_execution.mode`, `persistent_shell`, `env_passthrough`, `file_read_max_chars`.
+   - **Safety**: `approvals.mode` (manual/smart/off), `approvals.timeout`, `approvals.mcp_reload_confirm`, `command_allowlist`, `security.redact_secrets`, `security.allow_private_urls`, `browser.allow_private_urls`, `browser.auto_local_for_private_urls`, `checkpoints.enabled`.
+   - **Memory & Context**: память вкл/профиль/лимиты/`provider`, `context.engine`, `compression.{enabled,threshold,target_ratio,protect_last_n}`.
+   - **Voice**: `tts.provider`+поля, `stt.provider`+поля, `auto_tts`, `record_key`, `max_recording` (локальные бэкенды, off по умолчанию — R3.6).
+   - **Advanced** (маппится на `EngineConfig` через gateway `engine`, fail-open): `maxSteps`, `commandTimeoutMs`, `maxToolOutput`, `contextBudget.{softPct,hardPct}`, `permissions.{terminal,review,rules}`, `providerRoles`, `fallbackChain`, `sandbox`.
+   - **Providers/Keys**: API-ключи по провайдерам (под-вкладки Accounts/Keys, prefix-группировка в карточки).
+   - **Sessions** (архив/дефолт-папка), **About** (версия/обновления), **Gateway** (Local/Cloud/Remote — опц.).
+   Примечание: только поля из `EngineConfig` реально влияют на движок; поля вроде `approvals.*`/`memory.*`/`compression.*`/`terminal.*` показываются, только если движок/gateway их поддерживает, иначе помечаются как «планируется» и не отправляются.
 5. WHERE значение настройки задаётся из UI THE SYSTEM SHALL проводить движковые поля в `EngineConfig` через gateway (уже поддержано `resolveEngineConfig`, fail-open).
 6. THE SYSTEM SHALL валидировать пользовательский ввод и никогда не терять существующий валидный конфиг при ошибке (fail-open).
+7. THE SYSTEM SHALL держать `apiKey` **write-only**: gateway отдаёт только `hasKey` (не значение); ключ не попадает в localStorage рендерера, экспорт, логи. THE SYSTEM SHALL НЕ вводить телеметрию/аналитику и никаких внешних сетевых вызовов, кроме сконфигурированного провайдера. WHERE есть проверка обновлений (About) THE SYSTEM SHALL делать её только по явному действию пользователя (opt-in), без фоновых запросов.
 
 ### Requirement 8: Настройки уведомлений и звука
 
 **User Story:** Как пользователь, я хочу управлять уведомлениями и звуками завершения.
 
 #### Acceptance Criteria
-1. THE SYSTEM SHALL предоставлять мастер-тумблер уведомлений + пер-вид тумблеры (завершение хода, ошибка, нужен ввод, фоновая задача).
+1. THE SYSTEM SHALL предоставлять мастер-тумблер уведомлений + пер-вид тумблеры (5 видов: завершение хода, ошибка, нужен ввод, **одобрение** (approval), фоновая задача).
 2. THE SYSTEM SHALL предоставлять выбор звука завершения из набора с превью и кнопкой «тест».
 3. WHERE окно свёрнуто/не в фокусе THE SYSTEM SHALL показывать нативное уведомление о завершении хода (если включено).
 
@@ -155,6 +168,21 @@ Kyrei Desktop UI/UX и настройки.
 **User Story:** Как разработчик, я хочу, чтобы UI-порт был проверяемым и не регрессировал.
 
 #### Acceptance Criteria
-1. WHEN завершается волна задач THE SYSTEM SHALL собирать рендерер (`npm run build`) без ошибок и проходить существующий `npm run gate` (движок не затронут).
-2. THE SYSTEM SHALL иметь unit-тесты (vitest) на чистую логику UI: chat-messages сборка, session-search, tool-result-summary, diff-парсинг, model-status-label, composer-queue, keybind-реестр.
+1. WHEN завершается волна задач THE SYSTEM SHALL собирать рендерер (`npm run build`) без ошибок, **проходить типизацию рендерера** (`tsc --noEmit` по `src/**`, добавить как `typecheck:renderer` в `npm run gate`) и проходить существующий `npm run gate` (движок не затронут).
+2. THE SYSTEM SHALL иметь unit-тесты (vitest) на чистую логику UI: chat-messages сборка, session-search, tool-result-summary, diff-парсинг, model-status-label, composer-queue, keybind-реестр, sanitizeTextForSpeech, fail-open парсер клиентских настроек.
 3. THE SYSTEM SHALL не вводить регрессий доступности/производительности, подтверждаемых ручным smoke-прогоном ключевых сценариев (чат, tools, диффы, настройки, темы).
+4. WHEN пользователь отменяет ход THE SYSTEM SHALL получать `interrupted` (не `error`) и не показывать сообщение об ошибке (требует правки gateway: распознавать AbortError → эмитить `interrupted`).
+
+---
+
+## Non-goals (вне scope этой спецификации)
+
+Явно НЕ реализуем сейчас (чтобы не раздувать scope и не завязываться на отсутствующую бэкенд-инфраструктуру):
+- **Профили** (мульти-HERMES_HOME), маршруты Skills/Messaging/Artifacts/Cron/Agents-монитор/Pet, Command Center (System/Usage/Maintenance) — зависят от расширения бэкенда.
+- **approval-flow** (in-chat Run/Reject, событие `approval.request`) — пока движок его не эмитит; контракт зарезервирован, UI-состояние «нужен ввод» неактивно.
+- **subagent/todo/compaction прогресс** в UI — движок наружу не эмитит; статус-стек над композером — опционально, после появления событий.
+- **Правый rail** (preview/console/review-панель), timeline-рейка, generated-images-галерея, haptics, onboarding/OAuth-флоу.
+- **Голосовые эндпоинты** (`/api/tts`, `/api/stt`) — фича off по умолчанию; включается только с локальным бэкендом.
+- **VS Code Marketplace live-search тем** — только локальный импорт JSON-файла темы (offline); сетевой поиск — non-goal.
+
+Эти пункты могут стать отдельными спеками позже. Данная спецификация фокусируется на визуале, композере, рендеринге, сессиях и настройках, работающих с текущим движком/gateway.

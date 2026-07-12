@@ -71,6 +71,11 @@ export function registerModel(entry: ModelEntry): void {
   REGISTRY[entry.id] = entry;
 }
 
+/** Enumerate all known models (for the gateway `/api/models` catalog). */
+export function listModels(): ModelEntry[] {
+  return Object.values(REGISTRY);
+}
+
 export function isLocalBaseURL(baseURL: string): boolean {
   return /localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]/.test(baseURL);
 }

@@ -46,9 +46,28 @@
   --color-danger: var(--k-danger);
   --color-warning: var(--k-warning);
 
+  /* shadcn-compatible aliases (bg-card, bg-popover, text-muted-foreground,
+     bg-accent, border-input, ring, bg-destructive, bg-sidebar, …) — mapped onto
+     the same mono seeds so shadcn utilities and our own names agree. */
+  --color-background: var(--k-bg);
+  --color-card: var(--k-surface);
+  --color-card-foreground: var(--k-foreground);
+  --color-popover: var(--k-elevated);
+  --color-popover-foreground: var(--k-foreground);
+  --color-primary-foreground: var(--k-bg);
+  --color-muted-foreground: var(--ui-text-tertiary);
+  --color-accent: var(--ui-fill-secondary);
+  --color-accent-foreground: var(--k-foreground);
+  --color-destructive: var(--k-danger);
+  --color-input: var(--k-border);
+  --color-ring: var(--ui-focus-ring);
+  --color-sidebar: var(--k-surface);
+  --color-sidebar-foreground: var(--k-foreground);
+  --color-sidebar-border: var(--k-border-soft);
+
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --radius: 0.75rem;
+  --radius: 0.625rem;
 }
 
 /*
@@ -57,22 +76,30 @@
  * a consistent text/stroke hierarchy for free.
  */
 :root {
-  /* Text hierarchy by mixing ink toward the background. */
-  --ui-text-primary: var(--k-foreground);
-  --ui-text-secondary: color-mix(in srgb, var(--k-foreground) 72%, var(--k-bg));
-  --ui-text-tertiary: color-mix(in srgb, var(--k-foreground) 50%, var(--k-bg));
-  --ui-text-quaternary: color-mix(in srgb, var(--k-foreground) 34%, var(--k-bg));
+  /* Text hierarchy as alpha over the ink color, so text reads correctly on any
+     surface (Hermes approach). */
+  --ui-text-primary: color-mix(in srgb, var(--k-foreground) 96%, transparent);
+  --ui-text-secondary: color-mix(in srgb, var(--k-foreground) 68%, transparent);
+  --ui-text-tertiary: color-mix(in srgb, var(--k-foreground) 46%, transparent);
+  --ui-text-quaternary: color-mix(in srgb, var(--k-foreground) 30%, transparent);
 
   /* Hairline strokes. */
   --ui-stroke-primary: var(--k-border);
-  --ui-stroke-secondary: color-mix(in srgb, var(--k-border) 70%, var(--k-bg));
-  --ui-stroke-tertiary: color-mix(in srgb, var(--k-border) 45%, var(--k-bg));
-  --stroke-nous: color-mix(in srgb, var(--k-foreground) 8%, transparent);
+  --ui-stroke-secondary: color-mix(in srgb, var(--k-border) 68%, transparent);
+  --ui-stroke-tertiary: color-mix(in srgb, var(--k-border) 42%, transparent);
+  --stroke-nous: color-mix(in srgb, var(--k-foreground) 7%, transparent);
+
+  /* Subtle accent+ink fills for buttons/rows/chips (Hermes --ui-bg-* tiers). */
+  --ui-fill-primary: color-mix(in srgb, var(--k-primary) 16%, color-mix(in srgb, var(--k-foreground) 8%, transparent));
+  --ui-fill-secondary: color-mix(in srgb, var(--k-foreground) 6%, transparent);
+  --ui-fill-tertiary: color-mix(in srgb, var(--k-foreground) 4%, transparent);
 
   /* Row / control interaction surfaces. */
   --ui-row-hover: color-mix(in srgb, var(--k-foreground) 5%, transparent);
   --ui-row-active: color-mix(in srgb, var(--k-foreground) 8%, transparent);
   --ui-control-hover: color-mix(in srgb, var(--k-foreground) 7%, transparent);
+  --ui-composer-focus: color-mix(in srgb, var(--k-foreground) 40%, transparent);
+  --ui-focus-ring: color-mix(in srgb, var(--k-foreground) 45%, transparent);
 
   /* Derived secondary/muted/border-soft (themes set only the core seeds). */
   --k-secondary: var(--ui-text-secondary);
@@ -82,9 +109,10 @@
   /* Nous-style multi-layer elevation for borderless overlays/cards. */
   --shadow-nous:
     0 0 0 0.5px var(--stroke-nous),
-    0 1px 2px color-mix(in srgb, #000 22%, transparent),
-    0 8px 24px color-mix(in srgb, #000 24%, transparent);
-  --shadow-sm: 0 1px 2px color-mix(in srgb, #000 18%, transparent);
+    0 0.125rem 0.375rem -0.125rem color-mix(in srgb, #000 30%, transparent),
+    0 0.75rem 1.5rem -0.5rem color-mix(in srgb, #000 38%, transparent),
+    0 2rem 3rem -1.5rem color-mix(in srgb, #000 30%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #000 16%, transparent);
 
   /* Conversation typography scale. */
   --conversation-text-size: 0.8125rem;
@@ -96,20 +124,22 @@
 /* ── Theme seeds (skin) — set ONLY the core palette; tiers derive above ── */
 :root, [data-theme="dark"] {
   color-scheme: dark;
-  --k-bg: #0d0f13; --k-surface: #14171d; --k-elevated: #1a1e26;
-  --k-border: #2a3039;
-  --k-foreground: #e6e8ec;
-  --k-primary: #5b7cfa; --k-primary-strong: #4f6ef7; --k-user: #222a44;
-  --k-success: #35c08a; --k-danger: #ef5f6b; --k-warning: #e0a94b;
+  /* shadcn "mono" — pure black surfaces, white ink, zero hue (no blue). */
+  --k-bg: #0b0b0a; --k-surface: #11110f; --k-elevated: #1b1a17;
+  --k-border: color-mix(in srgb, #e9e4d8 11%, transparent);
+  --k-foreground: #f2efe7;
+  --k-primary: #d8a657; --k-primary-strong: #e6b76b; --k-user: #1c1b18;
+  --k-success: #77ad88; --k-danger: #df6b68; --k-warning: #d8a657;
 }
 
 [data-theme="light"] {
   color-scheme: light;
-  --k-bg: #f6f7f9; --k-surface: #ffffff; --k-elevated: #eef0f4;
-  --k-border: #d8dce3;
-  --k-foreground: #1a1d26;
-  --k-primary: #4f6ef7; --k-primary-strong: #3d5de6; --k-user: #e5eafe;
-  --k-success: #12996a; --k-danger: #d93b48; --k-warning: #b7791f;
+  /* shadcn "mono" light — near-white surfaces, black ink. */
+  --k-bg: #fcfcfc; --k-surface: #ffffff; --k-elevated: #ffffff;
+  --k-border: color-mix(in srgb, #000000 12%, transparent);
+  --k-foreground: #000000;
+  --k-primary: #000000; --k-primary-strong: #000000; --k-user: #f0f0f0;
+  --k-success: #16916b; --k-danger: #d5343a; --k-warning: #b7791f;
 }
 
 [data-theme="midnight"] {
@@ -164,9 +194,50 @@ body {
   background: var(--k-bg);
   color: var(--k-foreground);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: 13px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   overflow: hidden;
+}
+
+button, [role="button"] { cursor: pointer; }
+kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08rem 0.28rem; font-family: var(--font-mono); font-size: 0.85em; color: var(--k-secondary); }
+
+.app-shell { background: var(--k-bg); }
+.titlebar, .statusbar { background: var(--k-surface); }
+.sidebar-panel { background: color-mix(in srgb, var(--k-surface) 96%, var(--k-bg)); }
+.conversation-shell { position: relative; background: var(--k-bg); }
+.conversation-shell::before { content: ""; pointer-events: none; position: absolute; inset: 0; opacity: 0.55; background: linear-gradient(180deg, color-mix(in srgb, var(--k-surface) 42%, transparent), transparent 10rem); }
+.conversation-scroll, .composer-area { position: relative; z-index: 1; }
+.composer-area { background: linear-gradient(to top, var(--k-bg) 50%, transparent); }
+.composer-card { background: var(--k-surface); box-shadow: inset 0 1px color-mix(in srgb, #fff 3%, transparent); }
+.composer-card:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--k-primary) 14%, transparent); }
+.composer-tool, .shell-button { border-radius: 7px; }
+.send-button { box-shadow: none; }
+.user-message { background: var(--k-user); box-shadow: inset 0 1px color-mix(in srgb, #fff 3%, transparent); }
+.assistant-message { border-left: 1px solid var(--k-border-soft); }
+.session-row { transition: background-color 120ms ease, color 120ms ease, transform 120ms ease; }
+.session-row:hover { transform: translateX(1px); }
+.new-session-button { background: color-mix(in srgb, var(--k-foreground) 5%, transparent); border: 1px solid var(--k-border-soft); color: var(--k-foreground); }
+.new-session-button:hover { background: color-mix(in srgb, var(--k-foreground) 9%, transparent); border-color: var(--k-border); }
+.online-pill { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid var(--k-border-soft); border-radius: 999px; padding: 0.15rem 0.4rem; font: 500 8px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--k-muted); }
+.online-pill span { width: 5px; height: 5px; border-radius: 50%; background: var(--k-success); box-shadow: 0 0 7px var(--k-success); }
+.model-status { border: 1px solid var(--k-border-soft); border-radius: 999px; padding: 0.2rem 0.5rem; background: color-mix(in srgb, var(--k-bg) 45%, transparent); }
+.kyrei-mark { position: relative; display: grid; flex: none; place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--k-primary) 26%, var(--k-border)); border-radius: 7px; background: color-mix(in srgb, var(--k-primary) 9%, var(--k-surface)); color: var(--k-primary); box-shadow: none; font-family: var(--font-mono); font-weight: 700; }
+.kyrei-mark::after { content: ""; position: absolute; width: 140%; height: 1px; background: currentColor; opacity: 0.45; transform: rotate(-48deg); }
+.kyrei-mark-sm { width: 21px; height: 21px; border-radius: 6px; font-size: 10px; }
+.kyrei-mark-md { width: 30px; height: 30px; font-size: 12px; }
+.kyrei-mark-lg { width: 44px; height: 44px; border-radius: 12px; font-size: 17px; }
+.eyebrow { font: 600 9px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.16em; color: var(--k-primary); }
+.starter-card { min-height: 7.75rem; border: 1px solid var(--k-border-soft); border-radius: 8px; padding: 0.85rem; background: color-mix(in srgb, var(--k-surface) 68%, transparent); transition: border-color 140ms ease, background 140ms ease; }
+.starter-card:hover { border-color: color-mix(in srgb, var(--k-primary) 26%, var(--k-border)); background: var(--k-surface); }
+.starter-icon { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border-radius: 7px; color: var(--k-primary); background: color-mix(in srgb, var(--k-primary) 10%, transparent); }
+
+@media (max-width: 760px) {
+  .empty-state { min-height: auto; padding-top: 12vh; padding-bottom: 2rem; }
+  .conversation-shell::before { background-size: 32px 32px; }
+  .model-status { display: none; }
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -191,4 +262,18 @@ body {
   -webkit-background-clip: text; background-clip: text;
   color: transparent;
   animation: shimmer-sweep 2s linear infinite;
+}
+
+/* ── Motion — subtle, fast, GPU-friendly; respects reduced-motion. ─────── */
+@keyframes kyrei-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes kyrei-msg-in { from { opacity: 0; transform: translateY(0.375rem); } to { opacity: 1; transform: none; } }
+@keyframes kyrei-pop-in { from { opacity: 0; transform: scale(0.97) translateY(0.25rem); } to { opacity: 1; transform: none; } }
+
+.msg-in { animation: kyrei-msg-in 0.2s cubic-bezier(0.22, 1, 0.36, 1); }
+.animate-fade { animation: kyrei-fade-in 0.15s ease-out; }
+/* Radix popper-positioned overlays (dropdown/select/submenu/tooltip content). */
+[data-radix-popper-content-wrapper] > * { animation: kyrei-pop-in 0.13s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-in, .animate-fade, [data-radix-popper-content-wrapper] > * { animation: none; }
 }

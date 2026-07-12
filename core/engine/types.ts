@@ -84,6 +84,12 @@ export interface EngineConfig {
   fallbackChain: string[];
   /** Optional OS-sandbox for run_command. "off" (default) | "strict" (best-effort). */
   sandbox: "off" | "strict";
+  /** Provider API retry count on transient failures (agent.api_max_retries). */
+  apiMaxRetries: number;
+  /** Optional assistant personality/style prepended to the system prompt. */
+  personality: string;
+  /** Max characters returned by read_file (separate from tool-output cap). */
+  fileReadMaxChars: number;
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -95,7 +101,20 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   providerRoles: { default: "default", small: "small", plan: "plan" },
   fallbackChain: [],
   sandbox: "off",
+  apiMaxRetries: 2,
+  personality: "",
+  fileReadMaxChars: 250_000,
 };
+
+/** Optional per-turn model tuning (reasoning/effort). UI-driven, opt-in. */
+export interface ModelParams {
+  /** Reasoning effort: "minimal" | "low" | "medium" | "high" (or "off"/unset to disable). */
+  effort?: string;
+  /** Latency-first hint; when set without an explicit effort, implies minimal reasoning. */
+  fast?: boolean;
+  /** Explicit thinking toggle; when true without effort, implies medium. */
+  reasoning?: boolean;
+}
 
 /** Options passed to the engine entry point (v1-compatible + abortSignal). */
 export interface RunKyreiChatOpts {
@@ -107,6 +126,8 @@ export interface RunKyreiChatOpts {
   workspace?: string;
   abortSignal?: AbortSignal;
   config?: Partial<EngineConfig>;
+  /** Reasoning/effort tuning applied to the provider request (opt-in). */
+  modelParams?: ModelParams;
 }
 
 export interface RunKyreiChatResult {

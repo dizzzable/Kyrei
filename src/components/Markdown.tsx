@@ -1,6 +1,9 @@
 import { memo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
+import { memoizedRehypeKatex } from "@/lib/katex-memo";
 import { CodeBlock } from "./CodeBlock";
 
 function extractText(children: unknown): string {
@@ -32,13 +35,9 @@ const components: Components = {
   },
   a({ href, children }) {
     return (
-      <a
-        href={href}
-        onClick={e => { e.preventDefault(); (window as any).kyrei?.openExternal?.(href); }}
-        className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
-      >
+      <span title={href} className="text-primary underline decoration-primary/40 underline-offset-2">
         {children}
-      </a>
+      </span>
     );
   },
   table({ children }) {
@@ -59,7 +58,11 @@ const components: Components = {
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="prose-kyrei space-y-3 leading-relaxed [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:text-base [&_h2]:font-semibold [&_h3]:font-semibold [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-1 [&_blockquote]:border-l-2 [&_blockquote]:border-primary/50 [&_blockquote]:pl-3 [&_blockquote]:text-secondary">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
+        rehypePlugins={[memoizedRehypeKatex]}
+        components={components}
+      >
         {text}
       </ReactMarkdown>
     </div>

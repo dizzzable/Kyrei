@@ -1,2 +1,18 @@
 {
+  "//": "hermes/ is a gitignored reference clone — keep its lint noise out of PROBLEMS and search.",
+  "tailwindCSS.files.exclude": ["**/node_modules/**", "**/.git/**", "**/dist/**", "hermes/**"],
+  "search.exclude": {
+    "hermes/**": true,
+    "dist/**": true,
+    "core/engine/.dist/**": true
+  },
+  "files.watcherExclude": {
+    "**/hermes/**": true,
+    "**/dist/**": true
+  },
+"eslint.workingDirectories": [
+    {
+        "mode": "auto"
+    }
+]
 }

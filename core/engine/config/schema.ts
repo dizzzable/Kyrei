@@ -48,6 +48,9 @@ export const EngineConfigSchema = z.object({
   providerRoles: ProviderRolesSchema.default(DEFAULT_ENGINE_CONFIG.providerRoles),
   fallbackChain: z.array(z.string()).default([]),
   sandbox: z.enum(["off", "strict"]).default(DEFAULT_ENGINE_CONFIG.sandbox),
+  apiMaxRetries: z.number().int().min(0).max(10).default(DEFAULT_ENGINE_CONFIG.apiMaxRetries),
+  personality: z.string().max(4000).default(DEFAULT_ENGINE_CONFIG.personality),
+  fileReadMaxChars: z.number().int().min(1000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.fileReadMaxChars),
 });
 
 export interface ResolveResult {

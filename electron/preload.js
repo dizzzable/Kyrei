@@ -1,7 +1,15 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, webUtils } = require("electron");
 
-// The renderer talks to the local gateway over HTTP/SSE directly; the bridge
-// only exposes what needs the main process (opening external links).
+// The renderer talks to the local gateway over HTTP/SSE directly. The bridge
+// exposes only the sandboxed OS file-path resolver used by native file picking.
 contextBridge.exposeInMainWorld("kyrei", {
-  openExternal: (url) => ipcRenderer.invoke("kyrei:open-external", url),
+  // webUtils.getPathForFile replaces the removed File.path — the sandboxed way
+  // to turn a <input type=file> / drop File into its absolute OS path.
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
 });

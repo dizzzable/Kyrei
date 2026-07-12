@@ -1,38 +1,59 @@
-import { memo } from "react";
+import { memo, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import type { ChatMessage } from "@/lib/types";
+import { messageText } from "@/lib/chat-messages";
+import { IconButton } from "@/components/ui";
 import { Markdown } from "./Markdown";
 import { ToolRow } from "./ToolRow";
+import { ThinkingDisclosure } from "./chat/ThinkingDisclosure";
+
+function CopyAction({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <IconButton
+      tip={copied ? "Скопировано" : "Копировать"}
+      size="icon-xs"
+      onClick={() => {
+        navigator.clipboard.writeText(getText()).catch(() => {});
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    </IconButton>
+  );
+}
 
 export const Message = memo(function Message({ message }: { message: ChatMessage }) {
   if (message.role === "user") {
-    const text = message.parts.map(p => (p.type === "text" ? p.text : "")).join("");
+    const text = message.parts.map((p) => (p.type === "text" ? p.text : "")).join("");
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-user px-4 py-2.5 leading-relaxed text-foreground">
+        <div className="user-message max-w-[82%] whitespace-pre-wrap rounded-[14px] border border-border-soft px-4 py-2.5 text-[13px] leading-relaxed text-foreground">
           {text}
         </div>
       </div>
     );
   }
 
+  const hasText = message.parts.some((p) => p.type === "text" && p.text.trim());
+
+  // Assistant: no avatar bubble — plain prose in a single 12px left gutter
+  // (Hermes --message-text-indent), footer actions right-aligned on hover.
   return (
-    <div className="flex gap-3">
-      <div className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-primary to-primary-strong text-[12px] font-bold text-white">
-        K
-      </div>
-      <div className="min-w-0 flex-1 pt-0.5">
-        {message.parts.map((part, i) => {
-          if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
-          if (part.type === "reasoning")
-            return (
-              <div key={i} className="my-1.5 border-l-2 border-border pl-3 text-[13px] italic text-muted">
-                {part.text}
-              </div>
-            );
-          return <Markdown key={i} text={part.text} />;
-        })}
-        {message.pending && <span className="caret" />}
-      </div>
+    <div className="assistant-message group min-w-0 pl-4">
+      {message.parts.map((part, i) => {
+        if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
+        if (part.type === "reasoning")
+          return <ThinkingDisclosure key={i} text={part.text} pending={message.pending} />;
+        return <Markdown key={i} text={part.text} />;
+      })}
+      {message.pending && <span className="caret" />}
+      {!message.pending && hasText && (
+        <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <CopyAction getText={() => messageText(message.parts)} />
+        </div>
+      )}
     </div>
   );
 });

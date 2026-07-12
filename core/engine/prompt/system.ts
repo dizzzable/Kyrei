@@ -29,6 +29,8 @@ export interface SystemPromptInput {
   hasTools: boolean;
   /** Optional extra project context (AGENTS.md / steering), already assembled. */
   projectContext?: string;
+  /** Optional assistant personality/style, prepended when set. */
+  personality?: string;
 }
 
 const IDENTITY =
@@ -75,9 +77,13 @@ const RESPONSE_STYLE = "Отвечай кратко и по делу, на ру�
  * mode) — matching v1 behavior where a bare model gets no system preamble.
  */
 export function buildSystemPrompt(o: SystemPromptInput): string | undefined {
-  if (!o.hasTools) return undefined;
+  const personality = o.personality?.trim();
+  // Chat mode (no tools): only a personality preamble, if any — else no system
+  // prompt (v1 parity: a bare model gets no preamble).
+  if (!o.hasTools) return personality || undefined;
   const sections = [
     IDENTITY,
+    ...(personality ? [`Стиль общения: ${personality}`] : []),
     `Рабочая папка: ${o.workspace ?? "(не задана)"}.`,
     WORKFLOW,
     TOOL_POLICY,

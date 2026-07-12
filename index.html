@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="./assets/icon.svg" />
     <title>Kyrei</title>
+    <script>
+      // Boot-paint (spec R2.2): apply the saved theme + background BEFORE React
+      // mounts so there is no light/dark flash on startup.
+      (function () {
+        try {
+          var bg = {
+            dark: "#000000", light: "#fcfcfc", midnight: "#0a0b12",
+            ember: "#12100e", mono: "#0e0e0e", cyberpunk: "#0b0714", slate: "#10141a",
+          };
+          var t = localStorage.getItem("kyrei-theme");
+          if (!t || !bg[t]) t = "dark";
+          document.documentElement.dataset.theme = t;
+          document.documentElement.style.background = bg[t];
+        } catch (e) { document.documentElement.dataset.theme = "dark"; }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -22,7 +22,7 @@ import { SessionStore } from "./session-store.js";
  *   PATCH  /api/sessions/:id             -> rename { title }
  *   DELETE /api/sessions/:id             -> remove
  *   GET  /api/events?session=<id>        -> SSE event stream for a session
- *   POST /api/prompt   { session, text } -> run a turn (emits over SSE)
+ *   POST /api/prompt   { session, text, modelParams? } -> run a turn (emits over SSE)
  *   POST /api/cancel   { session }       -> cancel the running turn
  */
 
@@ -60,6 +60,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
   // SSE subscribers + per-session AbortControllers, keyed by session id.
   const subscribers = new Map(); // sessionId -> Set<res>
   const controllers = new Map(); // sessionId -> AbortController
+  const runtimeStatus = new Map(); // sessionId -> "working" (absent = idle)
 
   // The engine is a built ESM bundle, loaded lazily on first prompt.
   let engine = null;
@@ -76,7 +77,16 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
   }
 
   function publicConfig() {
-    return { provider: config.provider, model: config.model, workspace: config.workspace, hasKey: Boolean(config.apiKey) };
+    // `engine` tuning is non-secret (permissions/roles/budgets), so it is safe
+    // to echo back for the settings Advanced pane. The apiKey is never exposed —
+    // only `hasKey`.
+    return {
+      provider: config.provider,
+      model: config.model,
+      workspace: config.workspace,
+      hasKey: Boolean(config.apiKey),
+      engine: config.engine && typeof config.engine === "object" ? config.engine : {},
+    };
   }
 
   function convoFor(sessionId) {
@@ -85,7 +95,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       .map(m => ({ role: m.role, content: m.content }));
   }
 
-  async function runPrompt(sessionId, text) {
+  async function runPrompt(sessionId, text, modelParams) {
     const session = store.getSession(sessionId);
     if (!session) return;
 
@@ -106,17 +116,41 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
 
     const controller = new AbortController();
     controllers.set(sessionId, controller);
-    const mod = await getEngine();
-    const run = mod.runKyreiChat({ ...common, abortSignal: controller.signal, config: config.engine });
+    runtimeStatus.set(sessionId, "working");
 
-    await run.then(({ text, parts }) => {
-      store.appendMessage(sessionId, { role: "assistant", content: text, parts });
-      store.upsertSession({ id: sessionId, updatedAt: new Date().toISOString() });
-    }).catch(err => {
-      emitTo(sessionId, { type: "error", payload: { message: err.message } });
-    }).finally(() => {
+    try {
+      const mod = await getEngine();
+      const run = mod.runKyreiChat({
+        ...common,
+        abortSignal: controller.signal,
+        config: config.engine,
+        ...(modelParams && typeof modelParams === "object" ? { modelParams } : {}),
+      });
+
+      await run.then(({ text, parts }) => {
+        store.appendMessage(sessionId, { role: "assistant", content: text, parts });
+        store.upsertSession({ id: sessionId, updatedAt: new Date().toISOString() });
+      }).catch(err => {
+        // Cancellation is not an error (Property 2): finish the turn as
+        // "interrupted" so the UI clears its pending state without a red banner.
+        const aborted = err?.name === "AbortError" || /abort/i.test(String(err?.message || ""));
+        if (aborted) {
+          emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "interrupted" } });
+        } else {
+          emitTo(sessionId, { type: "error", payload: { message: err?.message || String(err) } });
+          // Always close the turn so the renderer clears its pending bubble.
+          emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "error" } });
+        }
+      });
+    } catch (err) {
+      // A synchronous throw or a failed engine-bundle import must not become an
+      // unhandled rejection (would crash the gateway) — surface it and end turn.
+      emitTo(sessionId, { type: "error", payload: { message: err?.message || String(err) } });
+      emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "error" } });
+    } finally {
       controllers.delete(sessionId);
-    });
+      runtimeStatus.delete(sessionId);
+    }
   }
 
   const server = createServer(async (req, res) => {
@@ -154,7 +188,10 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       }
 
       if (path === "/api/sessions") {
-        if (req.method === "GET") return sendJson(res, 200, { sessions: store.sessions });
+        if (req.method === "GET") {
+          const sessions = store.sessions.map(s => ({ ...s, status: runtimeStatus.get(s.id) || "idle" }));
+          return sendJson(res, 200, { sessions });
+        }
         if (req.method === "POST") {
           const id = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const now = new Date().toISOString();
@@ -199,7 +236,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
         const text = String(body.text || "").trim();
         if (!sessionId || !text) return sendJson(res, 400, { error: "session and text required" });
         sendJson(res, 200, { status: "streaming" });
-        void runPrompt(sessionId, text);
+        void runPrompt(sessionId, text, body.modelParams);
         return;
       }
 
@@ -216,16 +253,23 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       if (req.method === "GET" && path === "/api/files") {
         if (!config.workspace) return sendJson(res, 200, { root: "", path: "", entries: [] });
         const rel = url.searchParams.get("path") || "";
-        const abs = resolve(config.workspace, rel);
-        const within = relative(config.workspace, abs);
-        if (within.startsWith("..")) return sendJson(res, 400, { error: "path outside workspace" });
+        let abs;
+        try {
+          const mod = await getEngine();
+          abs = typeof mod.safePath === "function" ? mod.safePath(config.workspace, rel || ".") : resolve(config.workspace, rel);
+          if (typeof mod.safePath !== "function" && relative(config.workspace, abs).startsWith("..")) {
+            return sendJson(res, 400, { error: "path outside workspace" });
+          }
+        } catch {
+          return sendJson(res, 400, { error: "path outside workspace" });
+        }
         try {
           const dirents = await readdir(abs, { withFileTypes: true });
           const entries = dirents
             .filter(d => !d.name.startsWith(".") || d.name === ".env.example")
             .map(d => ({ name: d.name, path: relative(config.workspace, resolve(abs, d.name)).replaceAll("\\", "/"), dir: d.isDirectory() }))
             .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
-          return sendJson(res, 200, { root: config.workspace, path: within.replaceAll("\\", "/"), entries });
+          return sendJson(res, 200, { root: config.workspace, path: relative(config.workspace, abs).replaceAll("\\", "/"), entries });
         } catch (e) {
           return sendJson(res, 404, { error: e.message });
         }
@@ -234,8 +278,16 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       if (req.method === "GET" && path === "/api/file") {
         if (!config.workspace) return sendJson(res, 400, { error: "no workspace" });
         const rel = url.searchParams.get("path") || "";
-        const abs = resolve(config.workspace, rel);
-        if (relative(config.workspace, abs).startsWith("..")) return sendJson(res, 400, { error: "path outside workspace" });
+        let abs;
+        try {
+          const mod = await getEngine();
+          abs = typeof mod.safePath === "function" ? mod.safePath(config.workspace, rel || ".") : resolve(config.workspace, rel);
+          if (typeof mod.safePath !== "function" && relative(config.workspace, abs).startsWith("..")) {
+            return sendJson(res, 400, { error: "path outside workspace" });
+          }
+        } catch {
+          return sendJson(res, 400, { error: "path outside workspace" });
+        }
         try {
           const info = await stat(abs);
           if (info.size > 500_000) return sendJson(res, 200, { path: rel, content: "[файл слишком большой для предпросмотра]", truncated: true });
@@ -243,6 +295,46 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
           return sendJson(res, 200, { path: rel, content });
         } catch (e) {
           return sendJson(res, 404, { error: e.message });
+        }
+      }
+
+      // ── Model catalog (known engine models) ──────────────────────────
+      if (req.method === "GET" && path === "/api/models") {
+        let models = [];
+        try {
+          const mod = await getEngine();
+          models = typeof mod.listModels === "function" ? mod.listModels() : [];
+        } catch { /* engine bundle unavailable — degrade to manual entry */ }
+        return sendJson(res, 200, { models, current: config.model, provider: config.provider });
+      }
+
+      // ── Path autocompletion for @-mentions (jail-safe) ───────────────
+      if (req.method === "POST" && path === "/api/complete-path") {
+        if (!config.workspace) return sendJson(res, 200, { entries: [] });
+        const body = await readBody(req);
+        const query = String(body.path || "");
+        // Split into a directory part + a name prefix to filter on.
+        const slash = Math.max(query.lastIndexOf("/"), query.lastIndexOf("\\"));
+        const dirRel = slash >= 0 ? query.slice(0, slash) : "";
+        const prefix = (slash >= 0 ? query.slice(slash + 1) : query).toLowerCase();
+        try {
+          const mod = await getEngine();
+          // Validate the directory stays inside the workspace via the engine jail.
+          const absDir = typeof mod.safePath === "function"
+            ? mod.safePath(config.workspace, dirRel || ".")
+            : resolve(config.workspace, dirRel || ".");
+          const dirents = await readdir(absDir, { withFileTypes: true });
+          const entries = dirents
+            .filter(d => d.name.toLowerCase().startsWith(prefix) && (!d.name.startsWith(".") || prefix.startsWith(".")))
+            .slice(0, 50)
+            .map(d => {
+              const rel = (dirRel ? dirRel.replace(/\\/g, "/") + "/" : "") + d.name;
+              return { name: d.name, path: rel, dir: d.isDirectory() };
+            })
+            .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+          return sendJson(res, 200, { entries });
+        } catch {
+          return sendJson(res, 200, { entries: [] });
         }
       }
 

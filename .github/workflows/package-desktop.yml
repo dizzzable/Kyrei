@@ -1,0 +1,54 @@
+name: Package desktop apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            command: dist:win
+            label: Windows
+            artifact: Kyrei-Windows
+            files: dist/app/*.exe
+          - os: macos-latest
+            command: dist:mac
+            label: macOS
+            artifact: Kyrei-macOS
+            files: |
+              dist/app/*.dmg
+              dist/app/*.zip
+          - os: ubuntu-latest
+            command: dist:linux
+            label: Linux
+            artifact: Kyrei-Linux
+            files: |
+              dist/app/*.AppImage
+              dist/app/*.deb
+    runs-on: ${{ matrix.os }}
+    env:
+      # The workflow produces unsigned test/release artifacts. Supply signing
+      # credentials in a release workflow when public distribution is needed.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run ${{ matrix.command }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error

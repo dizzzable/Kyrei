@@ -1,11 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, Menu, dialog } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../core/gateway.js";
-
-ipcMain.handle("kyrei:open-external", (_event, url) => {
-  if (typeof url === "string" && /^https?:\/\//.test(url)) shell.openExternal(url);
-});
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const appIcon = join(here, "..", "assets", "icon.png");
@@ -21,14 +17,26 @@ async function chooseFolder() {
 }
 
 async function createWindow(port) {
+  // macOS keeps its standard application menu; Windows/Linux use our compact
+  // title strip instead of a second menu bar.
+  if (process.platform !== "darwin") Menu.setApplicationMenu(null);
+  const titlebar = process.platform === "darwin"
+    ? { titleBarStyle: "hiddenInset" }
+    : {
+        titleBarStyle: "hidden",
+        titleBarOverlay: { color: "#0e0e0e", symbolColor: "#a4a4a4", height: 34 },
+      };
   windowRef = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 980,
     minHeight: 640,
-    backgroundColor: "#0d0f13",
+    backgroundColor: "#000000",
     title: "Kyrei",
     icon: appIcon,
+    autoHideMenuBar: true,
+    // The in-app 34px title strip is the workspace header on every platform.
+    ...titlebar,
     webPreferences: {
       contextIsolation: true,
       sandbox: true,
@@ -37,10 +45,11 @@ async function createWindow(port) {
     },
   });
 
-  windowRef.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("http://") || url.startsWith("https://")) shell.openExternal(url);
-    return { action: "deny" };
-  });
+  // Kyrei is a closed desktop workspace: it never creates browser tabs,
+  // hands URLs to the OS, or navigates away from its local renderer.
+  windowRef.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  windowRef.webContents.on("will-navigate", (event) => event.preventDefault());
+  windowRef.webContents.on("will-redirect", (event) => event.preventDefault());
 
   const devUrl = process.env.KYREI_RENDERER_URL;
   if (devUrl) {

@@ -3,6 +3,31 @@ import { isRetryable, isRateLimit, isToolUnsupported, isServerError } from "./er
 import { resolve, isLocalBaseURL } from "./registry.js";
 import { KeyPool } from "./keys.js";
 import { openStream, type StreamLike } from "./open-stream.js";
+import { buildProviderOptions } from "./build.js";
+
+describe("buildProviderOptions (reasoning/effort)", () => {
+  it("emits nothing when no params or reasoning disabled", () => {
+    expect(buildProviderOptions(undefined)).toBeUndefined();
+    expect(buildProviderOptions({})).toBeUndefined();
+    expect(buildProviderOptions({ effort: "off" })).toBeUndefined();
+    expect(buildProviderOptions({ effort: "none" })).toBeUndefined();
+  });
+  it("maps explicit effort to reasoningEffort", () => {
+    expect(buildProviderOptions({ effort: "high" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+    expect(buildProviderOptions({ effort: "low" })).toEqual({ kyrei: { reasoningEffort: "low" } });
+  });
+  it("clamps UI-only xhigh/max to high", () => {
+    expect(buildProviderOptions({ effort: "xhigh" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+    expect(buildProviderOptions({ effort: "max" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+  });
+  it("derives from fast/reasoning when no explicit effort", () => {
+    expect(buildProviderOptions({ fast: true })).toEqual({ kyrei: { reasoningEffort: "minimal" } });
+    expect(buildProviderOptions({ reasoning: true })).toEqual({ kyrei: { reasoningEffort: "medium" } });
+  });
+  it("explicit effort wins over fast", () => {
+    expect(buildProviderOptions({ effort: "high", fast: true })).toEqual({ kyrei: { reasoningEffort: "high" } });
+  });
+});
 
 describe("errors classification", () => {
   it("rate limit / server / retryable", () => {
