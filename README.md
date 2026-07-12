@@ -35,6 +35,20 @@ npm run dist       # упаковка через electron-builder
 OpenAI-совместимый эндпоинт (base URL / модель / ключ) в настройках приложения.
 Поддерживается локальный Ollama (`localhost:11434/v1`).
 
+## Установщики (Windows)
+
+```bash
+npm run dist        # сборка рендерера + движка + electron-builder
+```
+
+Результат в `dist/app/`:
+- `Kyrei-Setup-<version>.exe` — NSIS-инсталлятор (выбор папки установки, ярлыки в меню Пуск и на рабочем столе, per-user без прав администратора).
+- `Kyrei-Portable-<version>.exe` — портативная версия без установки.
+
+Нативный `better-sqlite3` пересобирается под текущую версию Electron автоматически;
+бинарь `ripgrep` распаковывается из asar. macOS (`dmg`) и Linux (`AppImage`) — те же
+цели electron-builder (`npm run dist` на соответствующей ОС).
+
 ## Стек
 
 Всё на актуальных версиях, кроме закреплённого AI SDK v5 (`ai@5.0.x`).

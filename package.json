@@ -3,6 +3,11 @@
   "version": "0.2.0",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
+  "author": {
+    "name": "dizzzable",
+    "email": "dizzable.23@gmail.com"
+  },
+  "license": "MIT",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
@@ -66,13 +71,32 @@
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**",
       "**/node_modules/sqlite-vec*/**",
-      "**/node_modules/bindings/**"
+      "**/node_modules/bindings/**",
+      "**/node_modules/@vscode/ripgrep/**"
     ],
     "directories": {
-      "output": "dist/app"
+      "output": "dist/app",
+      "buildResources": "build"
     },
     "win": {
-      "target": "nsis"
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Kyrei",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
     },
     "mac": {
       "target": "dmg"
