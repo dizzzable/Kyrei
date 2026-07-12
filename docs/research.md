@@ -895,3 +895,87 @@
 **Удаление legacy-движка v1 (2026-07-12):** по решению — оставляем только v2. Удалён `core/kyrei-engine.js`; из `core/gateway.js` вырезаны импорт v1, флаг `KYREI_ENGINE`/`useV2`, ветка выбора движка и polling-отмена (`cancelled`-set, `isCancelled`) — остался только v2-путь на `AbortController`. Из CI убрана ось матрицы `engine:[v1,v2]` (теперь только `os`). README обновлён. `check-js` теперь 6 JS-файлов (было 7). Gate зелёный, 112 тестов проходят.
 
 Не интегрированы в живой цикл (модули готовы и протестированы, интеграция — при флипе v2): approval-события через gateway, аудит на каждый вызов, авто-verify после правок, реальный спавн read-роя, компакция активна только при наличии workspace/CCR.
+
+
+---
+
+## 32. Изучение Hermes desktop роем агентов + план переноса в Kyrei (UI/UX и настройки)
+
+Рой из 4 саб-агентов изучил реальный исходник Hermes (`hermes/hermes-agent/apps/desktop/`, React + Electron, ~90 store-слайсов). Цель: довести чат и настройки Kyrei до уровня Hermes. Ниже — конденсат находок + приоритизированный план. **Терминология:** панель на скриншоте (New session / Capabilities / Messaging / Artifacts / PINNED / SESSIONS) — это **левый сайдбар чата** (`app/chat/sidebar/`); "Capabilities" = маршрут Skills.
+
+### 32.1 Стек и архитектура Hermes
+- React + **react-router** + **nanostores** (state, ~90 атомарных слайсов) + **TanStack Query** (каталог моделей) + **Tailwind v4** (CSS-first `@theme`) + **shadcn/ui (new-york)** + **Radix** + **CVA** + **Codicons** (`@vscode/codicons`) + **JetBrains Mono** (bundled woff2). Сервер-мозг (gateway, WS JSON-RPC) + тонкий клиент — наш `core/gateway.js` уже в этой парадигме.
+- Есть `DESIGN.md` — философия: «flat, not boxed» (без карточек-в-карточках, группировка воздухом + один хайрлайн), «borderless + shadow» (elevation через `shadow-nous` + `--stroke-nous`), один примитив на задачу, токены вместо литералов, стиль живёт в примитиве (варианты, не classNames).
+
+### 32.2 Дизайн-система (ключ к визуальному сходству)
+Каскад токенов: **бренд-семена `--theme-*` → `--ui-*` через `color-mix()` → shadcn `--dt-*`/`--color-*`**. Вся палитра выводится из ~10 семян.
+- Текст иерархией альфы: `--ui-text-primary/secondary/tertiary/quaternary` (94/74/54/36%).
+- Границы-хайрлайны: `--ui-stroke-primary…quaternary`; `--stroke-nous` (color-mix currentColor 3%).
+- Фоны: `--ui-bg-chrome/sidebar/editor/elevated` + шкала primary…quinary.
+- Радиусы: `--radius 0.75rem`, `--radius-scalar 0.6`, шкала xs…4xl. Кнопки жёсткие `rounded-[2.5px]`, иконки `rounded-[4px]`.
+- `shadow-nous` — фирменная многослойная мягкая тень для безрамочных оверлеев.
+- Типографика: sans системный (Segoe/-apple-system), mono **JetBrains Mono**; html 14px, body 13px; спец-переменные `--conversation-text/tool/caption-font-size`, `--paragraph-gap`, `--composer-*`.
+- Глобально: `outline:none` (нет фокус-рингов), `cursor:pointer` на интерактивных, `user-select:none` для shell; оверлеи `backdrop-filter: blur(0.75rem) saturate(1.08)`.
+
+### 32.3 Система тем
+- **Skin (акцент) ⟂ Mode (light/dark/system)** — независимы, персист **по профилю**. `applyTheme()` пишет семена в `documentElement`, тоггл `.dark`. **Boot-paint без вспышки** (inline-скрипт в index.html красит фон до React). `renderedModeFor()` — light/dark по реальной яркости фона (WCAG-luminance), не по флагу.
+- 6 встроенных пресетов (nous/midnight/ember/mono/cyberpunk/slate), у каждого mono-шрифт. **Импорт VSCode-тем** (`vscode.ts`: JSONC→~6 ключей + `mix()`, `ensureContrast` WCAG AA, ANSI-палитра терминала) + живой поиск по VS Code Marketplace. **Translucency** (нативная `setOpacity` окна 0–100) + **Zoom** (90–175%, владеет main-процесс).
+
+### 32.4 Композер (богатый)
+- Ввод — **contentEditable** (не textarea, ради перфа), скрытый `ComposerPrimitive.Input` для биндинга. IME/paste/drop.
+- **Add context** («+»): Files/Folder/Images/Paste image/URL/Prompt snippets. **@-меншены** через RPC `complete.path` (@file/@folder/@url/@image/@tool/@git), **slash-команды** (богатый реестр `desktop-slash-commands.ts` — ~40 команд с surface: action/picker/exec/unavailable). Attachments-карточки с превью и upload-state, черновики per-session (localStorage MRU 50).
+- **Очередь** (composer-queue): при busy → в очередь, drag-reorder, edit-in-place, авто-дренаж, Cmd+Shift+K. **Popout** (плавающий композер, драг+кламп). **История ввода** ↑/↓ (выводится из живых сообщений). **Steer** (Cmd+Enter — подрулить текущим запуском).
+- Контролы: микрофон/диктовка, conversation-режим (listening/thinking/speaking), Auto-speak (TTS), **ModelPill** (селектор модели), send/stop/queue (высококонтрастная круглая CTA — fg-on-bg).
+
+### 32.5 Селектор модели
+- Пилюля показывает `formatModelStatusLabel` → «GPT-5.6-sol · Max». Каталог через RPC `model.options` (кэш TanStack Query). Строки = семейства (base + `-fast` схлопнуты). Hover-submenu: **Thinking** toggle, **Fast** toggle (param `speed=fast` ИЛИ `-fast` вариант), **Effort** radio (minimal/low/medium/high/**xhigh=Max**). Пресеты per `provider::model` (effort/fast) в localStorage. **Model visibility** (какие модели видны). MoA-пресеты (виртуальный провайдер moa). Refresh/Edit models.
+
+### 32.6 Рендеринг сообщений
+- Markdown через `@assistant-ui/react-streamdown` (Streamdown) с кастомными компонентами (h1–h4 chat-scale, таблицы, GFM-alerts, ссылки→media/preview/embed). **Отложенный Shiki** при стриминге, **мемоизирующий KaTeX** (LRU 512, только изменённые формулы), **LRU кэш парсинга блоков**, `useSmoothReveal` (плавный посимвольный вывод), `useDeferredValue` (не блокирует typing), HugeTextFallback >200k.
+- **Tool-строки**: `DisclosureRow` + `buildToolView` (таблица `TOOL_META` иконок/тонов; title/subtitle/count/duration/inlineDiff/searchHits/image). Раскрытое тело: diff, результаты поиска, stdout/stderr (ANSI), картинка, CompactMarkdown, Technical-режим (сырой JSON), Copy, Dismiss, персист раскрытия. Группировка ≥3 строк → авто-скролл окно. `tool-result-summary.ts` — эвристика JSON→человекочитаемое.
+- **Диффы** (`diff-lines.tsx`): unified→tint add/remove + 2px гуттер (стиль Cursor), Shiki по языку, номера строк, виртуализация, overview-ruler (VS Code).
+- **Reasoning**: `ThinkingDisclosure` с шиммером/таймером, live-preview, авто-сворачивание. **Todos/субагенты** — в статус-стеке композера (не инлайн). **Timeline** рейка по user-промптам.
+
+### 32.7 Стриминг
+- Кастомный форк `ExternalStoreRuntime` (`incremental-external-store-runtime.ts`): инкрементальный sync (addOrUpdate/delete, не пересоздание), optimistic assistant, runStart/runEnd. `chat-messages.ts`: `appendStreamPart` коалесит text/reasoning в сегменте, `upsertToolPart` матчит по id/имя+overlap, `toChatMessages` склеивает tool-only, дедуп. Статусы: ResponseLoading, StreamStall (>2с), CenteredSpinner, BackgroundResume, compaction, awaiting-input.
+
+### 32.8 Правый сайдбар / сессии / навигация
+- Секции: **New session / Capabilities(Skills) / Messaging / Artifacts / PINNED / SESSIONS** (+ поиск, cron, платформы). Индикаторы строки: needs-input (amber quest-glow), working (accent ping + arc-border).
+- **Сессии**: runtime-id vs stored-id, `mergeSessionPage` (не терять working/pinned при рефетче), watchdog 8мин. Pin по стабильному lineage-root. **Поиск** (локальный + серверный FTS debounce 200мс). **Branch tree** (вложенные ветки с TUI-стемами). **Экспорт** в JSON. Кросс-оконная синхра (BroadcastChannel). Меню строки: New window/Export/Branch/Rename/Archive/Delete/Pin/Copy id.
+- **Session switcher** (Ctrl+Tab, mac-стиль, reveal>220мс, слоты ⌃1–9). **Command Palette** (⌘K, cmdk, своё ранжирование, группы Go to/Branches/Command Center/Appearance/Settings, вложенные страницы). **Command Center** (полноэкранный: Sessions/System(логи+restart)/Usage(аналитика)/Maintenance).
+- **Artifacts**: галерея (image/file/link) извлекается эвристиками из сообщений. **Messaging**: настройка платформ (Telegram/Discord/…). Layout `MasterDetail` + `PageSearchShell`.
+
+### 32.9 Настройки («тьма»)
+Двухпанельный overlay, deep-link `?tab=`, автосохранение (debounce 550мс), footer: Экспорт/Импорт/Сброс конфига. Объём даёт **схема-driven рендер ~80+ backend-полей** (`ConfigField`: boolean→Switch, enum→Select, number→Input, list→CSV, object→JSON) в 8 курируемых разделах + ~15 клиентских сторов. Разделы:
+- **Model**: главная модель (provider+model+Apply), профильные reasoning/fast, **Auxiliary models** (8 задач: vision/web_extract/compression/skills_hub/approval/mcp/title/curator), MoA пресеты, context_length, fallback_providers.
+- **Chat**: personality (14 встроенных), timezone, show_reasoning, image_input_mode.
+- **Appearance** (клиентское): язык, тема (грид+поиск+VSCode Marketplace), Light/Dark/System, UI Scale (90–175%), Translucency, Tool view (Product/Technical), Embeds (Ask/Always/Off), Pet.
+- **Workspace**: cwd, code_execution.mode, persistent_shell, env_passthrough, file_read_max_chars.
+- **Safety**: approvals.mode (manual/smart/off)+timeout+mcp_confirm, command_allowlist, redact_secrets, allow_private_urls (security/browser), checkpoints.
+- **Memory & Context**: memory_enabled, user_profile, char_limits, provider (builtin/hindsight/honcho), context.engine, compression (enabled/threshold/target/protect_last_n).
+- **Voice**: tts.provider (10 бэкендов, per-provider поля), stt.provider (6), auto_tts, record_key, max_recording — умное скрытие полей под выбранный провайдер.
+- **Advanced**: toolsets, terminal.backend (local/docker/singularity/modal/daytona/ssh)+images+timeout, tool_output limits, checkpoints.max, agent.max_turns/api_retries/service_tier/tool_use_enforcement, delegation.* (subagents), updates.
+- Отдельные страницы: **Notifications** (мастер+5 видов+звук завершения 14 вариантов+тест), **Providers** (Accounts OAuth + API keys, ~24 провайдера с prefix-группировкой), **Gateway** (Local/Cloud/Remote), **Keys** (tool/server env), **Sessions** (default dir + архив), **About** (обновления, danger-zone удаления).
+- **Profiles**: отдельный HERMES_HOME на профиль (модель/skills/config/secrets/чаты/SOUL.md), rail-порядок/цвет, per-profile тема. **Agents**: read-only монитор суб-агентов (дерево делегаций, токены/стоимость/файлы). **Cron**: планировщик (пресеты + custom cron + deliver-каналы + история). **Keybinds**: полностью ребайндируемая (реестр действий по категориям composer/profiles/session/navigation/view, capture, конфликты, reset, хранит диффы).
+
+### 32.10 ПЛАН ПЕРЕНОСА В KYREI (фазами, приоритет по «эффект/затраты»)
+
+**Фаза A — Дизайн-фундамент (низкая сложность, максимум визуального сходства):**
+1. Токен-каскад `--theme-* → --ui-* → --dt-*` через `color-mix()`; иерархия strokes/text альфой; `shadow-nous` + `--stroke-nous`; правило flat/borderless. Bundled **JetBrains Mono**. Обновить `src/index.css` (аддитивно, сохранив текущие `--color-*`).
+2. Система тем: skin ⟂ mode, boot-paint без вспышки, `renderedModeFor` по яркости, ≥6 пресетов. Позже — импорт VSCode-тем.
+3. Единый `Button` (CVA) + `controlVariants`, набор UI-примитивов (по мере надобности), Codicons или lucide.
+
+**Фаза B — Композер и рендеринг (среднее):**
+4. ModelPill с effort/fast/Max + пресеты + model visibility (нужен RPC каталога моделей в gateway).
+5. Композер: attachments/draft per-session, очередь, история ввода, @-меншены (RPC), slash-реестр, popout, steer, voice (TTS/STT — sanitizeTextForSpeech сразу).
+6. Рендеринг: markdown + отложенный Shiki + мемо-KaTeX, tool-строки (buildToolView + tool-result-summary), diff-lines (Cursor-стиль), Thinking-disclosure, статус-стек todos/субагенты.
+
+**Фаза C — Навигация и сессии (среднее):**
+7. Левый сайдбар: секции Pinned/Sessions + поиск (локальный+серверный), меню строки (rename/delete/export/pin), индикаторы working/needs-input, capabilities/messaging/artifacts маршруты.
+8. Command Palette (⌘K), Session switcher (Ctrl+Tab), ребайндируемые keybinds.
+
+**Фаза D — Настройки «тьма» (среднее/высокое):**
+9. Двухпанельный settings-overlay с deep-link + автосохранение + экспорт/импорт/сброс. Схема-driven рендер полей (ConfigField). Разделы Model/Chat/Appearance/Workspace/Safety/Memory/Voice/Advanced + Notifications/Providers/Keys/Sessions/About.
+10. Профили, Cron, Agents-монитор, Gateway-режимы — по мере роста (зависят от расширения бэкенда).
+
+**Стартуем с Фазы A** (токены/тема/шрифт) — 80% визуального сходства при малых затратах; всё остальное на неё ложится. Переносимо почти дословно из Hermes: `katex-memo`, `markdown-code`, `tool-result-summary`, `diff-lines`, `speech-text`, `model-status-label`, `composer-queue/input-history/popout`, `session-search`, `session-export`, `desktop-slash-commands`, реестр keybinds.

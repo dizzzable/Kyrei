@@ -1,6 +1,34 @@
 @import "tailwindcss";
 
-/* Tokens map to runtime CSS variables (--k-*) so themes can swap them live. */
+/* ── Bundled JetBrains Mono (OFL) — code / diffs / terminal ───────────── */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/JetBrainsMono-Italic.woff2") format("woff2");
+}
+
+/*
+ * Token cascade (Hermes-style, see docs/research.md §32.2):
+ *   theme seeds (--k-*) → derived UI tiers (--ui-*) via color-mix → Tailwind
+ *   (--color-*). Existing color names are preserved so components don't break;
+ *   text/stroke hierarchy + shadows are derived once and re-resolve per theme.
+ */
 @theme inline {
   --color-bg: var(--k-bg);
   --color-surface: var(--k-surface);
@@ -10,6 +38,7 @@
   --color-foreground: var(--k-foreground);
   --color-secondary: var(--k-secondary);
   --color-muted: var(--k-muted);
+  --color-faint: var(--ui-text-quaternary);
   --color-primary: var(--k-primary);
   --color-primary-strong: var(--k-primary-strong);
   --color-user: var(--k-user);
@@ -22,20 +51,63 @@
   --radius: 0.75rem;
 }
 
+/*
+ * Derived UI layer — defined once, references the ACTIVE theme's seeds via
+ * lazy custom-property substitution, so every theme (built-in or future) gets
+ * a consistent text/stroke hierarchy for free.
+ */
+:root {
+  /* Text hierarchy by mixing ink toward the background. */
+  --ui-text-primary: var(--k-foreground);
+  --ui-text-secondary: color-mix(in srgb, var(--k-foreground) 72%, var(--k-bg));
+  --ui-text-tertiary: color-mix(in srgb, var(--k-foreground) 50%, var(--k-bg));
+  --ui-text-quaternary: color-mix(in srgb, var(--k-foreground) 34%, var(--k-bg));
+
+  /* Hairline strokes. */
+  --ui-stroke-primary: var(--k-border);
+  --ui-stroke-secondary: color-mix(in srgb, var(--k-border) 70%, var(--k-bg));
+  --ui-stroke-tertiary: color-mix(in srgb, var(--k-border) 45%, var(--k-bg));
+  --stroke-nous: color-mix(in srgb, var(--k-foreground) 8%, transparent);
+
+  /* Row / control interaction surfaces. */
+  --ui-row-hover: color-mix(in srgb, var(--k-foreground) 5%, transparent);
+  --ui-row-active: color-mix(in srgb, var(--k-foreground) 8%, transparent);
+  --ui-control-hover: color-mix(in srgb, var(--k-foreground) 7%, transparent);
+
+  /* Derived secondary/muted/border-soft (themes set only the core seeds). */
+  --k-secondary: var(--ui-text-secondary);
+  --k-muted: var(--ui-text-tertiary);
+  --k-border-soft: var(--ui-stroke-tertiary);
+
+  /* Nous-style multi-layer elevation for borderless overlays/cards. */
+  --shadow-nous:
+    0 0 0 0.5px var(--stroke-nous),
+    0 1px 2px color-mix(in srgb, #000 22%, transparent),
+    0 8px 24px color-mix(in srgb, #000 24%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #000 18%, transparent);
+
+  /* Conversation typography scale. */
+  --conversation-text-size: 0.8125rem;
+  --conversation-tool-size: 0.6875rem;
+  --conversation-caption-size: 0.75rem;
+  --line-height: 1.55;
+}
+
+/* ── Theme seeds (skin) — set ONLY the core palette; tiers derive above ── */
 :root, [data-theme="dark"] {
   color-scheme: dark;
   --k-bg: #0d0f13; --k-surface: #14171d; --k-elevated: #1a1e26;
-  --k-border: #262b34; --k-border-soft: #1e232b;
-  --k-foreground: #e6e8ec; --k-secondary: #aab1bd; --k-muted: #7d8595;
-  --k-primary: #5b7cfa; --k-primary-strong: #4f6ef7; --k-user: #2a3350;
+  --k-border: #2a3039;
+  --k-foreground: #e6e8ec;
+  --k-primary: #5b7cfa; --k-primary-strong: #4f6ef7; --k-user: #222a44;
   --k-success: #35c08a; --k-danger: #ef5f6b; --k-warning: #e0a94b;
 }
 
 [data-theme="light"] {
   color-scheme: light;
-  --k-bg: #f5f6f8; --k-surface: #ffffff; --k-elevated: #eef0f4;
-  --k-border: #e2e5ea; --k-border-soft: #edeff3;
-  --k-foreground: #1a1d26; --k-secondary: #495062; --k-muted: #8a91a0;
+  --k-bg: #f6f7f9; --k-surface: #ffffff; --k-elevated: #eef0f4;
+  --k-border: #d8dce3;
+  --k-foreground: #1a1d26;
   --k-primary: #4f6ef7; --k-primary-strong: #3d5de6; --k-user: #e5eafe;
   --k-success: #12996a; --k-danger: #d93b48; --k-warning: #b7791f;
 }
@@ -43,10 +115,46 @@
 [data-theme="midnight"] {
   color-scheme: dark;
   --k-bg: #0a0b12; --k-surface: #0f1119; --k-elevated: #151827;
-  --k-border: #20233a; --k-border-soft: #191c2e;
-  --k-foreground: #dfe3f0; --k-secondary: #9aa3c4; --k-muted: #6b7396;
+  --k-border: #242844;
+  --k-foreground: #dfe3f0;
   --k-primary: #8b7cff; --k-primary-strong: #7a6bff; --k-user: #241f45;
   --k-success: #3fd0a0; --k-danger: #ff6b7d; --k-warning: #e6b45a;
+}
+
+[data-theme="ember"] {
+  color-scheme: dark;
+  --k-bg: #12100e; --k-surface: #1a1613; --k-elevated: #221c17;
+  --k-border: #38302a;
+  --k-foreground: #f0e7df;
+  --k-primary: #e8875a; --k-primary-strong: #db704b; --k-user: #33251c;
+  --k-success: #6bbf7a; --k-danger: #f0655f; --k-warning: #e0a94b;
+}
+
+[data-theme="mono"] {
+  color-scheme: dark;
+  --k-bg: #0e0e0e; --k-surface: #161616; --k-elevated: #1e1e1e;
+  --k-border: #2e2e2e;
+  --k-foreground: #eaeaea;
+  --k-primary: #c8c8c8; --k-primary-strong: #e0e0e0; --k-user: #262626;
+  --k-success: #9db89d; --k-danger: #c98b8b; --k-warning: #c9b98b;
+}
+
+[data-theme="cyberpunk"] {
+  color-scheme: dark;
+  --k-bg: #0b0714; --k-surface: #130c22; --k-elevated: #1b1130;
+  --k-border: #34215a;
+  --k-foreground: #ece1ff;
+  --k-primary: #16f2c8; --k-primary-strong: #0fd9e0; --k-user: #2a1450;
+  --k-success: #16f2c8; --k-danger: #ff5d9e; --k-warning: #ffd166;
+}
+
+[data-theme="slate"] {
+  color-scheme: dark;
+  --k-bg: #10141a; --k-surface: #171d26; --k-elevated: #1e2630;
+  --k-border: #2c3745;
+  --k-foreground: #dde4ec;
+  --k-primary: #56b0d9; --k-primary-strong: #3f97c2; --k-user: #1d2a38;
+  --k-success: #4bbf9a; --k-danger: #e56b74; --k-warning: #d6a55a;
 }
 
 * { box-sizing: border-box; }
@@ -66,8 +174,21 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--k-muted) 55%, transparent); }
 ::selection { background: color-mix(in srgb, var(--k-primary) 35%, transparent); }
 
+/* Elevation helpers (borderless + shadow, per DESIGN.md). */
+.shadow-nous { box-shadow: var(--shadow-nous); }
+.overlay-blur { backdrop-filter: blur(0.75rem) saturate(1.08); }
+
 .shiki { background: transparent !important; margin: 0; padding: 0; }
 .shiki code { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; }
 
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 .caret { display: inline-block; width: 2px; height: 1em; background: var(--k-primary); vertical-align: text-bottom; margin-left: 1px; animation: blink 1s step-end infinite; }
+
+@keyframes shimmer-sweep { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.shimmer {
+  background: linear-gradient(90deg, var(--ui-text-tertiary) 30%, var(--k-foreground) 50%, var(--ui-text-tertiary) 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 2s linear infinite;
+}

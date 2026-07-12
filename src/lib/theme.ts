@@ -4,6 +4,10 @@ export const THEMES = [
   { id: "dark", label: "Тёмная" },
   { id: "light", label: "Светлая" },
   { id: "midnight", label: "Полночь" },
+  { id: "ember", label: "Ember" },
+  { id: "mono", label: "Моно" },
+  { id: "cyberpunk", label: "Cyberpunk" },
+  { id: "slate", label: "Slate" },
 ] as const;
 
 export type ThemeId = (typeof THEMES)[number]["id"];
