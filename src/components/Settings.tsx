@@ -442,6 +442,12 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
                       value={ui.richRendering}
                       onChange={(v) => setUiSetting("richRendering", v)}
                     />
+                    <BoolField
+                      label="Показывать размышление"
+                      hint="Отображать reasoning-блоки модели в ответах ассистента."
+                      value={ui.showReasoning}
+                      onChange={(v) => setUiSetting("showReasoning", v)}
+                    />
                     <EnumField
                       label="Вид инструментов по умолчанию"
                       hint="Компактно — свёрнуто; технически — с деталями."

@@ -16,6 +16,8 @@ export interface UiSettings {
   toolView: ToolViewMode;
   /** Layout density. */
   density: UiDensity;
+  /** Show/hide model reasoning blocks in assistant messages. */
+  showReasoning: boolean;
   /** Master switch for all notifications. */
   notify: boolean;
   /** Play a sound when a turn finishes. */
@@ -38,6 +40,7 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   scale: 1,
   toolView: "compact",
   density: "comfortable",
+  showReasoning: true,
   notify: true,
   notifySound: true,
   notifyNative: false,
