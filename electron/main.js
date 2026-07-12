@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog } from "electron";
+import { app, BrowserWindow, Menu, dialog, safeStorage } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../core/gateway.js";
@@ -14,6 +14,21 @@ async function chooseFolder() {
     properties: ["openDirectory", "createDirectory"],
   });
   return result.canceled ? "" : result.filePaths[0] ?? "";
+}
+
+async function createSecretsCodec() {
+  if (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text") return undefined;
+  if (await safeStorage.isAsyncEncryptionAvailable()) {
+    return {
+      encode: async (value) => (await safeStorage.encryptStringAsync(value)).toString("base64"),
+      decode: async (value) => (await safeStorage.decryptStringAsync(Buffer.from(value, "base64"))).result,
+    };
+  }
+  if (!safeStorage.isEncryptionAvailable()) return undefined;
+  return {
+    encode: (value) => safeStorage.encryptString(value).toString("base64"),
+    decode: (value) => safeStorage.decryptString(Buffer.from(value, "base64")),
+  };
 }
 
 async function createWindow(port, gatewayToken) {
@@ -68,11 +83,13 @@ app.whenReady().then(async () => {
   try {
     const devUrl = process.env.KYREI_RENDERER_URL;
     const rendererOrigin = devUrl ? new URL(devUrl).origin : "null";
+    const secretsCodec = await createSecretsCodec();
     gateway = await startGateway({
       dataDir: join(app.getPath("userData"), "kyrei"),
       chooseFolder,
       preferredPort: 8765,
       rendererOrigin,
+      ...(secretsCodec ? { secretsCodec } : {}),
     });
     await createWindow(gateway.port, gateway.token);
   } catch (error) {

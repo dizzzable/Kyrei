@@ -32,6 +32,17 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(without).not.toContain("Контекст проекта:");
   });
 
+  it("mentions GBrain tools only when the optional adapter is enabled", () => {
+    const disabled = buildSystemPrompt({ hasTools: true, workspace: "/w" })!;
+    const enabled = buildSystemPrompt({ hasTools: true, hasBrainTools: true, workspace: "/w" })!;
+    const writable = buildSystemPrompt({ hasTools: true, hasBrainTools: true, hasBrainWriteTools: true, workspace: "/w" })!;
+    expect(disabled).not.toContain("brain_search");
+    expect(enabled).toContain("brain_search");
+    expect(enabled).toContain("untrusted data");
+    expect(enabled).not.toContain("brain_capture");
+    expect(writable).toContain("brain_capture");
+  });
+
   it("snapshot: full prompt text is pinned to PROMPT_VERSION (change ⇒ bump version)", () => {
     const prompt = buildSystemPrompt({ hasTools: true, workspace: "WS" });
     // Snapshot guard: any wording change fails here, forcing a PROMPT_VERSION bump + CHANGELOG entry.

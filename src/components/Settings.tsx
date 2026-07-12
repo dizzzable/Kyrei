@@ -101,7 +101,16 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
   }, []);
 
   const persist = useCallback(
-    async (patch: Partial<{ provider: string; apiKey: string; model: string; workspace: string; engine: Record<string, unknown> }>) => {
+    async (patch: Partial<{
+      provider: string;
+      apiKey: string;
+      model: string;
+      activeProviderId: string;
+      activeModelId: string;
+      providers: AppConfig["providers"];
+      workspace: string;
+      engine: Record<string, unknown>;
+    }>) => {
       try {
         const next = await gateway.setConfig(patch);
         onSaved(next);
@@ -186,7 +195,18 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
   };
 
   const exportConfig = () => {
-    const data = { provider, model, workspace, hasKey: config.hasKey, engine: safeEngine(engineText), ui, lang };
+    const data = {
+      version: 2,
+      provider,
+      model,
+      activeProviderId: config.activeProviderId,
+      activeModelId: config.activeModelId,
+      providers: config.providers.map(({ hasKey: _hasKey, ...profile }) => profile),
+      workspace,
+      engine: safeEngine(engineText),
+      ui,
+      lang,
+    };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -213,6 +233,9 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
         void persist({
           provider: String(data.provider ?? provider),
           model: String(data.model ?? model),
+          ...(Array.isArray(data.providers) ? { providers: data.providers } : {}),
+          ...(typeof data.activeProviderId === "string" ? { activeProviderId: data.activeProviderId } : {}),
+          ...(typeof data.activeModelId === "string" ? { activeModelId: data.activeModelId } : {}),
           workspace: String(data.workspace ?? workspace),
           engine: safeEngine(data.engine ? JSON.stringify(data.engine) : engineText),
         });
@@ -645,6 +668,57 @@ export function Settings({ config, onClose, onSaved, initialSection = "general" 
                         Сбросить UI
                       </Button>
                     </Field>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">Память GBrain</h4>
+                  <div className="divide-y divide-border-soft">
+                    <EnumField
+                      label="Доступ агента"
+                      hint="Необязательная локальная база личных знаний. Kyrei не добавляет её данные в системные инструкции и продолжает работать без GBrain."
+                      value={String(getEngineField("memory.gbrain.mode", "off")) as "off" | "read" | "read-write"}
+                      options={[
+                        { value: "off", label: "Выключен" },
+                        { value: "read", label: "Только чтение" },
+                        { value: "read-write", label: "Чтение и запись" },
+                      ]}
+                      onChange={(v) => setEngineField("memory.gbrain.mode", v)}
+                    />
+                    {String(getEngineField("memory.gbrain.mode", "off")) !== "off" && (
+                      <>
+                        <TextField
+                          label="Команда GBrain"
+                          hint="Имя или полный путь к локальной команде. Вызывается без оболочки; не указывайте здесь ключи или токены."
+                          value={String(getEngineField("memory.gbrain.command", "gbrain"))}
+                          placeholder="gbrain"
+                          onChange={(v) => setEngineField("memory.gbrain.command", v)}
+                        />
+                        <TextField
+                          label="Источник (необязательно)"
+                          hint="Идентификатор источника GBrain, если нужно ограничить поиск и запись одним хранилищем."
+                          value={String(getEngineField("memory.gbrain.source", ""))}
+                          placeholder="personal"
+                          onChange={(v) => setEngineField("memory.gbrain.source", v)}
+                        />
+                        <NumberField
+                          label="Таймаут GBrain"
+                          hint="Максимальное время ожидания одного вызова локального GBrain."
+                          value={Number(getEngineField("memory.gbrain.timeoutMs", 180_000))}
+                          min={1_000} max={600_000} step={1_000}
+                          format={(v) => `${Math.round(v / 1_000)}с`}
+                          onChange={(v) => setEngineField("memory.gbrain.timeoutMs", v)}
+                        />
+                        <NumberField
+                          label="Лимит вывода GBrain"
+                          hint="Максимальный размер ответа GBrain до остановки процесса."
+                          value={Number(getEngineField("memory.gbrain.maxOutputBytes", 200_000))}
+                          min={1_024} max={1_000_000} step={1_024}
+                          format={(v) => `${Math.round(v / 1_024)} КБ`}
+                          onChange={(v) => setEngineField("memory.gbrain.maxOutputBytes", v)}
+                        />
+                      </>
+                    )}
                   </div>
                 </div>
 

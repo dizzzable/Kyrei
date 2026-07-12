@@ -1,13 +1,20 @@
 /**
  * Versioned provider-registry configuration used by the local gateway.
  *
- * Provider metadata is safe to return to the renderer; API keys live in a
- * separate secrets file managed by the gateway. The registry intentionally
- * supports only Kyrei's built-in OpenAI-compatible protocol — it never loads
- * arbitrary packages from user configuration.
+ * Provider metadata is safe to return to the renderer; credentials live in a
+ * separate secret file managed by the gateway. The registry dispatches only
+ * audited built-in transports and never loads executable provider code from
+ * user configuration.
  */
 
-export const SUPPORTED_PROVIDER_PROTOCOLS = ["openai-chat", "openai-responses", "anthropic-messages"];
+export const SUPPORTED_PROVIDER_PROTOCOLS = [
+  "openai-chat",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+  "amazon-bedrock",
+  "google-vertex",
+];
 const DEFAULT_PROVIDER_ID = "default-openai-compatible";
 const DEFAULT_PROTOCOL = "openai-chat";
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -15,6 +22,9 @@ const DEFAULT_BASE_URLS = {
   "openai-chat": "https://api.openai.com/v1",
   "openai-responses": "https://api.openai.com/v1",
   "anthropic-messages": "https://api.anthropic.com/v1",
+  "google-generative-ai": "https://generativelanguage.googleapis.com/v1beta",
+  "amazon-bedrock": "https://bedrock-runtime.us-east-1.amazonaws.com",
+  "google-vertex": "https://aiplatform.googleapis.com",
 };
 
 function object(value) {
@@ -55,7 +65,7 @@ export function normalizeBaseURL(value, fallback = defaultBaseURLForProtocol(DEF
     if (url.protocol !== "http:" && url.protocol !== "https:") return fallback;
     // Keep credentials in the dedicated secret store. A URL with userinfo
     // would otherwise persist a secret in the public provider config.
-    if (url.username || url.password) return fallback;
+    if (url.username || url.password || url.search || url.hash) return fallback;
     return url.href.replace(/\/+$/, "");
   } catch {
     return fallback;
@@ -83,7 +93,12 @@ function normalizeHeaders(value) {
   for (const [key, raw] of Object.entries(object(value))) {
     // The registry is returned to the renderer, so it must never carry a
     // credential-bearing header. API keys use the separate secrets endpoint.
-    if (!/^[A-Za-z0-9-]{1,100}$/.test(key) || /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)$/i.test(key) || typeof raw !== "string" || raw.length > 2000) continue;
+    if (
+      !/^[A-Za-z0-9-]{1,100}$/.test(key) ||
+      /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-goog-api-key|x-amz-security-token|x-amz-credential)$/i.test(key) ||
+      typeof raw !== "string" ||
+      raw.length > 2000
+    ) continue;
     headers[key] = raw;
   }
   return headers;
@@ -147,15 +162,57 @@ export function normalizeGatewayConfig(value) {
   };
 }
 
+function secretText(value, maxLength) {
+  if (typeof value !== "string") return "";
+  const candidate = value.trim();
+  return candidate && candidate.length <= maxLength && !candidate.includes("\0") ? candidate : "";
+}
+
+/** Allowlist one provider secret record; unknown fields never reach disk. */
+export function normalizeProviderSecret(value) {
+  const source = object(value);
+  const fields = {
+    apiKey: 20_000,
+    region: 128,
+    accessKeyId: 1_024,
+    secretAccessKey: 8_192,
+    sessionToken: 20_000,
+    project: 512,
+    location: 128,
+    clientEmail: 512,
+    privateKey: 20_000,
+  };
+  const result = {};
+  for (const [field, maxLength] of Object.entries(fields)) {
+    const candidate = secretText(source[field], maxLength);
+    if (candidate) result[field] = candidate;
+  }
+  return result;
+}
+
 export function normalizeProviderSecrets(value) {
   const source = object(value);
   const rawProviders = object(source.providers);
   const providers = {};
   for (const [id, raw] of Object.entries(rawProviders)) {
-    const apiKey = text(object(raw).apiKey);
-    if (apiKey) providers[id] = { apiKey };
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) continue;
+    const secret = normalizeProviderSecret(raw);
+    if (Object.keys(secret).length) providers[id] = secret;
   }
   return { version: 1, providers };
+}
+
+export function hasStoredProviderCredentials(provider, secretValue) {
+  if (!provider.requiresApiKey) return true;
+  const secret = normalizeProviderSecret(secretValue);
+  switch (provider.protocol) {
+    case "amazon-bedrock":
+      return Boolean(secret.region && (secret.apiKey || (secret.accessKeyId && secret.secretAccessKey)));
+    case "google-vertex":
+      return Boolean(secret.project && secret.location && secret.clientEmail && secret.privateKey);
+    default:
+      return Boolean(secret.apiKey);
+  }
 }
 
 export function getActiveProvider(config) {
@@ -166,13 +223,13 @@ export function publicGatewayConfig(config, secrets) {
   const active = getActiveProvider(config);
   const safeProviders = config.providers.map((provider) => ({
     ...provider,
-    hasKey: !provider.requiresApiKey || Boolean(secrets.providers?.[provider.id]?.apiKey),
+    hasKey: hasStoredProviderCredentials(provider, secrets.providers?.[provider.id]),
   }));
   return {
     provider: active?.baseURL ?? "",
     model: config.activeModelId ?? "",
     workspace: config.workspace ?? "",
-    hasKey: active ? (!active.requiresApiKey || Boolean(secrets.providers?.[active.id]?.apiKey)) : false,
+    hasKey: active ? hasStoredProviderCredentials(active, secrets.providers?.[active.id]) : false,
     activeProviderId: active?.id ?? "",
     activeProviderName: active?.name ?? "",
     activeModelId: config.activeModelId ?? "",

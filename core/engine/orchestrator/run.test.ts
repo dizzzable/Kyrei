@@ -8,6 +8,7 @@ const openStreamMock = vi.fn();
 const bridgeStreamMock = vi.fn();
 const buildToolsMock = vi.fn();
 const resolveModelMock = vi.fn();
+const buildGBrainToolsMock = vi.fn();
 
 vi.mock("ai", () => ({
   streamText: streamTextMock,
@@ -27,6 +28,9 @@ vi.mock("../config/schema.js", () => ({
       apiMaxRetries: 2,
       personality: "",
       fileReadMaxChars: 250_000,
+      memory: {
+        gbrain: { mode: "off", command: "gbrain", timeoutMs: 180_000, maxOutputBytes: 200_000 },
+      },
     },
     warnings: [],
   }),
@@ -35,6 +39,7 @@ vi.mock("../config/schema.js", () => ({
 vi.mock("../provider/build.js", () => ({
   buildModel: () => ({ model: "mock" }),
   buildProviderOptions: () => undefined,
+  hasProviderCredentials: () => true,
 }));
 
 vi.mock("../provider/registry.js", () => ({
@@ -63,6 +68,10 @@ vi.mock("../provider/open-stream.js", () => ({
 
 vi.mock("../tools/index.js", () => ({
   buildTools: buildToolsMock,
+}));
+
+vi.mock("../tools/gbrain.js", () => ({
+  buildGBrainTools: buildGBrainToolsMock,
 }));
 
 vi.mock("../security/jail.js", () => ({
@@ -108,6 +117,7 @@ describe("runKyreiChat project context wiring", () => {
     vi.clearAllMocks();
     buildSystemPromptMock.mockReturnValue("system prompt");
     buildToolsMock.mockReturnValue({ read_file: { name: "read_file" } });
+    buildGBrainToolsMock.mockReturnValue({});
     isWorkspaceDirMock.mockResolvedValue(true);
     assembleSystemContextMock.mockResolvedValue("PROJECT_CTX");
     streamTextMock.mockReturnValue({
@@ -183,6 +193,22 @@ describe("runKyreiChat project context wiring", () => {
         projectContext: undefined,
       }),
     );
+  });
+
+  it("makes enabled brain tools available without a workspace", async () => {
+    buildGBrainToolsMock.mockReturnValueOnce({ brain_search: { name: "brain_search" } });
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      providerProtocol: "openai-chat",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    expect(buildSystemPromptMock).toHaveBeenCalledWith(expect.objectContaining({ hasBrainTools: true, hasTools: true }));
+    expect(openStreamMock).toHaveBeenCalledWith(2, true, expect.any(Function));
   });
 
   it("pins fallback models to the active provider endpoint", async () => {

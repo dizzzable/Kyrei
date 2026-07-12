@@ -6,7 +6,9 @@ import { SessionStore } from "./session-store.js";
 import {
   createProviderId,
   getActiveProvider,
+  hasStoredProviderCredentials,
   normalizeGatewayConfig,
+  normalizeProviderSecret,
   normalizeProviderSecrets,
   publicGatewayConfig,
   removeProvider,
@@ -56,7 +58,22 @@ function readBody(req) {
   });
 }
 
-export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765, authToken, rendererOrigin = "null" } = {}) {
+function providerCredentialScope(provider) {
+  try {
+    return `${provider.protocol}:${new URL(provider.baseURL).origin}`;
+  } catch {
+    return `${provider.protocol}:invalid`;
+  }
+}
+
+export async function startGateway({
+  dataDir,
+  chooseFolder,
+  preferredPort = 8765,
+  authToken,
+  rendererOrigin = "null",
+  secretsCodec,
+} = {}) {
   // The local port is not an authentication boundary: any web page can target
   // loopback. Every API request carries this per-launch capability token.
   const gatewayToken = typeof authToken === "string" && authToken.length >= 32
@@ -84,17 +101,46 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
   let rawConfig = {};
   try { rawConfig = JSON.parse(await readFile(configPath, "utf8")); } catch { /* first run */ }
   let config = normalizeGatewayConfig(rawConfig);
-  let secrets = {};
-  try { secrets = normalizeProviderSecrets(JSON.parse(await readFile(secretsPath, "utf8"))); } catch { secrets = normalizeProviderSecrets({}); }
+  let secrets = normalizeProviderSecrets({});
+  let storedSecrets = "";
+  try {
+    storedSecrets = await readFile(secretsPath, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  if (storedSecrets) {
+    try {
+      const envelope = JSON.parse(storedSecrets);
+      let decoded = envelope;
+      if (envelope?.protection === "electron-safe-storage") {
+        if (!secretsCodec || typeof envelope.payload !== "string") throw new Error("OS secret storage is unavailable");
+        decoded = JSON.parse(await secretsCodec.decode(envelope.payload));
+      }
+      secrets = normalizeProviderSecrets(decoded);
+    } catch (error) {
+      throw new Error(`Kyrei could not unlock the provider secret store: ${error.message}`);
+    }
+  }
   const legacyApiKey = typeof rawConfig.apiKey === "string" ? rawConfig.apiKey : "";
   if (legacyApiKey && !secrets.providers[config.activeProviderId]?.apiKey) {
-    secrets.providers[config.activeProviderId] = { apiKey: legacyApiKey };
+    secrets.providers[config.activeProviderId] = {
+      ...(secrets.providers[config.activeProviderId] ?? {}),
+      apiKey: legacyApiKey,
+    };
   }
   const saveConfig = async () => {
     await writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
-    await writeFile(secretsPath, JSON.stringify(secrets, null, 2), { encoding: "utf8", mode: 0o600 });
+    const plainSecrets = JSON.stringify(secrets, null, 2);
+    const stored = secretsCodec
+      ? JSON.stringify({
+          version: 2,
+          protection: "electron-safe-storage",
+          payload: await secretsCodec.encode(plainSecrets),
+        }, null, 2)
+      : plainSecrets;
+    await writeFile(secretsPath, stored, { encoding: "utf8", mode: 0o600 });
     // `mode` affects only newly created files. Reassert Unix permissions after
-    // every write; Windows ACL/keychain hardening remains a platform follow-up.
+    // every write. Packaged desktop builds additionally use the OS keyring.
     if (process.platform !== "win32") await chmod(secretsPath, 0o600);
   };
   await saveConfig();
@@ -159,6 +205,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       providerHeaders: activeProvider.headers,
       requiresApiKey: activeProvider.requiresApiKey,
       apiKey: secrets.providers[activeProvider.id]?.apiKey ?? "",
+      providerCredentials: secrets.providers[activeProvider.id] ?? {},
       model: config.activeModelId,
       workspace: config.workspace,
       auditLogPath: join(dataDir, "audit.jsonl"),
@@ -239,9 +286,30 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
         if (req.method === "GET") return sendJson(res, 200, publicConfig());
         if (req.method === "PUT") {
           const body = await readBody(req);
+          if (Array.isArray(body.providers) && body.providers.length) {
+            const previousProviders = new Map(config.providers.map((provider) => [provider.id, provider]));
+            config = normalizeGatewayConfig({
+              ...config,
+              providers: body.providers,
+              activeProviderId: body.activeProviderId,
+              activeModelId: body.activeModelId,
+            });
+            const nextProviders = new Map(config.providers.map((provider) => [provider.id, provider]));
+            secrets.providers = Object.fromEntries(
+              Object.entries(secrets.providers).filter(([providerId]) => {
+                const previous = previousProviders.get(providerId);
+                const next = nextProviders.get(providerId);
+                return previous && next && providerCredentialScope(previous) === providerCredentialScope(next);
+              }),
+            );
+          }
           const active = getActiveProvider(config);
           if (typeof body.provider === "string" && active) {
-            ({ config } = upsertProvider(config, { ...active, baseURL: body.provider }, active.id));
+            const updated = upsertProvider(config, { ...active, baseURL: body.provider }, active.id);
+            config = updated.config;
+            if (providerCredentialScope(active) !== providerCredentialScope(updated.provider)) {
+              delete secrets.providers[active.id];
+            }
           }
           const requestedProviderId = typeof body.activeProviderId === "string" ? body.activeProviderId : config.activeProviderId;
           const requestedModel = typeof body.activeModelId === "string"
@@ -253,7 +321,10 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
             config = selectProviderModel(config, requestedProviderId || config.activeProviderId, requestedModel);
           }
           if (typeof body.apiKey === "string" && body.apiKey.trim()) {
-            secrets.providers[config.activeProviderId] = { apiKey: body.apiKey.trim() };
+            secrets.providers[config.activeProviderId] = {
+              ...(secrets.providers[config.activeProviderId] ?? {}),
+              apiKey: body.apiKey.trim(),
+            };
           }
           if (body.clearApiKey === true) delete secrets.providers[config.activeProviderId];
           if (typeof body.workspace === "string") config.workspace = body.workspace;
@@ -280,7 +351,9 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
           const id = createProviderId(String(input.name || input.id || "provider"), config.providers);
           const added = upsertProvider(config, { ...input, id }, id);
           config = added.config;
-          if (typeof body.apiKey === "string" && body.apiKey.trim()) secrets.providers[added.provider.id] = { apiKey: body.apiKey.trim() };
+          if (typeof body.apiKey === "string" && body.apiKey.trim()) {
+            secrets.providers[added.provider.id] = { apiKey: body.apiKey.trim() };
+          }
           if (body.activate !== false) config = selectProviderModel(config, added.provider.id, input.model || added.provider.models[0]?.id);
           await saveConfig();
           return sendJson(res, 201, publicConfig());
@@ -296,9 +369,13 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
         if (secretPath) {
           if (req.method === "PUT") {
             const body = await readBody(req);
-            const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-            if (!apiKey) return sendJson(res, 400, { error: "apiKey required" });
-            secrets.providers[providerId] = { apiKey };
+            const input = body.credentials && typeof body.credentials === "object" ? body.credentials : body;
+            const credentials = normalizeProviderSecret(input);
+            if (!Object.keys(credentials).length) return sendJson(res, 400, { error: "provider credentials required" });
+            if (!hasStoredProviderCredentials(existing, credentials)) {
+              return sendJson(res, 400, { error: `incomplete credentials for ${existing.protocol}` });
+            }
+            secrets.providers[providerId] = credentials;
             await saveConfig();
             return sendJson(res, 200, publicConfig());
           }
@@ -311,7 +388,11 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
         if (req.method === "PATCH") {
           const body = await readBody(req);
           const patch = body.provider && typeof body.provider === "object" ? body.provider : body;
-          ({ config } = upsertProvider(config, { ...existing, ...patch, id: providerId }, providerId));
+          const updated = upsertProvider(config, { ...existing, ...patch, id: providerId }, providerId);
+          config = updated.config;
+          if (providerCredentialScope(existing) !== providerCredentialScope(updated.provider)) {
+            delete secrets.providers[providerId];
+          }
           await saveConfig();
           return sendJson(res, 200, publicConfig());
         }

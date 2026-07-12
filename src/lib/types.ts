@@ -47,7 +47,26 @@ export interface ProviderModel {
   name?: string;
 }
 
-export type ProviderProtocol = "openai-chat" | "openai-responses" | "anthropic-messages";
+export type ProviderProtocol =
+  | "openai-chat"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "google-generative-ai"
+  | "amazon-bedrock"
+  | "google-vertex";
+
+/** Write-only provider credentials. The gateway never returns these values. */
+export interface ProviderCredentialsInput {
+  apiKey?: string;
+  region?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  sessionToken?: string;
+  project?: string;
+  location?: string;
+  clientEmail?: string;
+  privateKey?: string;
+}
 
 /** Public provider metadata returned by the local gateway; never contains a key. */
 export interface ProviderProfile {

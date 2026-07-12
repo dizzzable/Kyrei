@@ -1,4 +1,4 @@
-import type { AppConfig, ChatMessage, GatewayEvent, ProviderProfile, SessionInfo } from "./types";
+import type { AppConfig, ChatMessage, GatewayEvent, ProviderCredentialsInput, ProviderProfile, SessionInfo } from "./types";
 
 /** A model entry from the engine registry (`GET /api/models`). */
 export interface ModelCatalogEntry {
@@ -50,6 +50,7 @@ export const gateway = {
     model: string;
     activeModelId: string;
     activeProviderId: string;
+    providers: ProviderProfile[];
     workspace: string;
     engine: Record<string, unknown>;
   }>) =>
@@ -61,8 +62,11 @@ export const gateway = {
     json<AppConfig>(`/api/providers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ provider }) }),
   deleteProvider: (id: string) =>
     json<AppConfig>(`/api/providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  setProviderSecret: (id: string, apiKey: string) =>
-    json<AppConfig>(`/api/providers/${encodeURIComponent(id)}/secret`, { method: "PUT", body: JSON.stringify({ apiKey }) }),
+  setProviderSecret: (id: string, credentials: ProviderCredentialsInput | string) =>
+    json<AppConfig>(`/api/providers/${encodeURIComponent(id)}/secret`, {
+      method: "PUT",
+      body: JSON.stringify(typeof credentials === "string" ? { apiKey: credentials } : { credentials }),
+    }),
   clearProviderSecret: (id: string) =>
     json<AppConfig>(`/api/providers/${encodeURIComponent(id)}/secret`, { method: "DELETE" }),
   chooseFolder: () => json<{ folder: string } & AppConfig>("/api/choose-folder", { method: "POST" }),

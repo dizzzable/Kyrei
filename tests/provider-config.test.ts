@@ -3,6 +3,7 @@ import {
   defaultBaseURLForProtocol,
   getActiveProvider,
   normalizeGatewayConfig,
+  normalizeProviderSecret,
   normalizeProviderSecrets,
   publicGatewayConfig,
   removeProvider,
@@ -35,6 +36,15 @@ describe("provider registry config", () => {
     });
   });
 
+  it("normalizes Google, Bedrock, and Vertex transport URLs", () => {
+    for (const protocol of ["google-generative-ai", "amazon-bedrock", "google-vertex"]) {
+      const config = normalizeGatewayConfig({
+        providers: [{ id: protocol, protocol, baseURL: "invalid", models: [{ id: "model" }] }],
+      });
+      expect(config.providers[0]).toMatchObject({ protocol, baseURL: defaultBaseURLForProtocol(protocol) });
+    }
+  });
+
   it("keeps credentials outside the public config response", () => {
     const config = normalizeGatewayConfig({ provider: "https://api.example.test/v1", model: "alpha" });
     const secrets = normalizeProviderSecrets({ providers: { [config.activeProviderId]: { apiKey: "secret-value" } } });
@@ -42,6 +52,34 @@ describe("provider registry config", () => {
     expect(publicConfig.hasKey).toBe(true);
     expect(JSON.stringify(publicConfig)).not.toContain("secret-value");
     expect(publicConfig.providers[0]?.hasKey).toBe(true);
+  });
+
+  it("allowlists multi-field cloud credentials and never returns them publicly", () => {
+    const normalized = normalizeProviderSecret({
+      region: "us-east-1",
+      accessKeyId: "access-id",
+      secretAccessKey: "secret-value",
+      sessionToken: "session-value",
+      arbitrary: "must-not-persist",
+    });
+    expect(normalized).toEqual({
+      region: "us-east-1",
+      accessKeyId: "access-id",
+      secretAccessKey: "secret-value",
+      sessionToken: "session-value",
+    });
+
+    const config = normalizeGatewayConfig({
+      providers: [{
+        id: "bedrock",
+        protocol: "amazon-bedrock",
+        models: [{ id: "anthropic.claude" }],
+      }],
+    });
+    const secrets = normalizeProviderSecrets({ providers: { bedrock: normalized } });
+    const publicConfig = publicGatewayConfig(config, secrets);
+    expect(publicConfig.providers[0]?.hasKey).toBe(true);
+    expect(JSON.stringify(publicConfig)).not.toMatch(/secret-value|access-id|session-value/);
   });
 
   it("does not persist credentials in endpoint URLs or custom headers", () => {
@@ -53,14 +91,22 @@ describe("provider registry config", () => {
         headers: {
           Authorization: "Bearer secret-value",
           "X-API-Key": "secret-value",
+          "X-Goog-Api-Key": "secret-value",
+          "X-Amz-Security-Token": "secret-value",
           "HTTP-Referer": "https://kyrei.local",
         },
         models: [{ id: "alpha" }],
+      }, {
+        id: "query-secret",
+        name: "Query secret",
+        baseURL: "https://example.test/v1?api_key=secret-value#fragment",
+        models: [{ id: "beta" }],
       }],
     });
     const provider = config.providers[0]!;
     expect(provider.baseURL).toBe("https://api.openai.com/v1");
     expect(provider.headers).toEqual({ "HTTP-Referer": "https://kyrei.local" });
+    expect(config.providers[1]?.baseURL).toBe("https://api.openai.com/v1");
     expect(JSON.stringify(publicGatewayConfig(config, normalizeProviderSecrets({})))).not.toContain("secret-value");
   });
 

@@ -4,10 +4,13 @@
  */
 
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createVertex } from "@ai-sdk/google-vertex";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
-import type { ModelParams, ProviderProtocol } from "../types.js";
+import type { ModelParams, ProviderCredentials, ProviderProtocol } from "../types.js";
 
 /** Provider slug used by the OpenAI-compatible builder and providerOptions. */
 export const OPENAI_COMPATIBLE_PROVIDER_NAME = "kyrei";
@@ -18,6 +21,7 @@ export interface BuildModelOpts {
   protocol: ProviderProtocol;
   baseURL: string;
   apiKey: string;
+  credentials?: ProviderCredentials;
   model: string;
   headers?: Record<string, string>;
   fetch?: typeof fetch;
@@ -26,12 +30,16 @@ export interface BuildModelOpts {
 export function buildModel(opts: BuildModelOpts): LanguageModel {
   const baseURL = opts.baseURL.replace(/\/+$/, "");
   const headers = { "X-Kyrei-Engine": "v2", ...(opts.headers ?? {}) };
+  const credentials: ProviderCredentials = {
+    ...(opts.credentials ?? {}),
+    ...(!opts.credentials?.apiKey && opts.apiKey ? { apiKey: opts.apiKey } : {}),
+  };
 
   switch (opts.protocol) {
     case "openai-responses": {
       const provider = createOpenAI({
         baseURL,
-        apiKey: opts.apiKey || "kyrei",
+        ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
         headers,
         ...(opts.fetch ? { fetch: opts.fetch } : {}),
       });
@@ -40,11 +48,59 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
     case "anthropic-messages": {
       const provider = createAnthropic({
         baseURL,
-        apiKey: opts.apiKey || "kyrei",
+        ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
         headers,
         ...(opts.fetch ? { fetch: opts.fetch } : {}),
       });
       return provider.messages(opts.model);
+    }
+    case "google-generative-ai": {
+      const provider = createGoogleGenerativeAI({
+        baseURL,
+        ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
+        headers,
+        ...(opts.fetch ? { fetch: opts.fetch } : {}),
+      });
+      return provider(opts.model);
+    }
+    case "amazon-bedrock": {
+      // Standard Bedrock hosts are derived from the credential region so a
+      // profile can move regions without leaving a stale public URL behind.
+      const customBaseURL = /^https:\/\/bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/i.test(baseURL)
+        ? undefined
+        : baseURL;
+      const provider = createAmazonBedrock({
+        ...(credentials.region ? { region: credentials.region } : {}),
+        ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
+        ...(credentials.accessKeyId ? { accessKeyId: credentials.accessKeyId } : {}),
+        ...(credentials.secretAccessKey ? { secretAccessKey: credentials.secretAccessKey } : {}),
+        ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+        ...(customBaseURL ? { baseURL: customBaseURL } : {}),
+        headers,
+        ...(opts.fetch ? { fetch: opts.fetch } : {}),
+      });
+      return provider(opts.model);
+    }
+    case "google-vertex": {
+      const customBaseURL = baseURL === "https://aiplatform.googleapis.com" ? undefined : baseURL;
+      const serviceAccount = credentials.clientEmail && credentials.privateKey
+        ? {
+            credentials: {
+              client_email: credentials.clientEmail,
+              private_key: credentials.privateKey.replace(/\\n/g, "\n"),
+              ...(credentials.project ? { project_id: credentials.project } : {}),
+            },
+          }
+        : undefined;
+      const provider = createVertex({
+        ...(credentials.project ? { project: credentials.project } : {}),
+        ...(credentials.location ? { location: credentials.location } : {}),
+        ...(serviceAccount ? { googleAuthOptions: serviceAccount } : {}),
+        ...(customBaseURL ? { baseURL: customBaseURL } : {}),
+        headers,
+        ...(opts.fetch ? { fetch: opts.fetch } : {}),
+      });
+      return provider(opts.model);
     }
     case "openai-chat":
     default: {
@@ -58,6 +114,22 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
       });
       return provider(opts.model);
     }
+  }
+}
+
+export function hasProviderCredentials(protocol: ProviderProtocol, credentials: ProviderCredentials): boolean {
+  switch (protocol) {
+    case "amazon-bedrock":
+      return Boolean(
+        credentials.region &&
+        (credentials.apiKey || (credentials.accessKeyId && credentials.secretAccessKey)),
+      );
+    case "google-vertex":
+      return Boolean(
+        credentials.project && credentials.location && credentials.clientEmail && credentials.privateKey,
+      );
+    default:
+      return Boolean(credentials.apiKey);
   }
 }
 

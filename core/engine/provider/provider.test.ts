@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { isRetryable, isRateLimit, isToolUnsupported, isServerError } from "./errors.js";
 import { resolve, isLocalBaseURL } from "./registry.js";
 import { KeyPool } from "./keys.js";
 import { openStream, type StreamLike } from "./open-stream.js";
-import { buildProviderOptions } from "./build.js";
+import { buildModel, buildProviderOptions, hasProviderCredentials } from "./build.js";
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("buildProviderOptions (reasoning/effort)", () => {
   it("emits nothing when no params or reasoning disabled", () => {
@@ -31,6 +33,81 @@ describe("buildProviderOptions (reasoning/effort)", () => {
   });
   it("skips providerOptions for unsupported protocols", () => {
     expect(buildProviderOptions("anthropic-messages", { effort: "high" })).toBeUndefined();
+    expect(buildProviderOptions("google-generative-ai", { effort: "high" })).toBeUndefined();
+    expect(buildProviderOptions("amazon-bedrock", { effort: "high" })).toBeUndefined();
+    expect(buildProviderOptions("google-vertex", { effort: "high" })).toBeUndefined();
+  });
+});
+
+describe("native provider builders", () => {
+  it("constructs Google Generative AI, Bedrock, and Vertex models locally", () => {
+    const google = buildModel({
+      protocol: "google-generative-ai",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "google-key",
+      model: "gemini-2.5-pro",
+    });
+    const bedrock = buildModel({
+      protocol: "amazon-bedrock",
+      baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com",
+      apiKey: "",
+      credentials: { region: "us-east-1", accessKeyId: "AKIA_TEST", secretAccessKey: "secret" },
+      model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    });
+    const vertex = buildModel({
+      protocol: "google-vertex",
+      baseURL: "https://aiplatform.googleapis.com",
+      apiKey: "",
+      credentials: {
+        project: "kyrei-test",
+        location: "us-central1",
+        clientEmail: "kyrei@kyrei-test.iam.gserviceaccount.com",
+        privateKey: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+      },
+      model: "gemini-2.5-pro",
+    });
+    expect(google.provider).toContain("google");
+    expect(bedrock.provider).toContain("bedrock");
+    expect(vertex.provider).toContain("google.vertex");
+  });
+
+  it("requires protocol-complete credential sets", () => {
+    expect(hasProviderCredentials("google-generative-ai", { apiKey: "key" })).toBe(true);
+    expect(hasProviderCredentials("amazon-bedrock", { apiKey: "bearer" })).toBe(false);
+    expect(hasProviderCredentials("amazon-bedrock", { region: "us-east-1", apiKey: "bearer" })).toBe(true);
+    expect(hasProviderCredentials("amazon-bedrock", { region: "us-east-1", accessKeyId: "id" })).toBe(false);
+    expect(hasProviderCredentials("amazon-bedrock", { region: "us-east-1", accessKeyId: "id", secretAccessKey: "secret" })).toBe(true);
+    expect(hasProviderCredentials("google-vertex", { project: "p", location: "l", clientEmail: "e", privateKey: "k" })).toBe(true);
+    expect(hasProviderCredentials("google-vertex", { project: "p", location: "l" })).toBe(false);
+  });
+
+  it("lets native SDKs resolve environment keys instead of injecting a placeholder", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+    vi.stubEnv("GOOGLE_GENERATIVE_AI_API_KEY", "env-google");
+    const cases = [
+      {
+        model: buildModel({ protocol: "openai-responses", baseURL: "https://api.openai.com/v1", apiKey: "", model: "gpt-4o-mini" }),
+        header: "authorization",
+        value: "Bearer env-openai",
+      },
+      {
+        model: buildModel({ protocol: "anthropic-messages", baseURL: "https://api.anthropic.com/v1", apiKey: "", model: "claude-sonnet" }),
+        header: "x-api-key",
+        value: "env-anthropic",
+      },
+      {
+        model: buildModel({ protocol: "google-generative-ai", baseURL: "https://generativelanguage.googleapis.com/v1beta", apiKey: "", model: "gemini-2.5-pro" }),
+        header: "x-goog-api-key",
+        value: "env-google",
+      },
+    ];
+
+    for (const item of cases) {
+      const model = item.model as unknown as { config: { headers: () => Promise<Record<string, string>> | Record<string, string> } };
+      const headers = await model.config.headers();
+      expect(headers[item.header]).toBe(item.value);
+    }
   });
 });
 

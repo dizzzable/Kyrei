@@ -7,6 +7,7 @@
  */
 
 import type { ModelMessage } from "ai";
+import type { GBrainConfig } from "./memory/gbrain.js";
 
 export interface Usage {
   inputTokens?: number;
@@ -92,6 +93,8 @@ export interface EngineConfig {
   personality: string;
   /** Max characters returned by read_file (separate from tool-output cap). */
   fileReadMaxChars: number;
+  /** Optional external knowledge adapters. Built-in project memory remains canonical. */
+  memory: { gbrain: GBrainConfig };
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -106,6 +109,14 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   apiMaxRetries: 2,
   personality: "",
   fileReadMaxChars: 250_000,
+  memory: {
+    gbrain: {
+      mode: "off",
+      command: "gbrain",
+      timeoutMs: 180_000,
+      maxOutputBytes: 200_000,
+    },
+  },
 };
 
 /** Optional per-turn model tuning (reasoning/effort). UI-driven, opt-in. */
@@ -118,7 +129,26 @@ export interface ModelParams {
   reasoning?: boolean;
 }
 
-export type ProviderProtocol = "openai-chat" | "openai-responses" | "anthropic-messages";
+export type ProviderProtocol =
+  | "openai-chat"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "google-generative-ai"
+  | "amazon-bedrock"
+  | "google-vertex";
+
+/** Protocol-scoped credentials loaded only by the local gateway secret store. */
+export interface ProviderCredentials {
+  apiKey?: string;
+  region?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  sessionToken?: string;
+  project?: string;
+  location?: string;
+  clientEmail?: string;
+  privateKey?: string;
+}
 
 /** Options passed to the engine entry point (v1-compatible + abortSignal). */
 export interface RunKyreiChatOpts {
@@ -133,6 +163,8 @@ export interface RunKyreiChatOpts {
   /** Local OpenAI-compatible servers may intentionally accept no API key. */
   requiresApiKey?: boolean;
   apiKey: string;
+  /** Multi-field credentials for Bedrock/Vertex; never supplied by the renderer chat request. */
+  providerCredentials?: ProviderCredentials;
   model: string;
   workspace?: string;
   /** Gateway-owned local audit location; never supplied by the renderer. */

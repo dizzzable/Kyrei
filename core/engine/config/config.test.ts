@@ -16,6 +16,27 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(config.commandTimeoutMs).toBe(DEFAULT_ENGINE_CONFIG.commandTimeoutMs);
   });
 
+  it("validates optional GBrain settings without enabling them by default", () => {
+    expect(resolveEngineConfig().config.memory.gbrain).toEqual(DEFAULT_ENGINE_CONFIG.memory.gbrain);
+    const { config } = resolveEngineConfig({
+      memory: { gbrain: { mode: "read", command: "gbrain-local", source: "personal", timeoutMs: 30_000 } },
+    });
+    expect(config.memory.gbrain).toEqual({
+      mode: "read",
+      command: "gbrain-local",
+      source: "personal",
+      timeoutMs: 30_000,
+      maxOutputBytes: DEFAULT_ENGINE_CONFIG.memory.gbrain.maxOutputBytes,
+    });
+  });
+
+  it("treats an empty GBrain source field as unset", () => {
+    const { config, warnings } = resolveEngineConfig({ memory: { gbrain: { mode: "read", source: "" } } });
+    expect(config.memory.gbrain.mode).toBe("read");
+    expect(config.memory.gbrain.source).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
   it("validates nested permissions and provider roles", () => {
     const { config } = resolveEngineConfig({
       permissions: { terminal: "turbo", review: "always", rules: [{ pattern: "rm *", action: "deny" }] },

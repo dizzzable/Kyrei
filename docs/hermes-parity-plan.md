@@ -62,7 +62,7 @@ This document is an **audit-only plan** for Hermes settings parity. It is based 
 
 | Kyrei area today | Current path(s) | Status vs Hermes |
 |---|---|---|
-| General (provider/base URL, API key, model, role models, workspace) | `src/components/Settings.tsx`, `src/lib/gateway.ts`, `core/gateway.js` | **Partial** |
+| General (provider registry, protocol-specific credentials, model, role models, workspace) | `src/components/Settings.tsx`, `src/components/settings/ProviderManager.tsx`, `src/lib/gateway.ts`, `core/gateway.js` | **Strong partial** |
 | Chat (personality, send-on-enter, rich rendering) | `src/components/Settings.tsx`, `core/engine/config/schema.ts` | **Partial** |
 | Appearance (themes, VS Code theme import, language, scale, density, tool view) | `src/components/Settings.tsx`, `src/components/settings/ThemeGrid.tsx`, `src/lib/theme.ts`, `src/lib/vscode-theme.ts`, `src/store/settings.ts` | **Strong partial** |
 | Notifications | `src/components/Settings.tsx`, `src/store/settings.ts`, `src/App.tsx` | **Partial** |
@@ -90,11 +90,11 @@ Legend: **Keep** = already aligned enough; **Port** = safe parity target; **Reje
 | P2 | Voice settings | Hermes `constants.ts` (`voice`), `voice-field-visible.test.ts`, installed `stt.*` | Kyrei intentionally uses Web Speech only | **Port only Web Speech prefs.** Keep `src/components/Settings.tsx`, `src/store/settings.ts`, `src/lib/speech.ts`, `src/lib/speech-text.ts`. Do **not** port server-side STT/TTS provider matrix. | Existing `src/lib/speech-text.test.ts`; add `src/store/settings.test.ts`; smoke: dictation toggle, TTS test button, BCP-47 language. |
 | P2 | Workspace controls | Hermes `constants.ts` (`workspace`), installed `terminal.*`, `code_execution.*` | Kyrei has workspace path and engine file-read cap, but no separate `persistent_shell` or `env_passthrough` settings UI | **Port only if backend exists.** Safe files: `src/components/Settings.tsx`, `core/gateway.js`, `core/engine/config/schema.ts`. Reject remote/unsafe workspace breadth until engine supports it. | Existing `core/engine/config/config.test.ts`; smoke: choose folder, verify jail still confines file tools. |
 | P3 | Auxiliary models + MoA + delegation/subagents | Hermes `model-settings.tsx`, installed `auxiliary.*`, `moa.*`, `delegation.*` | Kyrei has no equivalent backend orchestration surface | **Reject for this parity phase.** No edits beyond documenting gap. | N/A; blocker is backend capability, not UI. |
-| P3 | Providers accounts/OAuth/custom provider catalog | Hermes `providers-settings.tsx`, `provider-config-panel.tsx`, installed `custom_providers` | Kyrei intentionally has one local OpenAI-compatible provider config | **Reject.** Preserve Kyrei’s simpler local-provider model; do not add OAuth or hosted provider marketplace. | N/A; verify existing provider/base-URL flow only. |
+| P1 | Providers/custom catalog | Hermes `providers-settings.tsx`, `provider-config-panel.tsx`, installed `custom_providers` | Kyrei now has unlimited profiles and six audited transports | **Ported selectively.** OpenAI-compatible, Responses, Anthropic, Gemini, Bedrock and Vertex are native; proprietary Hermes/Nous runtime and account marketplace remain excluded. | `tests/provider-config.test.ts`, `tests/gateway-provider.test.ts`, `core/engine/provider/provider.test.ts`. |
 | P3 | Gateway Local/Cloud/Remote modes | Hermes `gateway-settings.tsx` | Kyrei is local desktop + local gateway only | **Reject.** Conflicts with the repo’s closed desktop/no-browser/local-first constraint. | N/A |
-| P3 | Browser/private URL settings | Hermes `constants.ts` (`safety`), installed `browser.*` | Kyrei should preserve no-browser constraint | **Reject.** Do not add browser automation/privacy switches into Kyrei settings. | N/A |
+| P1 | Agent web research | Hermes `constants.ts` (`safety`), installed `browser.*` | Kyrei has isolated text-only `web_search`/`web_fetch` | **Ported selectively.** No user-facing browser, cookies, JavaScript, private networks, or desktop tabs; only the agent receives public-web tools controlled by `permissions.web`. | `core/engine/web/browser.test.ts`, `core/engine/tools/web.test.ts`. |
 | P3 | Remote terminal backends (`docker`, `ssh`, `modal`, `daytona`, etc.) | Hermes `constants.ts` (`advanced`), installed `terminal.backend`, images | Kyrei currently exposes only local workspace and engine permissioning | **Reject for this phase.** Keep local-only desktop execution model. | N/A |
-| P3 | External memory providers (`hindsight`, `honcho`) | Hermes `constants.ts` (`memory`) | Kyrei has no equivalent backend | **Reject.** Keep local memory/context only. | N/A |
+| P1 | External knowledge layer | Hermes `constants.ts` (`memory`) plus GBrain research | Kyrei keeps local project memory and now has optional GBrain tools | **Ported selectively.** GBrain is opt-in, separate, untrusted, and never replaces the built-in SQLite/project memory. | `core/engine/memory/gbrain.test.ts`, `core/engine/tools/gbrain.test.ts`. |
 | P3 | Computer Use, pets, updates/uninstall, marketplace-like extras | `computer-use-panel.tsx`, `pet-settings.tsx`, `about-settings.tsx`, `uninstall-section.tsx` | Kyrei has no matching capability and does not need it for parity | **Reject.** Nice-to-have Hermes extras, not core Kyrei parity. | N/A |
 
 ## Exact implementation slices that can be worked independently later
@@ -169,7 +169,7 @@ Legend: **Keep** = already aligned enough; **Port** = safe parity target; **Reje
 
 ## Hard constraints / blockers
 
-- **Closed desktop / no-browser**: Hermes browser settings, remote gateway modes, provider OAuth, and cloud-first account flows should not be ported into Kyrei.
+- **Closed desktop / no user browser**: remote gateway modes and cloud-first account flows stay out; public web access exists only inside the isolated agent tool layer.
 - **Backend mismatch**: Hermes `auxiliary`, `moa`, `delegation`, external memory providers, and remote terminal backends have no Kyrei engine backing today.
 - **Test harness gap**: Kyrei currently has strong pure-unit coverage but no dedicated renderer component test suite for `src/components/Settings.tsx`; if settings refactors grow, add small pure tests first (`src/store/settings.test.ts`, `src/lib/theme.test.ts`, `src/lib/vscode-theme.test.ts`) before considering a heavier UI harness.
 

@@ -13,7 +13,7 @@
 import { TOOL_DESCRIPTIONS } from "./tool-descriptions.js";
 
 /** Bump on ANY change to the produced prompt text. */
-export const PROMPT_VERSION = "1.2.0";
+export const PROMPT_VERSION = "1.3.1";
 
 /**
  * Prompt changelog (newest first). Keep entries short and factual.
@@ -21,6 +21,8 @@ export const PROMPT_VERSION = "1.2.0";
  *   editing rules, verification, safety, response language.
  */
 export const PROMPT_CHANGELOG: ReadonlyArray<{ version: string; note: string }> = [
+  { version: "1.3.1", note: "Show GBrain capture guidance only when read-write access is enabled." },
+  { version: "1.3.0", note: "Added opt-in GBrain tools with an explicit untrusted-knowledge boundary." },
   { version: "1.2.0", note: "Added local project-intelligence indexing and impact-analysis guidance." },
   { version: "1.1.0", note: "Added isolated public-web research tools and untrusted-content guidance." },
   { version: "1.0.0", note: "Initial versioned system prompt extracted from Phase 1 orchestrator." },
@@ -33,6 +35,10 @@ export interface SystemPromptInput {
   projectContext?: string;
   /** Optional assistant personality/style, prepended when set. */
   personality?: string;
+  /** Whether the optional GBrain tool group is enabled for this turn. */
+  hasBrainTools?: boolean;
+  /** Whether GBrain capture is enabled in addition to read operations. */
+  hasBrainWriteTools?: boolean;
 }
 
 const IDENTITY =
@@ -67,6 +73,14 @@ const PROJECT_INTEL_POLICY =
   `- project_index — ${TOOL_DESCRIPTIONS.project_index}\n` +
   `- project_map — ${TOOL_DESCRIPTIONS.project_map}\n` +
   `- project_impact — ${TOOL_DESCRIPTIONS.project_impact}`;
+
+const BRAIN_READ_TOOL_POLICY =
+  `- brain_search — ${TOOL_DESCRIPTIONS.brain_search}\n` +
+  `- brain_get — ${TOOL_DESCRIPTIONS.brain_get}\n` +
+  `- brain_think — ${TOOL_DESCRIPTIONS.brain_think}\n` +
+  `- brain_status — ${TOOL_DESCRIPTIONS.brain_status}`;
+
+const BRAIN_WRITE_TOOL_POLICY = `- brain_capture — ${TOOL_DESCRIPTIONS.brain_capture}`;
 
 const EDITING_RULES =
   "Правила правок:\n" +
@@ -103,6 +117,8 @@ export function buildSystemPrompt(o: SystemPromptInput): string | undefined {
     TOOL_POLICY,
     WEB_TOOL_POLICY,
     PROJECT_INTEL_POLICY,
+    ...(o.hasBrainTools ? [BRAIN_READ_TOOL_POLICY] : []),
+    ...(o.hasBrainWriteTools ? [BRAIN_WRITE_TOOL_POLICY] : []),
     EDITING_RULES,
     SAFETY,
     WEB_SAFETY,

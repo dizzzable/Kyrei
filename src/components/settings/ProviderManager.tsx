@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, KeyRound, Plus, Server, Trash2 } from "lucide-react";
 import { gateway } from "@/lib/gateway";
-import type { AppConfig, ProviderProfile, ProviderProtocol } from "@/lib/types";
+import type { AppConfig, ProviderCredentialsInput, ProviderProfile, ProviderProtocol } from "@/lib/types";
 import { Button, Input } from "@/components/ui";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +22,9 @@ const PROTOCOL_OPTIONS: Array<{ value: ProviderProtocol; label: string; defaultB
   { value: "openai-chat", label: "OpenAI-compatible / Chat", defaultBaseURL: "https://api.openai.com/v1" },
   { value: "openai-responses", label: "OpenAI / Responses", defaultBaseURL: "https://api.openai.com/v1" },
   { value: "anthropic-messages", label: "Anthropic / Messages", defaultBaseURL: "https://api.anthropic.com/v1" },
+  { value: "google-generative-ai", label: "Google Gemini / Generative AI", defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta" },
+  { value: "amazon-bedrock", label: "AWS Bedrock / Converse", defaultBaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com" },
+  { value: "google-vertex", label: "Google Vertex AI", defaultBaseURL: "https://aiplatform.googleapis.com" },
 ];
 
 /** Compact editor for Kyrei's built-in provider transports. */
@@ -37,6 +40,14 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
   const [models, setModels] = useState("");
   const [requiresApiKey, setRequiresApiKey] = useState(true);
   const [apiKey, setApiKey] = useState("");
+  const [region, setRegion] = useState("us-east-1");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [sessionToken, setSessionToken] = useState("");
+  const [project, setProject] = useState("");
+  const [location, setLocation] = useState("us-central1");
+  const [clientEmail, setClientEmail] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,6 +62,14 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     setModels(modelText(next));
     setRequiresApiKey(next.requiresApiKey);
     setApiKey("");
+    setRegion(next.protocol === "amazon-bedrock" && next.hasKey ? "" : "us-east-1");
+    setAccessKeyId("");
+    setSecretAccessKey("");
+    setSessionToken("");
+    setProject("");
+    setLocation(next.protocol === "google-vertex" && next.hasKey ? "" : "us-central1");
+    setClientEmail("");
+    setPrivateKey("");
   }, [config.providers, config.activeProviderId, selectedId]);
 
   const receive = (next: AppConfig) => {
@@ -116,11 +135,48 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
   };
 
   const saveSecret = async () => {
-    if (!selected || !apiKey.trim()) return;
+    if (!selected) return;
+    if (protocol !== selected.protocol) {
+      setError("Сначала сохраните выбранный транспорт провайдера, затем добавьте учётные данные.");
+      return;
+    }
+    let credentials: ProviderCredentialsInput;
+    if (protocol === "amazon-bedrock") {
+      credentials = {
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+        region: region.trim(),
+        ...(accessKeyId.trim() ? { accessKeyId: accessKeyId.trim() } : {}),
+        ...(secretAccessKey.trim() ? { secretAccessKey: secretAccessKey.trim() } : {}),
+        ...(sessionToken.trim() ? { sessionToken: sessionToken.trim() } : {}),
+      };
+      if (!credentials.region || (!credentials.apiKey && (!credentials.accessKeyId || !credentials.secretAccessKey))) {
+        setError("Для Bedrock укажите регион и либо bearer API key, либо пару AWS Access Key / Secret Key.");
+        return;
+      }
+    } else if (protocol === "google-vertex") {
+      credentials = {
+        project: project.trim(),
+        location: location.trim(),
+        clientEmail: clientEmail.trim(),
+        privateKey: privateKey.trim(),
+      };
+      if (!credentials.project || !credentials.location || !credentials.clientEmail || !credentials.privateKey) {
+        setError("Для Vertex укажите project, location, client email и private key сервисного аккаунта.");
+        return;
+      }
+    } else {
+      if (!apiKey.trim()) return;
+      credentials = { apiKey: apiKey.trim() };
+    }
     setBusy(true);
     try {
-      receive(await gateway.setProviderSecret(selected.id, apiKey.trim()));
+      receive(await gateway.setProviderSecret(selected.id, credentials));
       setApiKey("");
+      setAccessKeyId("");
+      setSecretAccessKey("");
+      setSessionToken("");
+      setClientEmail("");
+      setPrivateKey("");
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -157,7 +213,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <div className="text-[12px] font-medium text-foreground">Провайдеры</div>
-          <p className="mt-0.5 text-[11px] leading-4 text-muted">Встроенные транспорты Kyrei: OpenAI-compatible Chat, OpenAI Responses и Anthropic Messages. Ключи хранятся отдельно и не попадают в экспорт настроек.</p>
+          <p className="mt-0.5 text-[11px] leading-4 text-muted">Нативные транспорты OpenAI, Anthropic, Gemini, Bedrock и Vertex плюс неограниченные OpenAI-compatible профили. Учётные данные хранятся отдельно и не попадают в экспорт настроек.</p>
         </div>
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void create()}>
           <Plus size={14} /> Добавить
@@ -231,14 +287,75 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
             </label>
             <label className="flex items-center gap-2 text-[11px] text-secondary">
               <input type="checkbox" checked={requiresApiKey} onChange={(event) => setRequiresApiKey(event.target.checked)} />
-              API-ключ обязателен (выключите для локального Ollama/LM Studio)
+              Учётные данные обязательны (выключите для локального Ollama/LM Studio или переменных окружения)
             </label>
+            {protocol === "amazon-bedrock" ? (
+              <div className="grid gap-2 rounded-md border border-border-soft bg-bg/30 p-2 @[28rem]:grid-cols-2">
+                <label className="space-y-1 text-[11px] text-muted">
+                  <span>AWS Region</span>
+                  <Input value={region} onChange={(event) => setRegion(event.target.value)} placeholder={selected.hasKey ? "Enter stored region to replace access" : "us-east-1"} />
+                </label>
+                <label className="space-y-1 text-[11px] text-muted">
+                  <span>AWS Access Key ID</span>
+                  <Input value={accessKeyId} onChange={(event) => setAccessKeyId(event.target.value)} placeholder={selected.hasKey ? "Saved" : "AKIA…"} />
+                </label>
+                <label className="space-y-1 text-[11px] text-muted">
+                  <span>AWS Secret Access Key</span>
+                  <Input type="password" value={secretAccessKey} onChange={(event) => setSecretAccessKey(event.target.value)} placeholder={selected.hasKey ? "••••••••" : "Secret key"} />
+                </label>
+                <label className="space-y-1 text-[11px] text-muted">
+                  <span>Session token (optional)</span>
+                  <Input type="password" value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} placeholder="Temporary session token" />
+                </label>
+              </div>
+            ) : null}
+            {protocol === "google-vertex" ? (
+              <div className="grid gap-2 rounded-md border border-border-soft bg-bg/30 p-2 @[28rem]:grid-cols-2">
+                <label className="space-y-1 text-[11px] text-muted">
+                  <span>Google Cloud project</span>
+                  <Input value={project} onChange={(event) => setProject(event.target.value)} placeholder="my-project" />
+                </label>
+                <label className="space-y-1 text-[11px] text-muted">
+                  <span>Location</span>
+                  <Input value={location} onChange={(event) => setLocation(event.target.value)} placeholder={selected.hasKey ? "Enter stored location to replace access" : "us-central1"} />
+                </label>
+                <label className="space-y-1 text-[11px] text-muted @[28rem]:col-span-2">
+                  <span>Service account client email</span>
+                  <Input value={clientEmail} onChange={(event) => setClientEmail(event.target.value)} placeholder="kyrei@project.iam.gserviceaccount.com" />
+                </label>
+                <label className="space-y-1 text-[11px] text-muted @[28rem]:col-span-2">
+                  <span>Service account private key</span>
+                  <textarea
+                    value={privateKey}
+                    onChange={(event) => setPrivateKey(event.target.value)}
+                    rows={3}
+                    placeholder={selected.hasKey ? "Credentials saved; paste a key only to replace them" : "-----BEGIN PRIVATE KEY-----"}
+                    className="w-full resize-y rounded-md border border-border bg-surface px-2.5 py-2 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted focus:border-primary"
+                  />
+                </label>
+              </div>
+            ) : null}
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="secondary" size="sm" disabled={busy} onClick={() => void save()}>Сохранить провайдер</Button>
               <div className="ml-auto flex items-center gap-1.5">
-                <Input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={selected.hasKey ? "••••••••" : "API key"} className="h-7 w-28 text-[11px]" />
-                <Button variant="ghost" size="sm" disabled={!apiKey.trim() || busy} onClick={() => void saveSecret()}>Ключ</Button>
-                {selected.hasKey && selected.requiresApiKey ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => void clearSecret()}>Удалить ключ</Button> : null}
+                {protocol !== "google-vertex" ? (
+                  <Input
+                    type="password"
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder={selected.hasKey ? "••••••••" : protocol === "amazon-bedrock" ? "Bearer key (optional)" : "API key"}
+                    className="h-7 w-36 text-[11px]"
+                  />
+                ) : null}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy || (!["amazon-bedrock", "google-vertex"].includes(protocol) && !apiKey.trim())}
+                  onClick={() => void saveSecret()}
+                >
+                  {["amazon-bedrock", "google-vertex"].includes(protocol) ? "Доступ" : "Ключ"}
+                </Button>
+                {selected.hasKey && selected.requiresApiKey ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => void clearSecret()}>Удалить доступ</Button> : null}
                 {config.providers.length > 1 ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => void remove()} className="text-danger hover:text-danger"><Trash2 size={13} /></Button> : null}
               </div>
             </div>

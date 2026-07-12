@@ -9,13 +9,14 @@
 import { streamText } from "ai";
 import { join } from "node:path";
 import type { RunKyreiChatOpts, RunKyreiChatResult, MessagePart } from "../types.js";
-import { buildModel, buildProviderOptions } from "../provider/build.js";
+import { buildModel, buildProviderOptions, hasProviderCredentials } from "../provider/build.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { KeyPool } from "../provider/keys.js";
 import { openStream, type StreamLike } from "../provider/open-stream.js";
 import { buildTools, type ToolMeta } from "../tools/index.js";
 import { buildWebTools } from "../tools/web.js";
+import { buildGBrainTools } from "../tools/gbrain.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { assembleSystemContext } from "../memory/layers.js";
@@ -32,7 +33,13 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   if (warnings.length) console.warn("[kyrei v2] config:", warnings.join("; "));
   opts.emit({ type: "message.start" });
 
-  if (opts.requiresApiKey !== false && !opts.apiKey) return emitNoKeyGuidance(opts.emit);
+  const providerCredentials = {
+    ...(opts.providerCredentials ?? {}),
+    ...(!opts.providerCredentials?.apiKey && opts.apiKey ? { apiKey: opts.apiKey } : {}),
+  };
+  if (opts.requiresApiKey !== false && !hasProviderCredentials(opts.providerProtocol, providerCredentials)) {
+    return emitNoKeyGuidance(opts.emit);
+  }
 
   const workspaceReady = Boolean(opts.workspace) && (await isWorkspaceDir(opts.workspace!));
   const toolMeta = new Map<string, ToolMeta>();
@@ -41,6 +48,11 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   if (tools && ccr) tools = { ...tools, retrieve: makeRetrieveTool(ccr) };
   const webTools = buildWebTools(cfg, opts.auditLogPath ? { audit: createAuditLog(opts.auditLogPath) } : {});
   if (Object.keys(webTools).length) tools = { ...(tools ?? {}), ...webTools };
+  const brainTools = buildGBrainTools(cfg.memory.gbrain, {
+    signal: opts.abortSignal,
+    maxModelOutputChars: cfg.maxToolOutput,
+  });
+  if (Object.keys(brainTools).length) tools = { ...(tools ?? {}), ...brainTools };
 
   let projectContext: string | undefined;
   if (workspaceReady) {
@@ -56,6 +68,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     hasTools: Boolean(tools),
     personality: cfg.personality,
     projectContext,
+    hasBrainTools: Object.keys(brainTools).length > 0,
+    hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
   });
 
   // Candidate models: primary (from settings) + provider-local fallbacks.
@@ -77,6 +91,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       protocol: opts.providerProtocol,
       baseURL: entry.baseURL,
       apiKey: opts.apiKey,
+      credentials: providerCredentials,
       model: entry.id,
       headers: opts.providerHeaders,
       ...(keyPool.isMulti() ? { fetch: keyPool.fetchMiddleware() } : {}),

@@ -51,6 +51,9 @@ export {
 export type { ProjectEdge, ProjectImpact, ProjectIndex, ProjectNode } from "./intel/project-index.js";
 export { createOpenVikingClient } from "./memory/openviking.js";
 export type { OpenVikingClient, OpenVikingOptions } from "./memory/openviking.js";
+export { createGBrainClient, formatGBrainResult, runGBrainProcess } from "./memory/gbrain.js";
+export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode } from "./memory/gbrain.js";
+export { buildGBrainTools } from "./tools/gbrain.js";
 
 export const ENGINE_VERSION = "2.0.0-dev";
 

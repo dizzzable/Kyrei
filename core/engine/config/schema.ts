@@ -39,6 +39,21 @@ const ProviderRolesSchema = z.object({
   plan: z.string().default(DEFAULT_ENGINE_CONFIG.providerRoles.plan),
 });
 
+const GBrainConfigSchema = z.object({
+  mode: z.enum(["off", "read", "read-write"]).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.mode),
+  command: z.string().trim().min(1).max(1_024).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.command),
+  source: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().trim().regex(/^[A-Za-z0-9._-]{1,128}$/).optional(),
+  ),
+  timeoutMs: z.number().int().min(1_000).max(3_600_000).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.timeoutMs),
+  maxOutputBytes: z.number().int().min(1_000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.maxOutputBytes),
+});
+
+const MemoryConfigSchema = z.object({
+  gbrain: GBrainConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.gbrain),
+});
+
 /** Full engine config schema. All fields optional with sane defaults. */
 export const EngineConfigSchema = z.object({
   maxSteps: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.maxSteps),
@@ -52,6 +67,7 @@ export const EngineConfigSchema = z.object({
   apiMaxRetries: z.number().int().min(0).max(10).default(DEFAULT_ENGINE_CONFIG.apiMaxRetries),
   personality: z.string().max(4000).default(DEFAULT_ENGINE_CONFIG.personality),
   fileReadMaxChars: z.number().int().min(1000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.fileReadMaxChars),
+  memory: MemoryConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory),
 });
 
 export interface ResolveResult {
