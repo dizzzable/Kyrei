@@ -154,6 +154,7 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       emit: event => emitTo(sessionId, event),
       messages: convoFor(sessionId),
       providerBase: activeProvider.baseURL,
+      providerProtocol: activeProvider.protocol,
       providerId: activeProvider.id,
       providerHeaders: activeProvider.headers,
       requiresApiKey: activeProvider.requiresApiKey,

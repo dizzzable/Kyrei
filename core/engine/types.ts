@@ -118,11 +118,14 @@ export interface ModelParams {
   reasoning?: boolean;
 }
 
+export type ProviderProtocol = "openai-chat" | "openai-responses" | "anthropic-messages";
+
 /** Options passed to the engine entry point (v1-compatible + abortSignal). */
 export interface RunKyreiChatOpts {
   emit: (event: KyreiEvent) => void;
   messages: ModelMessage[];
   providerBase: string;
+  providerProtocol: ProviderProtocol;
   /** Stable provider-registry id for events and model preset separation. */
   providerId?: string;
   /** Non-secret provider headers configured locally by the user. */

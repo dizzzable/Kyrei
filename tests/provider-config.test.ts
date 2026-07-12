@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  defaultBaseURLForProtocol,
   getActiveProvider,
   normalizeGatewayConfig,
   normalizeProviderSecrets,
@@ -16,6 +17,22 @@ describe("provider registry config", () => {
     expect(config.providers).toHaveLength(1);
     expect(config.activeModelId).toBe("llama3");
     expect(config.providers[0]).toMatchObject({ protocol: "openai-chat", requiresApiKey: false });
+  });
+
+  it("accepts built-in native transport protocols and protocol-specific base URL defaults", () => {
+    const config = normalizeGatewayConfig({
+      providers: [{
+        id: "anthropic",
+        name: "Anthropic",
+        protocol: "anthropic-messages",
+        baseURL: "notaurl",
+        models: [{ id: "claude-3-5-sonnet-20241022" }],
+      }],
+    });
+    expect(config.providers[0]).toMatchObject({
+      protocol: "anthropic-messages",
+      baseURL: defaultBaseURLForProtocol("anthropic-messages"),
+    });
   });
 
   it("keeps credentials outside the public config response", () => {

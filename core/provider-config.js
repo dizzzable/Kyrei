@@ -7,9 +7,15 @@
  * arbitrary packages from user configuration.
  */
 
+export const SUPPORTED_PROVIDER_PROTOCOLS = ["openai-chat", "openai-responses", "anthropic-messages"];
 const DEFAULT_PROVIDER_ID = "default-openai-compatible";
-const DEFAULT_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_PROTOCOL = "openai-chat";
 const DEFAULT_MODEL = "gpt-4o-mini";
+const DEFAULT_BASE_URLS = {
+  "openai-chat": "https://api.openai.com/v1",
+  "openai-responses": "https://api.openai.com/v1",
+  "anthropic-messages": "https://api.anthropic.com/v1",
+};
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -33,7 +39,16 @@ export function isLocalProviderUrl(baseURL) {
   }
 }
 
-export function normalizeBaseURL(value, fallback = DEFAULT_BASE_URL) {
+export function defaultBaseURLForProtocol(protocol) {
+  return DEFAULT_BASE_URLS[protocol] ?? DEFAULT_BASE_URLS[DEFAULT_PROTOCOL];
+}
+
+export function normalizeProviderProtocol(value) {
+  const candidate = text(value).toLowerCase();
+  return SUPPORTED_PROVIDER_PROTOCOLS.includes(candidate) ? candidate : DEFAULT_PROTOCOL;
+}
+
+export function normalizeBaseURL(value, fallback = defaultBaseURLForProtocol(DEFAULT_PROTOCOL)) {
   const candidate = text(value, fallback).replace(/\/+$/, "");
   try {
     const url = new URL(candidate);
@@ -77,14 +92,15 @@ function normalizeHeaders(value) {
 export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID) {
   const source = object(value);
   const id = normalizeId(source.id, fallbackId);
-  const baseURL = normalizeBaseURL(source.baseURL ?? source.provider);
+  const protocol = normalizeProviderProtocol(source.protocol);
+  const baseURL = normalizeBaseURL(source.baseURL ?? source.provider, defaultBaseURLForProtocol(protocol));
   const headers = normalizeHeaders(source.headers);
   const models = normalizeModels(source.models, source.model);
   const name = text(source.name, id === DEFAULT_PROVIDER_ID ? "OpenAI-compatible" : id);
   return {
     id,
     name,
-    protocol: "openai-chat",
+    protocol,
     baseURL,
     ...(Object.keys(headers).length ? { headers } : {}),
     models,

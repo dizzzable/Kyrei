@@ -28,7 +28,9 @@
     "dist:linux": "npm run package:prepare && electron-builder --linux"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "2.0.85",
     "@ai-sdk/openai-compatible": "1.0.42",
+    "@ai-sdk/openai": "2.0.110",
     "@vscode/ripgrep": "^1.18.0",
     "ai": "5.0.210",
     "better-sqlite3": "^12.11.1",
