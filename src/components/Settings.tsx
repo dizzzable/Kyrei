@@ -58,7 +58,7 @@ const SECTION_META: Record<VisibleSectionId, { label: string; icon: React.ReactN
 };
 
 function resolveVisibleSection(section: SectionId): VisibleSectionId {
-  return SECTION_ALIASES[section] ?? section;
+  return SECTION_ALIASES[section] ?? (section as VisibleSectionId);
 }
 
 export function Settings({ config, onClose, onSaved, initialSection = "general" }: SettingsProps) {
