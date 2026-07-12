@@ -1,7 +1,6 @@
 import { createServer } from "node:http";
 import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { join, resolve, relative } from "node:path";
-import { runKyreiChat } from "./kyrei-engine.js";
 import { SessionStore } from "./session-store.js";
 
 /**
@@ -58,18 +57,15 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
   const store = new SessionStore({ runtimeDir: dataDir });
   await store.load();
 
-  // SSE subscribers + cancellation flags, keyed by session id.
+  // SSE subscribers + per-session AbortControllers, keyed by session id.
   const subscribers = new Map(); // sessionId -> Set<res>
-  const cancelled = new Set(); // sessionIds asked to stop (v1 engine)
-  const controllers = new Map(); // sessionId -> AbortController (v2 engine)
+  const controllers = new Map(); // sessionId -> AbortController
 
-  // v2 engine is a built ESM bundle; loaded lazily. It is now the default;
-  // set KYREI_ENGINE=v1 to fall back to the legacy engine for one release.
-  const useV2 = process.env.KYREI_ENGINE !== "v1";
-  let engineV2 = null;
-  const getEngineV2 = async () => {
-    if (!engineV2) engineV2 = await import("./engine/.dist/index.mjs");
-    return engineV2;
+  // The engine is a built ESM bundle, loaded lazily on first prompt.
+  let engine = null;
+  const getEngine = async () => {
+    if (!engine) engine = await import("./engine/.dist/index.mjs");
+    return engine;
   };
 
   function emitTo(sessionId, event) {
@@ -90,7 +86,6 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
   }
 
   async function runPrompt(sessionId, text) {
-    cancelled.delete(sessionId);
     const session = store.getSession(sessionId);
     if (!session) return;
 
@@ -109,15 +104,10 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
       workspace: config.workspace,
     };
 
-    let run;
-    if (useV2) {
-      const controller = new AbortController();
-      controllers.set(sessionId, controller);
-      const mod = await getEngineV2();
-      run = mod.runKyreiChat({ ...common, abortSignal: controller.signal, config: config.engine });
-    } else {
-      run = runKyreiChat({ ...common, isCancelled: () => cancelled.has(sessionId) });
-    }
+    const controller = new AbortController();
+    controllers.set(sessionId, controller);
+    const mod = await getEngine();
+    const run = mod.runKyreiChat({ ...common, abortSignal: controller.signal, config: config.engine });
 
     await run.then(({ text, parts }) => {
       store.appendMessage(sessionId, { role: "assistant", content: text, parts });
@@ -217,7 +207,6 @@ export async function startGateway({ dataDir, chooseFolder, preferredPort = 8765
         const body = await readBody(req);
         if (body.session) {
           const sid = String(body.session);
-          cancelled.add(sid);
           controllers.get(sid)?.abort();
         }
         return sendJson(res, 200, { ok: true });

@@ -16,8 +16,8 @@ Electron + React (renderer) поверх локального TypeScript/Node-д
 - **`.kiro/specs/kyrei-engine/`** — формальный спек (requirements / design / tasks).
 - **`docs/research.md`** — журнал исследований и решений.
 
-Движок изолирован за флагом: v2 по умолчанию, `KYREI_ENGINE=v1` возвращает legacy-движок
-на один релиз.
+Движок v2 — единственный (legacy v1 удалён). Изолирован от оболочки: не знает про Electron,
+общается с рендерером только через локальный gateway.
 
 ## Команды
 

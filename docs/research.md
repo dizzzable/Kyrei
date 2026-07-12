@@ -892,4 +892,6 @@
 - **Повторная live-валидация** после изменений prompt/config/sandbox: против `a6.a6api.com/v1` (`gpt-5.6-sol`) — `status: complete`, `tool.start` с реальными args, файл создан, 5.5 c. Заодно подтверждён **fail-open конфига в бою**: переданы битый `maxSteps: 99999` и legacy `autonomy: "turbo"` → в логе `migrated legacy 'autonomy' → permissions.terminal` и `maxSteps > 200 → using default`, движок не упал.
 - **Тесты: 112 проходят.** Спек kyrei-engine реализован полностью.
 
+**Удаление legacy-движка v1 (2026-07-12):** по решению — оставляем только v2. Удалён `core/kyrei-engine.js`; из `core/gateway.js` вырезаны импорт v1, флаг `KYREI_ENGINE`/`useV2`, ветка выбора движка и polling-отмена (`cancelled`-set, `isCancelled`) — остался только v2-путь на `AbortController`. Из CI убрана ось матрицы `engine:[v1,v2]` (теперь только `os`). README обновлён. `check-js` теперь 6 JS-файлов (было 7). Gate зелёный, 112 тестов проходят.
+
 Не интегрированы в живой цикл (модули готовы и протестированы, интеграция — при флипе v2): approval-события через gateway, аудит на каждый вызов, авто-verify после правок, реальный спавн read-роя, компакция активна только при наличии workspace/CCR.
