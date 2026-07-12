@@ -63,6 +63,7 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
   const warnings: string[] = [];
   if (raw == null || typeof raw !== "object") return { value: {}, warnings };
   const v = { ...(raw as Record<string, unknown>) };
+  const agent = v["agent"];
 
   // v0.1: flat `autonomy: "auto" | "turbo" | "off"` → permissions.terminal
   if (typeof v["autonomy"] === "string" && v["permissions"] == null) {
@@ -75,6 +76,27 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
     v["maxSteps"] = v["maxToolCalls"];
     delete v["maxToolCalls"];
     warnings.push("migrated legacy 'maxToolCalls' → maxSteps");
+  }
+  // Hermes nested config: `agent.max_turns` → `maxSteps`
+  if (v["maxSteps"] == null && agent && typeof agent === "object" && typeof (agent as Record<string, unknown>)["max_turns"] === "number") {
+    v["maxSteps"] = (agent as Record<string, unknown>)["max_turns"];
+    warnings.push("migrated Hermes 'agent.max_turns' → maxSteps");
+  }
+  // Hermes nested config: `agent.api_max_retries` → `apiMaxRetries`
+  if (
+    v["apiMaxRetries"] == null &&
+    agent &&
+    typeof agent === "object" &&
+    typeof (agent as Record<string, unknown>)["api_max_retries"] === "number"
+  ) {
+    v["apiMaxRetries"] = (agent as Record<string, unknown>)["api_max_retries"];
+    warnings.push("migrated Hermes 'agent.api_max_retries' → apiMaxRetries");
+  }
+  // Hermes snake_case top-level: `file_read_max_chars` → `fileReadMaxChars`
+  if (v["fileReadMaxChars"] == null && typeof v["file_read_max_chars"] === "number") {
+    v["fileReadMaxChars"] = v["file_read_max_chars"];
+    delete v["file_read_max_chars"];
+    warnings.push("migrated Hermes 'file_read_max_chars' → fileReadMaxChars");
   }
   return { value: v, warnings };
 }
