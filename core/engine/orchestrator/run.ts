@@ -17,6 +17,7 @@ import { openStream, type StreamLike } from "../provider/open-stream.js";
 import { buildTools, type ToolMeta } from "../tools/index.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
+import { assembleSystemContext } from "../memory/layers.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { buildStopWhen } from "./stop-conditions.js";
 import { makePrepareStep } from "./prepare-step.js";
@@ -31,12 +32,27 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
 
   if (!opts.apiKey) return emitNoKeyGuidance(opts.emit);
 
-  const toolsEnabled = Boolean(opts.workspace) && (await isWorkspaceDir(opts.workspace!));
+  const workspaceReady = Boolean(opts.workspace) && (await isWorkspaceDir(opts.workspace!));
   const toolMeta = new Map<string, ToolMeta>();
-  const ccr = toolsEnabled ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
-  let tools = toolsEnabled ? buildTools(opts.workspace!, cfg, toolMeta, opts.abortSignal) : undefined;
+  const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
+  let tools = workspaceReady ? buildTools(opts.workspace!, cfg, toolMeta, opts.abortSignal) : undefined;
   if (tools && ccr) tools = { ...tools, retrieve: makeRetrieveTool(ccr) };
-  const system = buildSystemPrompt({ workspace: opts.workspace, hasTools: Boolean(tools), personality: cfg.personality });
+
+  let projectContext: string | undefined;
+  if (workspaceReady) {
+    try {
+      const assembled = await assembleSystemContext({ workspace: opts.workspace! });
+      projectContext = assembled.trim() ? assembled : undefined;
+    } catch (error) {
+      console.warn("[kyrei v2] project context disabled:", error);
+    }
+  }
+  const system = buildSystemPrompt({
+    workspace: opts.workspace,
+    hasTools: Boolean(tools),
+    personality: cfg.personality,
+    projectContext,
+  });
 
   // Candidate models: primary (from settings) + configured fallback chain.
   const primary = resolveModel(opts.model, { baseURL: opts.providerBase, id: opts.model });
