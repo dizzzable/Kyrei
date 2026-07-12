@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#000000"/>
+  <!-- Kyrei monogram "K": angular geometric, white on black (reiwa-style) -->
+  <path d="M150 104 L198 104 L198 214 L352 104 L352 152 L198 256 L368 360 L368 408 L198 304 L198 408 L150 408 Z"
+        fill="#ffffff"/>
+  <!-- subtle facet seam echoing the constructed/wireframe look -->
+  <path d="M198 256 L326 122" stroke="#000000" stroke-width="6" stroke-linecap="round"/>
+  <path d="M198 256 L344 384" stroke="#000000" stroke-width="6" stroke-linecap="round"/>
+</svg>

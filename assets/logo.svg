@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="660" viewBox="0 0 512 660">
+  <rect width="512" height="660" fill="#000000"/>
+
+  <g fill="none" stroke="#ffffff" stroke-linejoin="miter" stroke-linecap="butt">
+    <!-- wireframe "K" outline -->
+    <path d="M150 104 L198 104 L198 214 L352 104 L352 152 L198 256 L368 360 L368 408 L198 304 L198 408 L150 408 Z"
+          stroke-width="16"/>
+    <!-- stem right edge (defines the column) -->
+    <path d="M198 104 L198 408" stroke-width="7"/>
+    <!-- internal facet lines (constructed look) -->
+    <path d="M198 256 L352 104" stroke-width="4"/>
+    <path d="M198 256 L368 408" stroke-width="4"/>
+    <!-- signature long diagonal slash crossing into empty space -->
+    <path d="M116 474 L432 96" stroke-width="5"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="256" y="600" text-anchor="middle"
+        font-family="Arial, Helvetica, sans-serif" font-size="132" font-weight="600"
+        letter-spacing="6" fill="#ffffff">kyrei</text>
+</svg>

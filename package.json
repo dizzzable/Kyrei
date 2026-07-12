@@ -14,12 +14,13 @@
     "dev:renderer": "vite",
     "build": "vite build",
     "build:engine": "node scripts/build-engine.mjs",
+    "gen-icons": "node scripts/gen-icons.mjs",
     "typecheck:engine": "tsc --noEmit -p core/engine/tsconfig.json",
     "check:js": "node scripts/check-js.mjs",
     "test": "vitest --run",
     "gate": "npm run typecheck:engine && npm run build:engine && npm run check:js && npm run test",
     "start": "vite build && node scripts/build-engine.mjs && electron .",
-    "dist": "vite build && node scripts/build-engine.mjs && electron-builder"
+    "dist": "npm run gen-icons && vite build && node scripts/build-engine.mjs && electron-builder"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "1.0.42",
@@ -32,6 +33,7 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.1.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.1.1",
@@ -45,6 +47,7 @@
     "fast-check": "^4.9.0",
     "lucide-react": "^1.24.0",
     "msw": "^2.15.0",
+    "png-to-ico": "^3.0.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -66,6 +69,8 @@
       "!core/engine/**/*.test.ts",
       "core/engine/.dist/**/*",
       "dist/renderer/**/*",
+      "assets/icon.png",
+      "assets/icon.ico",
       "package.json"
     ],
     "asarUnpack": [
@@ -80,9 +85,20 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
+      "icon": "assets/icon.ico",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
@@ -99,10 +115,12 @@
       "artifactName": "${productName}-Portable-${version}.${ext}"
     },
     "mac": {
-      "target": "dmg"
+      "target": "dmg",
+      "icon": "assets/icon.png"
     },
     "linux": {
-      "target": "AppImage"
+      "target": "AppImage",
+      "icon": "assets/icon.png"
     }
   }
 }

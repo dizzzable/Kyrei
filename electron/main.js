@@ -8,6 +8,7 @@ ipcMain.handle("kyrei:open-external", (_event, url) => {
 });
 
 const here = fileURLToPath(new URL(".", import.meta.url));
+const appIcon = join(here, "..", "assets", "icon.png");
 
 let windowRef;
 let gateway; // { port, close }
@@ -27,6 +28,7 @@ async function createWindow(port) {
     minHeight: 640,
     backgroundColor: "#0d0f13",
     title: "Kyrei",
+    icon: appIcon,
     webPreferences: {
       contextIsolation: true,
       sandbox: true,
