@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { Message } from "@/components/Message";
+import { TooltipProvider } from "@/components/ui";
 import { resetUiSettings, setUiSetting } from "@/store/settings";
 import type { ChatMessage } from "@/lib/types";
 
@@ -21,7 +22,9 @@ describe("Message reasoning visibility", () => {
   });
 
   it("shows reasoning blocks by default", () => {
-    const html = renderToStaticMarkup(createElement(Message, { message: assistantMessage }));
+    const html = renderToStaticMarkup(
+      createElement(TooltipProvider, null, createElement(Message, { message: assistantMessage })),
+    );
 
     expect(html).toContain("Размышление");
     expect(html).toContain("final answer");
@@ -30,7 +33,9 @@ describe("Message reasoning visibility", () => {
   it("hides reasoning blocks when the UI preference is disabled", () => {
     setUiSetting("showReasoning", false);
 
-    const html = renderToStaticMarkup(createElement(Message, { message: assistantMessage }));
+    const html = renderToStaticMarkup(
+      createElement(TooltipProvider, null, createElement(Message, { message: assistantMessage })),
+    );
 
     expect(html).not.toContain("Размышление");
     expect(html).toContain("final answer");
