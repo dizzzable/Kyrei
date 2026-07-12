@@ -1,12 +1,15 @@
 import type { EvalTask } from "./harness.js";
 import { fileExists, fileContains } from "./harness.js";
 
-const usage = { inputTokens: 20, outputTokens: 10, totalTokens: 30 };
+const usage = {
+  inputTokens: { total: 20, noCache: 20, cacheRead: undefined, cacheWrite: undefined },
+  outputTokens: { total: 10, text: 10, reasoning: undefined },
+};
 
 function toolCallStep(toolName: string, input: unknown): unknown[] {
   return [
     { type: "tool-call", toolCallId: `c-${toolName}`, toolName, input: JSON.stringify(input) },
-    { type: "finish", finishReason: "tool-calls", usage },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: undefined }, usage },
   ];
 }
 function finalStep(text: string): unknown[] {
@@ -14,7 +17,7 @@ function finalStep(text: string): unknown[] {
     { type: "text-start", id: "t" },
     { type: "text-delta", id: "t", delta: text },
     { type: "text-end", id: "t" },
-    { type: "finish", finishReason: "stop", usage },
+    { type: "finish", finishReason: { unified: "stop", raw: undefined }, usage },
   ];
 }
 

@@ -1,86 +1,106 @@
 /**
- * Opens a streamText run with two fallbacks handled via first-chunk peek
- * (streamText does NOT throw synchronously — errors surface inside fullStream):
- *   1. tool-unsupported (400/404/422 on tools) → retry the SAME candidate without tools.
- *   2. retryable provider error (429/5xx/network) → try the NEXT candidate.
- * Requirements §7.3, §7.5.
+ * Opens a streamText run with two fallbacks decided from its early stream parts:
+ * 1. tool-unsupported (400/404/422) retries the same candidate without tools.
+ * 2. retryable provider errors (429/5xx/network) try the next candidate.
+ *
+ * AI SDK 7 emits administrative `start` and `start-step` parts before an
+ * early provider error, so probing must buffer that preamble rather than read
+ * exactly one chunk. Every inspected part is replayed to the bridge.
  */
 
 import { isRetryable, isToolUnsupported } from "./errors.js";
 
 export interface StreamLike {
-  fullStream: AsyncIterable<unknown>;
-  response: Promise<{ messages: unknown[] }>;
+  stream: AsyncIterable<unknown>;
+  responseMessages: PromiseLike<unknown[]>;
 }
 
-/** start(candidateIndex, useTools) → a fresh streamText-like result. */
+/** start(candidateIndex, useTools) returns a fresh streamText-like result. */
 export type StartFn = (candidateIndex: number, useTools: boolean) => StreamLike;
 
-interface Head {
-  value: unknown;
+interface Probe {
+  values: unknown[];
   done: boolean;
   it: AsyncIterator<unknown>;
 }
 
-async function peek(s: StreamLike): Promise<Head> {
-  const it = s.fullStream[Symbol.asyncIterator]();
-  const first = await it.next();
-  return { value: first.value, done: Boolean(first.done), it };
+const MAX_PROBE_PARTS = 64;
+const PREAMBLE_TYPES = new Set(["start", "start-step", "raw", "response-metadata"]);
+
+function partType(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const type = (value as Record<string, unknown>)["type"];
+  return typeof type === "string" ? type : undefined;
 }
 
-function isErrorPart(v: unknown): v is { type: "error"; error: unknown } {
-  return typeof v === "object" && v !== null && (v as Record<string, unknown>)["type"] === "error";
+async function probe(s: StreamLike): Promise<Probe> {
+  const it = s.stream[Symbol.asyncIterator]();
+  const values: unknown[] = [];
+  for (let i = 0; i < MAX_PROBE_PARTS; i++) {
+    const next = await it.next();
+    if (next.done) return { values, done: true, it };
+    values.push(next.value);
+    const type = partType(next.value);
+    if (type === "error" || !type || !PREAMBLE_TYPES.has(type)) {
+      return { values, done: false, it };
+    }
+  }
+  return { values, done: false, it };
 }
 
-function replay(head: Head): AsyncIterable<unknown> {
+function isErrorPart(value: unknown): value is { type: "error"; error: unknown } {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>)["type"] === "error";
+}
+
+function replay(inspected: Probe): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
-      if (!head.done) yield head.value;
+      yield* inspected.values;
       while (true) {
-        const n = await head.it.next();
-        if (n.done) break;
-        yield n.value;
+        const next = await inspected.it.next();
+        if (next.done) break;
+        yield next.value;
       }
     },
   };
 }
 
-function wrap(s: StreamLike, head: Head): StreamLike {
-  return { fullStream: replay(head), response: s.response };
+function wrap(s: StreamLike, inspected: Probe): StreamLike {
+  return { stream: replay(inspected), responseMessages: s.responseMessages };
+}
+
+function probeError(inspected: Probe): unknown | undefined {
+  return inspected.values.find(isErrorPart)?.error;
 }
 
 export async function openStream(candidateCount: number, hasTools: boolean, start: StartFn): Promise<StreamLike> {
   let lastResort: StreamLike | null = null;
 
-  for (let c = 0; c < candidateCount; c++) {
-    const s = start(c, hasTools);
-    const head = await peek(s);
+  for (let candidate = 0; candidate < candidateCount; candidate++) {
+    const initial = start(candidate, hasTools);
+    const inspected = await probe(initial);
+    const error = probeError(inspected);
 
-    if (isErrorPart(head.value)) {
-      const err = head.value.error;
-
-      // (1) tool-unsupported → retry same candidate without tools.
-      if (hasTools && isToolUnsupported(err)) {
-        const s2 = start(c, false);
-        const head2 = await peek(s2);
-        if (!isErrorPart(head2.value)) return wrap(s2, head2);
-        lastResort = wrap(s2, head2);
-        if (isRetryable(head2.value.error) && c < candidateCount - 1) continue;
+    if (error !== undefined) {
+      if (hasTools && isToolUnsupported(error)) {
+        const withoutTools = start(candidate, false);
+        const inspectedWithoutTools = await probe(withoutTools);
+        const errorWithoutTools = probeError(inspectedWithoutTools);
+        if (errorWithoutTools === undefined) return wrap(withoutTools, inspectedWithoutTools);
+        lastResort = wrap(withoutTools, inspectedWithoutTools);
+        if (isRetryable(errorWithoutTools) && candidate < candidateCount - 1) continue;
         return lastResort;
       }
 
-      // (2) retryable → try next candidate (if any).
-      if (isRetryable(err) && c < candidateCount - 1) {
-        lastResort = wrap(s, head);
+      if (isRetryable(error) && candidate < candidateCount - 1) {
+        lastResort = wrap(initial, inspected);
         continue;
       }
 
-      // Non-retryable error on the last (or only) candidate → surface it.
-      return wrap(s, head);
+      return wrap(initial, inspected);
     }
 
-    // Healthy stream.
-    return wrap(s, head);
+    return wrap(initial, inspected);
   }
 
   return lastResort ?? start(0, hasTools);

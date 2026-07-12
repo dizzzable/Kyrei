@@ -1,14 +1,14 @@
 /**
  * Deterministic eval harness (Requirements §12.5, §13). Drives the REAL engine
- * loop (streamText + tools + stream-bridge) with a scripted MockLanguageModelV2
+ * loop (streamText + tools + stream-bridge) with a scripted MockLanguageModelV4
  * in a temp workspace, then checks a machine oracle. No network, no flakiness.
  */
 
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { streamText, stepCountIs, simulateReadableStream } from "ai";
-import { MockLanguageModelV2 } from "ai/test";
+import { streamText, isStepCount, simulateReadableStream } from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import { buildTools, type ToolMeta } from "../../core/engine/tools/index.js";
 import { bridgeStream } from "../../core/engine/stream-bridge/bridge.js";
 import { DEFAULT_ENGINE_CONFIG } from "../../core/engine/types.js";
@@ -32,9 +32,9 @@ export interface EvalMetrics {
   wallMs: number;
 }
 
-function scriptedModel(script: unknown[][]): MockLanguageModelV2 {
+function scriptedModel(script: unknown[][]): MockLanguageModelV4 {
   let i = 0;
-  return new MockLanguageModelV2({
+  return new MockLanguageModelV4({
     doStream: async () => {
       const chunks = script[Math.min(i, script.length - 1)] ?? [];
       i++;
@@ -61,9 +61,9 @@ export async function runEvalTask(task: EvalTask): Promise<EvalMetrics> {
       model: scriptedModel(task.script),
       messages: [{ role: "user", content: task.prompt }],
       tools,
-      stopWhen: stepCountIs(6),
+      stopWhen: isStepCount(6),
     });
-    const bridged = await bridgeStream(result.fullStream, (e) => {
+    const bridged = await bridgeStream(result.stream, (e) => {
       if (e.type === "tool.start") toolStarts++;
       else if (e.type === "tool.complete" && e.payload.error) toolErrors++;
     }, { toolMeta: new Map(), provider: "mock", model: "mock", maxSteps: 6 });

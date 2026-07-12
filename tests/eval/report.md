@@ -2,7 +2,7 @@
 
 Deterministic evaluation of the Kyrei v2 engine (Requirements §12.5, §13). The
 harness drives the **real** engine loop (`streamText` + tools + stream-bridge)
-with a scripted `MockLanguageModelV2` in a temporary workspace, then checks a
+with a scripted `MockLanguageModelV4` in a temporary workspace, then checks a
 machine oracle. No network, no flakiness — runs as part of `npm run gate`.
 
 ## Tasks

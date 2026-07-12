@@ -1,4 +1,4 @@
-import { stepCountIs, type StopCondition, type ToolSet } from "ai";
+import { isStepCount, type StopCondition, type ToolSet } from "ai";
 import type { EngineConfig } from "../types.js";
 
 /**
@@ -6,5 +6,5 @@ import type { EngineConfig } from "../types.js";
  * termination land in Phase 4.
  */
 export function buildStopWhen(cfg: EngineConfig): StopCondition<ToolSet> {
-  return stepCountIs(cfg.maxSteps);
+  return isStepCount(cfg.maxSteps);
 }

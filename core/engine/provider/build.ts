@@ -5,8 +5,8 @@
 
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createVertex } from "@ai-sdk/google-vertex";
+import { createGoogle } from "@ai-sdk/google";
+import { createGoogleVertex } from "@ai-sdk/google-vertex";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
@@ -55,7 +55,7 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
       return provider.messages(opts.model);
     }
     case "google-generative-ai": {
-      const provider = createGoogleGenerativeAI({
+      const provider = createGoogle({
         baseURL,
         ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
         headers,
@@ -92,7 +92,7 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
             },
           }
         : undefined;
-      const provider = createVertex({
+      const provider = createGoogleVertex({
         ...(credentials.project ? { project: credentials.project } : {}),
         ...(credentials.location ? { location: credentials.location } : {}),
         ...(serviceAccount ? { googleAuthOptions: serviceAccount } : {}),

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { streamText, simulateReadableStream } from "ai";
-import { MockLanguageModelV2 } from "ai/test";
+import { MockLanguageModelV4 } from "ai/test";
 import { bridgeStream, type BridgeCtx } from "./bridge.js";
 import type { KyreiEvent } from "../types.js";
 import type { ToolMeta } from "../tools/index.js";
@@ -9,9 +9,9 @@ function ctx(overrides: Partial<BridgeCtx> = {}): BridgeCtx {
   return { toolMeta: new Map<string, ToolMeta>(), provider: "mock", model: "mock", maxSteps: 12, ...overrides };
 }
 
-describe("stream-bridge (integration with MockLanguageModelV2)", () => {
+describe("stream-bridge (integration with MockLanguageModelV4)", () => {
   it("maps text-delta → message.delta and finish → complete", async () => {
-    const model = new MockLanguageModelV2({
+    const model = new MockLanguageModelV4({
       doStream: async () => ({
         stream: simulateReadableStream({
           chunks: [
@@ -21,8 +21,11 @@ describe("stream-bridge (integration with MockLanguageModelV2)", () => {
             { type: "text-end", id: "t1" },
             {
               type: "finish",
-              finishReason: "stop",
-              usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 },
+              finishReason: { unified: "stop", raw: undefined },
+              usage: {
+                inputTokens: { total: 5, noCache: 5, cacheRead: undefined, cacheWrite: undefined },
+                outputTokens: { total: 2, text: 2, reasoning: undefined },
+              },
             },
           ],
         }),
@@ -31,7 +34,7 @@ describe("stream-bridge (integration with MockLanguageModelV2)", () => {
 
     const events: KyreiEvent[] = [];
     const result = streamText({ model, prompt: "hi" });
-    const out = await bridgeStream(result.fullStream, (e) => events.push(e), ctx());
+    const out = await bridgeStream(result.stream, (e) => events.push(e), ctx());
 
     expect(out.text).toBe("Привет");
     expect(out.status).toBe("complete");
@@ -45,7 +48,7 @@ describe("stream-bridge (integration with MockLanguageModelV2)", () => {
   });
 });
 
-// Deterministic unit tests over synthetic fullStream parts.
+// Deterministic unit tests over synthetic stream parts.
 async function* parts(list: unknown[]): AsyncIterable<unknown> {
   for (const p of list) yield p;
 }

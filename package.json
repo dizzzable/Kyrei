@@ -9,6 +9,9 @@
   },
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "main": "electron/main.js",
   "scripts": {
     "dev:renderer": "vite",
@@ -28,14 +31,14 @@
     "dist:linux": "npm run package:prepare && electron-builder --linux"
   },
   "dependencies": {
-    "@ai-sdk/amazon-bedrock": "3.0.105",
-    "@ai-sdk/anthropic": "2.0.85",
-    "@ai-sdk/google": "2.0.78",
-    "@ai-sdk/google-vertex": "3.0.146",
-    "@ai-sdk/openai": "2.0.110",
-    "@ai-sdk/openai-compatible": "1.0.42",
+    "@ai-sdk/amazon-bedrock": "5.0.17",
+    "@ai-sdk/anthropic": "4.0.12",
+    "@ai-sdk/google": "4.0.12",
+    "@ai-sdk/google-vertex": "5.0.16",
+    "@ai-sdk/openai": "4.0.11",
+    "@ai-sdk/openai-compatible": "3.0.7",
     "@vscode/ripgrep": "^1.18.0",
-    "ai": "5.0.210",
+    "ai": "7.0.22",
     "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "fast-glob": "^3.3.3",

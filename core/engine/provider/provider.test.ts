@@ -40,7 +40,25 @@ describe("buildProviderOptions (reasoning/effort)", () => {
 });
 
 describe("native provider builders", () => {
-  it("constructs Google Generative AI, Bedrock, and Vertex models locally", () => {
+  it("constructs every supported protocol without routing through AI Gateway", () => {
+    const compatible = buildModel({
+      protocol: "openai-chat",
+      baseURL: "https://custom.example/v1",
+      apiKey: "custom-key",
+      model: "custom-model",
+    });
+    const openai = buildModel({
+      protocol: "openai-responses",
+      baseURL: "https://api.openai.com/v1",
+      apiKey: "openai-key",
+      model: "gpt-5.4",
+    });
+    const anthropic = buildModel({
+      protocol: "anthropic-messages",
+      baseURL: "https://api.anthropic.com/v1",
+      apiKey: "anthropic-key",
+      model: "claude-sonnet-4-5",
+    });
     const google = buildModel({
       protocol: "google-generative-ai",
       baseURL: "https://generativelanguage.googleapis.com/v1beta",
@@ -66,6 +84,9 @@ describe("native provider builders", () => {
       },
       model: "gemini-2.5-pro",
     });
+    expect(compatible.provider).toContain("kyrei");
+    expect(openai.provider).toContain("openai");
+    expect(anthropic.provider).toContain("anthropic");
     expect(google.provider).toContain("google");
     expect(bedrock.provider).toContain("bedrock");
     expect(vertex.provider).toContain("google.vertex");
@@ -158,15 +179,15 @@ describe("KeyPool", () => {
 // ── openStream fallbacks ──────────────────────────────────────────────
 function streamOf(parts: unknown[]): StreamLike {
   return {
-    fullStream: (async function* () {
+    stream: (async function* () {
       for (const p of parts) yield p;
     })(),
-    response: Promise.resolve({ messages: [] }),
+    responseMessages: Promise.resolve([]),
   };
 }
 async function collect(s: StreamLike): Promise<string[]> {
   const types: string[] = [];
-  for await (const p of s.fullStream) types.push((p as { type: string }).type);
+  for await (const p of s.stream) types.push((p as { type: string }).type);
   return types;
 }
 

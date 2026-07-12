@@ -9,6 +9,7 @@ const bridgeStreamMock = vi.fn();
 const buildToolsMock = vi.fn();
 const resolveModelMock = vi.fn();
 const buildGBrainToolsMock = vi.fn();
+const toPartsMock = vi.fn(() => []);
 
 vi.mock("ai", () => ({
   streamText: streamTextMock,
@@ -108,7 +109,7 @@ vi.mock("../stream-bridge/bridge.js", () => ({
 }));
 
 vi.mock("./persist.js", () => ({
-  toParts: () => [],
+  toParts: toPartsMock,
 }));
 
 describe("runKyreiChat project context wiring", () => {
@@ -121,8 +122,8 @@ describe("runKyreiChat project context wiring", () => {
     isWorkspaceDirMock.mockResolvedValue(true);
     assembleSystemContextMock.mockResolvedValue("PROJECT_CTX");
     streamTextMock.mockReturnValue({
-      fullStream: (async function* () {})(),
-      response: Promise.resolve({ messages: [] }),
+      stream: (async function* () {})(),
+      responseMessages: Promise.resolve([]),
     });
     openStreamMock.mockImplementation(async (_count: number, _hasTools: boolean, start: (ci: number, useTools: boolean) => unknown) => start(0, true));
     bridgeStreamMock.mockResolvedValue({ text: "ok", parts: [] });
@@ -148,6 +149,9 @@ describe("runKyreiChat project context wiring", () => {
       }),
     );
     expect(streamTextMock).toHaveBeenCalledTimes(1);
+    const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(streamOptions.instructions).toBe("system prompt");
+    expect(streamOptions).not.toHaveProperty("system");
   });
 
   it("fails open when project context assembly throws", async () => {
@@ -193,6 +197,32 @@ describe("runKyreiChat project context wiring", () => {
         projectContext: undefined,
       }),
     );
+  });
+
+  it("persists the cumulative responseMessages from every tool-loop step", async () => {
+    const responseMessages = [
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "call-1", toolName: "read_file", input: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call-1", toolName: "read_file", output: { type: "text", value: "data" } }] },
+      { role: "assistant", content: [{ type: "text", text: "done" }] },
+    ];
+    streamTextMock.mockReturnValueOnce({
+      stream: (async function* () {})(),
+      responseMessages: Promise.resolve(responseMessages),
+    });
+    const bridged = { text: "done", parts: [] };
+    bridgeStreamMock.mockResolvedValueOnce(bridged);
+
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+    });
+
+    expect(toPartsMock).toHaveBeenCalledWith(responseMessages, bridged);
   });
 
   it("makes enabled brain tools available without a workspace", async () => {

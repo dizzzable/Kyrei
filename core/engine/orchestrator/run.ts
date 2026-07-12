@@ -1,7 +1,8 @@
 /**
  * Orchestrator: the engine entry. Builds provider candidates + tools, runs the
- * AI SDK v5 tool-calling loop via streamText (with no-tools + provider fallback
- * via openStream), bridges fullStream to our events, returns { text, parts }.
+ * AI SDK tool-calling loop via streamText (with no-tools + provider fallback
+ * via openStream), bridges the normalized stream to our events, returns
+ * { text, parts }.
  *
  * Deferred: prepareStep compaction (Phase 4).
  */
@@ -63,7 +64,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       console.warn("[kyrei v2] project context disabled:", error);
     }
   }
-  const system = buildSystemPrompt({
+  const instructions = buildSystemPrompt({
     workspace: opts.workspace,
     hasTools: Boolean(tools),
     personality: cfg.personality,
@@ -98,7 +99,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     });
     const result = streamText({
       model,
-      ...(system ? { system } : {}),
+      ...(instructions ? { instructions } : {}),
       messages: opts.messages,
       ...(useTools && tools ? { tools, stopWhen: buildStopWhen(cfg) } : {}),
       ...(useTools && tools && prepareStep ? { prepareStep } : {}),
@@ -109,12 +110,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         console.error("[kyrei v2] stream error:", error);
       },
     });
-    return { fullStream: result.fullStream, response: result.response as Promise<{ messages: unknown[] }> };
+    return { stream: result.stream, responseMessages: result.responseMessages };
   };
 
   const stream = await openStream(entries.length, Boolean(tools), start);
 
-  const bridged = await bridgeStream(stream.fullStream, opts.emit, {
+  const bridged = await bridgeStream(stream.stream, opts.emit, {
     toolMeta,
     provider: primary.provider,
     model: primary.id,
@@ -123,8 +124,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
 
   let parts: MessagePart[];
   try {
-    const response = await stream.response;
-    parts = toParts(response.messages as never, bridged);
+    const responseMessages = await stream.responseMessages;
+    parts = toParts(responseMessages as never, bridged);
   } catch {
     parts = bridged.parts;
   }

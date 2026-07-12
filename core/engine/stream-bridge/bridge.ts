@@ -1,5 +1,5 @@
 /**
- * Stream bridge: translates AI SDK v5 `fullStream` parts into KyreiEvents via
+ * Stream bridge: translates AI SDK `stream` parts into KyreiEvents via
  * `emit`, keeping the exact event shape the renderer expects.
  *
  * Invariants (design.md Correctness Properties):
@@ -76,13 +76,13 @@ function finalizeToolPart(st: BridgeState, t: ToolInFlight): void {
 }
 
 export async function bridgeStream(
-  fullStream: AsyncIterable<unknown>,
+  stream: AsyncIterable<unknown>,
   emit: (e: KyreiEvent) => void,
   ctx: BridgeCtx,
 ): Promise<BridgeResult> {
   const st = initState();
 
-  for await (const raw of fullStream) {
+  for await (const raw of stream) {
     const part = raw as Record<string, any>;
     switch (part["type"] as string) {
       case "start":
