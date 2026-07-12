@@ -1,0 +1,22 @@
+node_modules/
+dist/
+build/
+core/engine/.dist/
+tests/eval/out/
+
+# --- local runtime / vendored subprojects (never publish) ---
+hermes/
+.omp-runtime/
+
+# --- secrets / local env (never publish) ---
+.env
+.env.*
+*.env
+!*.env.example
+
+# --- ltm-power ---
+ltm/store/*.jsonl
+ltm/runtime/*
+ltm/reports/*
+ltm/snapshots/*
+# --- /ltm-power ---

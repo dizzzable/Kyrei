@@ -1,0 +1,15 @@
+{
+  "engine": "kyrei-v2",
+  "promptVersion": "1.0.0",
+  "note": "Committed baseline for the deterministic CI eval gate (Req 13). checkRegression compares the current run against `v2` and fails on a pass-rate drop or >20% growth in median steps/tokens. `v1` is the legacy-engine reference for the release record.",
+  "v2": {
+    "passRate": 1,
+    "medSteps": 2,
+    "medTokens": 60
+  },
+  "v1": {
+    "passRate": 1,
+    "medSteps": 3,
+    "medTokens": 60
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "name": "Kyrei Auto Checkpoint (agentStop)",
+  "description": "Автоматически фиксирует состояние работы в LTM-память после каждой остановки агента (capture-turn). Использует python -X utf8 для корректной работы с кириллицей на Windows.",
+  "version": "1",
+  "when": {
+    "type": "agentStop"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "python -X utf8 ltm/bin/ltm.py capture-turn",
+    "timeout": 60
+  }
+}

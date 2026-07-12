@@ -1,0 +1,84 @@
+{
+  "name": "kyrei-agent-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Kyrei — cross-platform AI coding agent desktop app",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev:renderer": "vite",
+    "build": "vite build",
+    "build:engine": "node scripts/build-engine.mjs",
+    "typecheck:engine": "tsc --noEmit -p core/engine/tsconfig.json",
+    "check:js": "node scripts/check-js.mjs",
+    "test": "vitest --run",
+    "gate": "npm run typecheck:engine && npm run build:engine && npm run check:js && npm run test",
+    "start": "vite build && node scripts/build-engine.mjs && electron .",
+    "dist": "vite build && node scripts/build-engine.mjs && electron-builder"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "1.0.42",
+    "@vscode/ripgrep": "^1.18.0",
+    "ai": "5.0.210",
+    "better-sqlite3": "^12.11.1",
+    "fast-glob": "^3.3.3",
+    "gpt-tokenizer": "3.4.0",
+    "sqlite-vec": "^0.1.9",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "clsx": "^2.1.1",
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
+    "fast-check": "^4.9.0",
+    "lucide-react": "^1.24.0",
+    "msw": "^2.15.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.0",
+    "shiki": "^4.3.1",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4",
+    "vitest": "^4.1.10"
+  },
+  "build": {
+    "appId": "com.kyrei.agent",
+    "productName": "Kyrei",
+    "files": [
+      "electron/**/*",
+      "core/**/*",
+      "!core/engine/**/*.ts",
+      "!core/engine/**/*.test.ts",
+      "core/engine/.dist/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**",
+      "**/node_modules/sqlite-vec*/**",
+      "**/node_modules/bindings/**"
+    ],
+    "directories": {
+      "output": "dist/app"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

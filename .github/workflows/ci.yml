@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        engine: [v1, v2]
+    runs-on: ${{ matrix.os }}
+    env:
+      KYREI_ENGINE: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      # Native module (better-sqlite3) prebuilt is fetched by npm; rebuild if needed.
+      - run: npm rebuild better-sqlite3
+        continue-on-error: true
+      - run: npm run typecheck:engine
+      - run: npm run build:engine
+      - run: npm run check:js
+      - run: npm run test
