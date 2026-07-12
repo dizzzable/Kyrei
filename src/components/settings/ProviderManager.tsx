@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, KeyRound, Plus, Server, Trash2 } from "lucide-react";
 import { gateway } from "@/lib/gateway";
-import type { AppConfig, ProviderProfile } from "@/lib/types";
+import type { AppConfig, ProviderProfile, ProviderProtocol } from "@/lib/types";
 import { Button, Input } from "@/components/ui";
 import { cn } from "@/lib/utils";
 
@@ -18,7 +18,13 @@ function parseModels(value: string): Array<{ id: string }> {
   return [...new Set(value.split(/[\n,]/).map((model) => model.trim()).filter(Boolean))].map((id) => ({ id }));
 }
 
-/** Compact editor for an unlimited list of OpenAI-compatible endpoints. */
+const PROTOCOL_OPTIONS: Array<{ value: ProviderProtocol; label: string; defaultBaseURL: string }> = [
+  { value: "openai-chat", label: "OpenAI-compatible / Chat", defaultBaseURL: "https://api.openai.com/v1" },
+  { value: "openai-responses", label: "OpenAI / Responses", defaultBaseURL: "https://api.openai.com/v1" },
+  { value: "anthropic-messages", label: "Anthropic / Messages", defaultBaseURL: "https://api.anthropic.com/v1" },
+];
+
+/** Compact editor for Kyrei's built-in provider transports. */
 export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
   const [selectedId, setSelectedId] = useState(config.activeProviderId);
   const selected = useMemo(
@@ -26,6 +32,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     [config.providers, config.activeProviderId, selectedId],
   );
   const [name, setName] = useState("");
+  const [protocol, setProtocol] = useState<ProviderProtocol>("openai-chat");
   const [baseURL, setBaseURL] = useState("");
   const [models, setModels] = useState("");
   const [requiresApiKey, setRequiresApiKey] = useState(true);
@@ -39,6 +46,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     if (!next) return;
     setSelectedId(next.id);
     setName(next.name);
+    setProtocol(next.protocol);
     setBaseURL(next.baseURL);
     setModels(modelText(next));
     setRequiresApiKey(next.requiresApiKey);
@@ -55,6 +63,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     try {
       const next = await gateway.createProvider({
         name: "Новый провайдер",
+        protocol: "openai-chat",
         baseURL: "https://api.openai.com/v1",
         models: [{ id: "gpt-4o-mini" }],
         enabled: true,
@@ -80,6 +89,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     try {
       const next = await gateway.updateProvider(selected.id, {
         name: name.trim(),
+        protocol,
         baseURL: baseURL.trim(),
         models: nextModels,
         requiresApiKey,
@@ -147,7 +157,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <div className="text-[12px] font-medium text-foreground">Провайдеры</div>
-          <p className="mt-0.5 text-[11px] leading-4 text-muted">Любое количество OpenAI-совместимых API. Ключи хранятся отдельно и не попадают в экспорт настроек.</p>
+          <p className="mt-0.5 text-[11px] leading-4 text-muted">Встроенные транспорты Kyrei: OpenAI-compatible Chat, OpenAI Responses и Anthropic Messages. Ключи хранятся отдельно и не попадают в экспорт настроек.</p>
         </div>
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void create()}>
           <Plus size={14} /> Добавить
@@ -169,6 +179,9 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
             >
               <Server size={13} className="shrink-0 text-muted" />
               <span className="min-w-0 flex-1 truncate">{provider.name}</span>
+              <span className="rounded bg-bg px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted">
+                {provider.protocol.replace(/-/g, " ")}
+              </span>
               {provider.hasKey ? <KeyRound size={12} className="text-success" /> : null}
               {provider.id === config.activeProviderId ? <Check size={12} className="text-primary" /> : null}
             </button>
@@ -182,6 +195,25 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
                 <span>Название</span>
                 <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Мой провайдер" />
               </label>
+              <label className="space-y-1 text-[11px] text-muted">
+                <span>Транспорт</span>
+                <select
+                  value={protocol}
+                  onChange={(event) => {
+                    const next = event.target.value as ProviderProtocol;
+                    setProtocol(next);
+                    const suggested = PROTOCOL_OPTIONS.find((option) => option.value === next)?.defaultBaseURL;
+                    if (suggested && (!baseURL.trim() || baseURL === selected.baseURL)) setBaseURL(suggested);
+                  }}
+                  className="h-9 w-full rounded-md border border-border bg-surface px-2.5 text-[12px] text-foreground outline-none transition-colors focus:border-primary"
+                >
+                  {PROTOCOL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="grid gap-2 @[28rem]:grid-cols-2">
               <label className="space-y-1 text-[11px] text-muted">
                 <span>Base URL</span>
                 <Input value={baseURL} onChange={(event) => setBaseURL(event.target.value)} placeholder="https://api.example.com/v1" />

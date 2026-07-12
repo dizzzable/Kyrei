@@ -47,11 +47,13 @@ export interface ProviderModel {
   name?: string;
 }
 
+export type ProviderProtocol = "openai-chat" | "openai-responses" | "anthropic-messages";
+
 /** Public provider metadata returned by the local gateway; never contains a key. */
 export interface ProviderProfile {
   id: string;
   name: string;
-  protocol: "openai-chat";
+  protocol: ProviderProtocol;
   baseURL: string;
   headers?: Record<string, string>;
   models: ProviderModel[];

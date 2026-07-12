@@ -69,11 +69,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   ];
   const keyPool = new KeyPool({ keys: [opts.apiKey] });
   const prepareStep = ccr ? makePrepareStep(cfg, primary.id, primary.limits.contextWindow, ccr) : undefined;
-  const providerOptions = buildProviderOptions(opts.modelParams);
+  const providerOptions = buildProviderOptions(opts.providerProtocol, opts.modelParams);
 
   const start = (ci: number, useTools: boolean): StreamLike => {
     const entry = entries[ci] ?? primary;
     const model = buildModel({
+      protocol: opts.providerProtocol,
       baseURL: entry.baseURL,
       apiKey: opts.apiKey,
       model: entry.id,

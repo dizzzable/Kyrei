@@ -25,16 +25,21 @@ a stable id, display name, URL, model list, enabled state, API-key requirement,
 and non-secret custom headers. API keys are stored separately from the public
 configuration and are never returned to the renderer.
 
-The shipping transport is `openai-chat` (OpenAI-compatible Chat Completions),
-which covers compatible hosted endpoints plus Ollama/LM Studio. Provider
-fallbacks stay on the same endpoint until Kyrei has credentials scoped to every
-fallback profile; a key is never reused with an unrelated provider.
+The shipping built-in transports are:
 
-Hermes' additional transport families are intentionally not presented as
-working custom endpoints yet: OpenAI Responses, Anthropic Messages, Gemini
-native, and Bedrock Converse each need a dedicated request/tool translation and
-their own authentication model. The registry is the shared base for those
-adapters; no Hermes/Nous native provider or proprietary runtime is copied.
+- `openai-chat` for OpenAI-compatible Chat Completions endpoints, including
+  Ollama/LM Studio;
+- `openai-responses` for native OpenAI Responses API endpoints; and
+- `anthropic-messages` for native Anthropic Messages API endpoints.
+
+Provider fallbacks stay on the same endpoint until Kyrei has credentials scoped
+to every fallback profile; a key is never reused with an unrelated provider.
+
+Other Hermes transport families are still intentionally not presented as
+working custom endpoints yet: Gemini native and Bedrock Converse still need a
+dedicated request/tool translation and their own authentication model. The
+registry is the shared base for those adapters; no Hermes/Nous native provider
+or proprietary runtime is copied.
 
 ## Local project intelligence and optional OpenViking
 

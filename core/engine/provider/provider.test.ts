@@ -7,25 +7,30 @@ import { buildProviderOptions } from "./build.js";
 
 describe("buildProviderOptions (reasoning/effort)", () => {
   it("emits nothing when no params or reasoning disabled", () => {
-    expect(buildProviderOptions(undefined)).toBeUndefined();
-    expect(buildProviderOptions({})).toBeUndefined();
-    expect(buildProviderOptions({ effort: "off" })).toBeUndefined();
-    expect(buildProviderOptions({ effort: "none" })).toBeUndefined();
+    expect(buildProviderOptions("openai-chat", undefined)).toBeUndefined();
+    expect(buildProviderOptions("openai-chat", {})).toBeUndefined();
+    expect(buildProviderOptions("openai-chat", { effort: "off" })).toBeUndefined();
+    expect(buildProviderOptions("openai-chat", { effort: "none" })).toBeUndefined();
   });
-  it("maps explicit effort to reasoningEffort", () => {
-    expect(buildProviderOptions({ effort: "high" })).toEqual({ kyrei: { reasoningEffort: "high" } });
-    expect(buildProviderOptions({ effort: "low" })).toEqual({ kyrei: { reasoningEffort: "low" } });
+  it("maps explicit effort to protocol-specific providerOptions", () => {
+    expect(buildProviderOptions("openai-chat", { effort: "high" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+    expect(buildProviderOptions("openai-responses", { effort: "low" })).toEqual({ openai: { reasoningEffort: "low" } });
   });
-  it("clamps UI-only xhigh/max to high", () => {
-    expect(buildProviderOptions({ effort: "xhigh" })).toEqual({ kyrei: { reasoningEffort: "high" } });
-    expect(buildProviderOptions({ effort: "max" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+  it("preserves xhigh for responses and clamps UI-only max elsewhere", () => {
+    expect(buildProviderOptions("openai-chat", { effort: "xhigh" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+    expect(buildProviderOptions("openai-chat", { effort: "max" })).toEqual({ kyrei: { reasoningEffort: "high" } });
+    expect(buildProviderOptions("openai-responses", { effort: "xhigh" })).toEqual({ openai: { reasoningEffort: "xhigh" } });
+    expect(buildProviderOptions("openai-responses", { effort: "max" })).toEqual({ openai: { reasoningEffort: "xhigh" } });
   });
   it("derives from fast/reasoning when no explicit effort", () => {
-    expect(buildProviderOptions({ fast: true })).toEqual({ kyrei: { reasoningEffort: "minimal" } });
-    expect(buildProviderOptions({ reasoning: true })).toEqual({ kyrei: { reasoningEffort: "medium" } });
+    expect(buildProviderOptions("openai-chat", { fast: true })).toEqual({ kyrei: { reasoningEffort: "minimal" } });
+    expect(buildProviderOptions("openai-chat", { reasoning: true })).toEqual({ kyrei: { reasoningEffort: "medium" } });
   });
   it("explicit effort wins over fast", () => {
-    expect(buildProviderOptions({ effort: "high", fast: true })).toEqual({ kyrei: { reasoningEffort: "high" } });
+    expect(buildProviderOptions("openai-chat", { effort: "high", fast: true })).toEqual({ kyrei: { reasoningEffort: "high" } });
+  });
+  it("skips providerOptions for unsupported protocols", () => {
+    expect(buildProviderOptions("anthropic-messages", { effort: "high" })).toBeUndefined();
   });
 });
 
