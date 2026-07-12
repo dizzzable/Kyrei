@@ -3,6 +3,7 @@ import { Check, Copy } from "lucide-react";
 import type { ChatMessage } from "@/lib/types";
 import { messageText } from "@/lib/chat-messages";
 import { IconButton } from "@/components/ui";
+import { useUiSettings } from "@/store/settings";
 import { Markdown } from "./Markdown";
 import { ToolRow } from "./ToolRow";
 import { ThinkingDisclosure } from "./chat/ThinkingDisclosure";
@@ -25,6 +26,8 @@ function CopyAction({ getText }: { getText: () => string }) {
 }
 
 export const Message = memo(function Message({ message }: { message: ChatMessage }) {
+  const { showReasoning } = useUiSettings();
+
   if (message.role === "user") {
     const text = message.parts.map((p) => (p.type === "text" ? p.text : "")).join("");
     return (
@@ -44,8 +47,9 @@ export const Message = memo(function Message({ message }: { message: ChatMessage
     <div className="assistant-message group min-w-0 pl-4">
       {message.parts.map((part, i) => {
         if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
-        if (part.type === "reasoning")
+        if (part.type === "reasoning" && showReasoning)
           return <ThinkingDisclosure key={i} text={part.text} pending={message.pending} />;
+        if (part.type === "reasoning") return null;
         return <Markdown key={i} text={part.text} />;
       })}
       {message.pending && <span className="caret" />}
