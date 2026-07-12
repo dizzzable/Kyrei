@@ -1,4 +1,5 @@
 import { Input, SegmentedControl, Switch, type SegmentOption } from "@/components/ui";
+import { cn } from "@/lib/utils";
 
 /** A labeled settings row: title/description on the left, control on the right. */
 export function Field({
@@ -15,14 +16,22 @@ export function Field({
   stacked?: boolean;
 }) {
   return (
-    <div className={stacked ? "space-y-1.5 py-2.5" : "flex flex-col items-stretch gap-2 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-4"}>
-      <div className="min-w-0">
-        <label htmlFor={htmlFor} className="block text-[13px] font-medium text-foreground">
-          {label}
-        </label>
-        {hint && <p className="mt-0.5 text-[12px] leading-snug text-muted">{hint}</p>}
+    <div className={cn("py-2.5", stacked && "space-y-1.5")}>
+      <div className={cn(!stacked && "@container")}>
+        <div
+          className={cn(
+            !stacked && "grid gap-2 @2xl:grid-cols-[minmax(0,1fr)_minmax(16rem,24rem)] @2xl:items-center @2xl:gap-4",
+          )}
+        >
+          <div className="min-w-0">
+            <label htmlFor={htmlFor} className="block text-[13px] font-medium text-foreground">
+              {label}
+            </label>
+            {hint && <p className="mt-0.5 text-[12px] leading-snug text-muted">{hint}</p>}
+          </div>
+          <div className={cn(stacked ? "" : "min-w-0 self-start @2xl:justify-self-end @2xl:self-auto")}>{children}</div>
+        </div>
       </div>
-      <div className={stacked ? "" : "shrink-0 self-start sm:self-auto"}>{children}</div>
     </div>
   );
 }
@@ -124,7 +133,8 @@ export function TextField({
 }) {
   return (
     <Field label={label} hint={hint} stacked>
-      <div className="flex gap-2">
+      <div className="@container">
+        <div className="flex flex-col gap-2 @lg:flex-row">
         <Input
           type={type}
           value={value}
@@ -133,6 +143,7 @@ export function TextField({
           className="flex-1"
         />
         {trailing}
+        </div>
       </div>
     </Field>
   );
