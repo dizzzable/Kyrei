@@ -53,6 +53,7 @@ export interface BrowserFetchOptions {
   resolveHost?: HostResolver;
   maxBytes?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface WebSearchResult {
@@ -295,12 +296,27 @@ export async function fetchPublicWebPage(raw: string, options: BrowserFetchOptio
   const resolveHost = options.resolveHost ?? defaultResolveHost;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (options.signal?.aborted) throw new Error("web request aborted");
   let target = await resolvePublicWebTarget(raw, resolveHost);
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
+    if (options.signal?.aborted) throw new Error("web request aborted");
     const url = target.url;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("web request timed out"));
+    }, timeoutMs);
+    const onExternalAbort = () => controller.abort(options.signal?.reason);
+    if (options.signal) {
+      options.signal.addEventListener("abort", onExternalAbort, { once: true });
+      if (options.signal.aborted) onExternalAbort();
+    }
+    const cleanup = () => {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", onExternalAbort);
+    };
     let response: BrowserResponse;
     try {
       response = await fetchImpl(url.href, {
@@ -313,8 +329,12 @@ export async function fetchPublicWebPage(raw: string, options: BrowserFetchOptio
         signal: controller.signal,
       }, target.pinnedAddress);
     } catch (error) {
-      clearTimeout(timeout);
-      const reason = controller.signal.aborted ? "web request timed out" : (error as Error).message;
+      cleanup();
+      const reason = timedOut
+        ? "web request timed out"
+        : options.signal?.aborted
+          ? "web request aborted"
+          : (error as Error).message;
       throw new Error(`web request failed: ${reason}`);
     }
 
@@ -334,11 +354,12 @@ export async function fetchPublicWebPage(raw: string, options: BrowserFetchOptio
       }
       return { url: url.href, contentType, body: await readLimitedBody(response, maxBytes) };
     } catch (error) {
-      if (controller.signal.aborted) throw new Error("web request timed out");
+      if (timedOut) throw new Error("web request timed out");
+      if (options.signal?.aborted) throw new Error("web request aborted");
       throw error;
     } finally {
       // Keep the deadline active for body streaming, not only response headers.
-      clearTimeout(timeout);
+      cleanup();
     }
   }
   throw new Error("web redirect limit exceeded");

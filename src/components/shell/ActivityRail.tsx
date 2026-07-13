@@ -33,6 +33,7 @@ interface ActivityRailProps {
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onOpenActivity: (id: Exclude<ActivityId, "sessions" | "messaging" | "artifacts">) => void;
+  onHome: () => void;
   onOpenSettings: () => void;
   onOpenPalette: () => void;
 }
@@ -46,6 +47,7 @@ export function ActivityRail({
   onDelete,
   onRename,
   onOpenActivity,
+  onHome,
   onOpenSettings,
   onOpenPalette,
 }: ActivityRailProps) {
@@ -89,16 +91,16 @@ export function ActivityRail({
       />
 
       <footer className="activity-rail-footer">
-        <span className="shell-icon-button text-foreground" title={t("shell.activity.sessions")} aria-label={t("shell.activity.sessions")}>
+        <button type="button" onClick={onHome} className="shell-icon-button text-foreground" title={t("shell.activity.sessions")} aria-label={t("shell.activity.sessions")}>
           <Home size={14} aria-hidden />
-        </span>
-        <button onClick={onNew} className="shell-icon-button" title={t("shell.session.new")} aria-label={t("shell.session.new")}>
+        </button>
+        <button type="button" onClick={onNew} className="shell-icon-button" title={t("shell.session.new")} aria-label={t("shell.session.new")}>
           <MessageSquarePlus size={14} aria-hidden />
         </button>
-        <button onClick={onOpenPalette} className="shell-icon-button" title={t("shell.commandPalette.open")} aria-label={t("shell.commandPalette.open")}>
+        <button type="button" onClick={onOpenPalette} className="shell-icon-button" title={t("shell.commandPalette.open")} aria-label={t("shell.commandPalette.open")}>
           <Command size={14} aria-hidden />
         </button>
-        <button onClick={onOpenSettings} className="shell-icon-button ml-auto" title={t("shell.settings.open")} aria-label={t("shell.settings.open")}>
+        <button type="button" onClick={onOpenSettings} className="shell-icon-button ml-auto" title={t("shell.settings.open")} aria-label={t("shell.settings.open")}>
           <Settings size={14} aria-hidden />
         </button>
       </footer>

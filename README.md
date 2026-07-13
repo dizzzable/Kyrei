@@ -1,59 +1,95 @@
 # Kyrei
 
-Кросс-платформенный десктопный AI-агент для работы с кодом (Windows / macOS / Linux).
-Electron + React (renderer) поверх локального TypeScript/Node-движка и HTTP-шлюза.
+<p align="center">
+  <img src="assets/logo.png" width="120" alt="Kyrei logo" />
+</p>
+
+<p align="center">
+  Локальный кросс-платформенный AI-агент для разработки: собственный движок,
+  оркестрация команд, провайдеры без жёстких ограничений и desktop-first UX.
+</p>
+
+## Возможности
+
+- Локальный TypeScript/Node-движок с потоковыми ответами и проверяемыми инструментами.
+- Неограниченное число OpenAI-, Anthropic- и Google-совместимых провайдеров.
+- Пулы аккаунтов с балансировкой, session affinity и назначением аккаунтов на модели.
+- Team mode и pipeline-команды для исследования, реализации, ревью и тестирования.
+- Проектная память, skills, cron-задачи, встроенные инструменты поиска и чтения страниц.
+- Официальный Kiro CLI-коннектор для browser/device авторизации и обнаружения моделей.
+- Полная локализация интерфейса на русском и английском.
+
+## Скачать
+
+Готовые сборки находятся в [последнем GitHub Release](https://github.com/dizzzable/Kyrei/releases/latest).
+
+| Платформа | Артефакты |
+| --- | --- |
+| Windows x64 | NSIS Setup и Portable `.exe` |
+| macOS Intel | `.dmg` и `.zip` |
+| macOS Apple Silicon | `.dmg` и `.zip` |
+| Linux x64/arm64 | AppImage и `.deb` |
+| Arch Linux x64 | `.pkg.tar.zst` для `pacman` |
+
+Каждый релиз содержит `SHA256SUMS.txt`. Пока проект не получил сертификаты
+Microsoft и Apple, Windows- и macOS-сборки публикуются без доверенной подписи и
+нотаризации, поэтому ОС может показать предупреждение.
+
+## Быстрый старт для разработки
+
+Требуется Node.js 22 или новее.
+
+```bash
+npm ci
+npm run gate
+npm start
+```
+
+Основные команды:
+
+```bash
+npm run gate             # typecheck, JS/i18n checks и Vitest
+npm run build            # production-сборка renderer
+npm run dist:win         # Windows x64
+npm run dist:mac:x64     # macOS Intel
+npm run dist:mac:arm64   # macOS Apple Silicon
+npm run dist:linux:x64   # AppImage, DEB и Arch package
+npm run dist:linux:arm64 # AppImage и DEB для ARM64 runner
+npm run dist:arch        # только Arch Linux package
+```
+
+Из-за нативных `better-sqlite3` и `sqlite-vec` релизные пакеты собираются на
+нативных GitHub runners соответствующей ОС и архитектуры.
+
+## Провайдеры и аккаунты
+
+Kyrei не привязывает пользователя к штатному облаку. Можно подключать готовые
+профили или создавать собственные провайдеры с base URL, API-ключом и каталогом
+моделей. Для каждого аккаунта в пуле задаётся доступ ко всем моделям, выбранным
+моделям или режим без генерации.
+
+OAuth/device авторизация рассматривается как управляемый token broker: refresh
+credentials должны храниться только в защищённом core-хранилище, access tokens —
+быть короткоживущими, а отключение аккаунта должно немедленно прекращать новые
+выдачи. Подробности: [модель безопасности account broker](docs/security/account-token-broker.md).
 
 ## Архитектура
 
-- **`core/engine/`** — движок v2 (`kyrei-engine`) на [Vercel AI SDK v5](https://sdk.vercel.ai).
-  Оркестратор на `streamText` + `stopWhen`, потоковый мост `fullStream → события`,
-  контекст-якорный apply-движок, провайдер-слой с fallback и пулом ключей,
-  токен-бюджет и компакция, слоёная память, безопасность (jail, permissions,
-  редакция секретов, opt-in OS-sandbox) и детерминированный eval-харнесс.
-- **`core/gateway.js`** — локальный HTTP/SSE-шлюз между рендерером и движком.
-- **`electron/`** — оболочка приложения.
-- **`src/`** — React-интерфейс.
-- **`.kiro/specs/kyrei-engine/`** — формальный спек (requirements / design / tasks).
-- **`docs/research.md`** — журнал исследований и решений.
+- `core/engine/` — локальный движок агента и инструменты.
+- `core/gateway.js` — capability-защищённый HTTP/SSE шлюз renderer ↔ core.
+- `core/provider-account-pool.js` — маршрутизация аккаунтов и моделей.
+- `electron/` — desktop-оболочка без встроенного общего браузера.
+- `src/` — React-интерфейс и EN/RU локализация.
 
-Движок v2 — единственный (legacy v1 удалён). Изолирован от оболочки: не знает про Electron,
-общается с рендерером только через локальный gateway.
+Renderer не получает API-ключи, OAuth-токены или raw identity. Авторизация
+открывает системный браузер либо использует device code.
 
-## Команды
+## Release
 
-```bash
-npm install
-npm run gate       # typecheck движка + сборка + проверка JS + тесты (vitest)
-npm run build      # сборка рендерера (vite)
-npm start          # сборка + запуск Electron
-npm run dist       # упаковка через electron-builder
-```
-
-## Провайдеры
-
-Провайдер по умолчанию не зашит — каждый пользователь настраивает свой
-OpenAI-совместимый эндпоинт (base URL / модель / ключ) в настройках приложения.
-Поддерживается локальный Ollama (`localhost:11434/v1`).
-
-## Установщики (Windows)
-
-```bash
-npm run dist        # сборка рендерера + движка + electron-builder
-```
-
-Результат в `dist/app/`:
-- `Kyrei-Setup-<version>.exe` — NSIS-инсталлятор (выбор папки установки, ярлыки в меню Пуск и на рабочем столе, per-user без прав администратора).
-- `Kyrei-Portable-<version>.exe` — портативная версия без установки.
-
-Нативный `better-sqlite3` пересобирается под текущую версию Electron автоматически;
-бинарь `ripgrep` распаковывается из asar. macOS (`dmg`) и Linux (`AppImage`) — те же
-цели electron-builder (`npm run dist` на соответствующей ОС).
-
-## Стек
-
-Всё на актуальных версиях, кроме закреплённого AI SDK v5 (`ai@5.0.x`).
-TypeScript, Vite, Electron, React 19, Tailwind, better-sqlite3 + sqlite-vec, ripgrep.
+Push тега `v*` запускает `.github/workflows/package-desktop.yml`: сначала полный
+gate и secrets scan, затем нативные сборки Windows/macOS/Linux/Arch, генерация
+SHA-256 и публикация GitHub Release.
 
 ## Лицензия
 
-См. `LICENSE` (если добавлена в репозиторий).
+[MIT](LICENSE)

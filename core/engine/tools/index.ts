@@ -23,6 +23,7 @@ import { decideAll, type ActionContext, type Decision } from "../security/permis
 import { runPreHooks, secretScanHook } from "../security/pre-hook.js";
 import type { AuditRecord } from "../security/audit.js";
 import { createSandbox, maybeSandbox } from "../security/sandbox.js";
+import { redact, sanitizeEnv } from "../security/secrets.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 import { parsePatch } from "../apply/parse-patch.js";
 import { applyPatch, ApplyError } from "../apply/apply.js";
@@ -43,6 +44,7 @@ export interface BuildToolsOptions {
   abortSignal?: AbortSignal;
   audit?: ToolAuditWriter;
   sessionId?: string;
+  sensitiveValues?: readonly string[];
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -148,6 +150,7 @@ function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal
       shell: true,
       detached: process.platform !== "win32",
       windowsHide: true,
+      env: sanitizeEnv(process.env),
     });
     let out = "";
     let settled = false;
@@ -193,7 +196,7 @@ function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal
 
 function runRg(args: string[], cwd: string, signal?: AbortSignal): Promise<string> {
   return new Promise((resolvePromise) => {
-    const child = spawn(rgPath, args, { cwd, windowsHide: true });
+    const child = spawn(rgPath, args, { cwd, windowsHide: true, env: sanitizeEnv(process.env) });
     let out = "";
     const onAbort = () => child.kill();
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -211,6 +214,10 @@ function runRg(args: string[], cwd: string, signal?: AbortSignal): Promise<strin
 
 export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<string, ToolMeta>, optionsOrSignal?: BuildToolsOptions | AbortSignal): ToolSet {
   const options = normalizeBuildOptions(optionsOrSignal);
+  const safeClip = (value: unknown, limit: number): string => clip(
+    redact(String(value ?? ""), options.sensitiveValues),
+    limit,
+  );
   const abortSignal = options.abortSignal;
   const snapshots = createSnapshotStore(workspace);
   const sandbox = createSandbox(cfg.sandbox);
@@ -270,7 +277,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
         metadata,
         durationS: (Date.now() - started) / 1000,
       });
-      return result;
+      return safeClip(result, cfg.maxToolOutput);
     } catch (error) {
       await audit(toolName, toolCallId, {
         decision,
@@ -300,15 +307,15 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
   const execListDir = async (path?: string): Promise<string> => {
     const dir = await validateWorkspaceTarget(workspace, path || ".");
     const entries = await readdir(dir, { withFileTypes: true });
-    return entries.length
+    return safeClip(entries.length
       ? entries
           .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
           .sort()
           .join("\n")
-      : "(пусто)";
+      : "(пусто)", cfg.maxToolOutput);
   };
   const execReadFile = async (path: string): Promise<string> =>
-    clip(await readFile(await validateWorkspaceTarget(workspace, path), "utf8"), cfg.fileReadMaxChars);
+    safeClip(await readFile(await validateWorkspaceTarget(workspace, path), "utf8"), cfg.fileReadMaxChars);
   const execGrep = async (a: { query: string; path?: string; glob?: string; maxResults?: number }): Promise<string> => {
     const base = await validateWorkspaceTarget(workspace, a.path || ".");
     const args = ["--json", "--line-number", "-m", String(a.maxResults ?? 100), "--smart-case"];
@@ -335,7 +342,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
         /* ignore non-json rg lines */
       }
     }
-    return clip(hits.join("\n") || "(нет совпадений)", cfg.maxToolOutput);
+    return safeClip(hits.join("\n") || "(нет совпадений)", cfg.maxToolOutput);
   };
   const execFind = async (a: { pattern: string; limit?: number }): Promise<string> => {
     const entries = await fg(a.pattern.replace(/\\/g, "/"), {
@@ -354,7 +361,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
         return false;
       }
     });
-    return safe.slice(0, a.limit ?? 200).join("\n") || "(нет совпадений)";
+    return safeClip(safe.slice(0, a.limit ?? 200).join("\n") || "(нет совпадений)", cfg.maxToolOutput);
   };
 
   return {
@@ -411,7 +418,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           await writeFile(file, next, "utf8");
           const rel = relative(workspace, file) || path;
           const diff = previous !== null ? lineDiff(previous, next) : "";
-          if (diff) toolMeta.set(toolCallId, { inlineDiff: diff });
+          if (diff) toolMeta.set(toolCallId, { inlineDiff: redact(diff, options.sensitiveValues) });
           return previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
         });
       },
@@ -444,7 +451,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             const report = await applyPatch(workspace, patches, snapshots, abortSignal);
             const rendered = report.files.map((f) => renderFileDiff(f.op === "add" ? "add" : f.op === "delete" ? "delete" : "modify", f.rel, f.oldText, f.newText));
             const combined = rendered.map((r) => `${r.header} (${r.counter})\n${r.body}`).join("\n---\n");
-            if (combined) toolMeta.set(toolCallId, { inlineDiff: combined });
+            if (combined) toolMeta.set(toolCallId, { inlineDiff: redact(combined, options.sensitiveValues) });
             return rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
           } catch (e) {
             if (e instanceof ApplyError) throw new Error(`Правка отклонена [${e.code}]: ${e.message}`);
@@ -465,9 +472,9 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           const sb = await maybeSandbox(sandbox, {
             command: exactCommand,
             cwd: workspace,
-          });
+          }, { required: cfg.sandbox === "strict-required" });
           const out = await runCommand(sb.command, workspace, cfg.commandTimeoutMs, abortSignal);
-          return clip(out, cfg.maxToolOutput);
+          return safeClip(out, cfg.maxToolOutput);
         });
       },
     }),
@@ -507,8 +514,12 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           { command: pick.command },
           { ecosystem: pick.ecosystem, commandLength: pick.command.length },
           async () => {
-            const wrapped = await maybeSandbox(sandbox, { command: pick.command, cwd: workspace });
-            return clip(`$ ${pick.command}\n${await runCommand(wrapped.command, workspace, 60_000, abortSignal)}`, cfg.maxToolOutput);
+            const wrapped = await maybeSandbox(
+              sandbox,
+              { command: pick.command, cwd: workspace },
+              { required: cfg.sandbox === "strict-required" },
+            );
+            return safeClip(`$ ${pick.command}\n${await runCommand(wrapped.command, workspace, 60_000, abortSignal)}`, cfg.maxToolOutput);
           },
         );
       },

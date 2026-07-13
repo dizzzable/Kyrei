@@ -1,0 +1,44 @@
+{
+  "name": "search_all_unique_properties",
+  "description": "Recursively search for all unique properties on the entire node tree on provided parent ids.",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "parents": {
+        "description": "IDs of all parent nodes to search",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "properties": {
+        "description": "List of properties to search for",
+        "items": {
+          "enum": [
+            "fillColor",
+            "textColor",
+            "strokeColor",
+            "strokeThickness",
+            "cornerRadius",
+            "padding",
+            "gap",
+            "fontSize",
+            "fontFamily",
+            "fontWeight"
+          ],
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "filePath",
+      "parents",
+      "properties"
+    ],
+    "type": "object"
+  }
+}

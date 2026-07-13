@@ -28,7 +28,7 @@ export function Tip({
           side={side}
           sideOffset={6}
           className={cn(
-            "z-50 max-w-xs rounded-md bg-elevated px-2 py-1 text-xs text-foreground shadow-nous overlay-blur",
+            "z-[220] max-w-xs rounded-md bg-elevated px-2 py-1 text-xs text-foreground shadow-nous overlay-blur",
             "select-none data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0",
             className,
           )}

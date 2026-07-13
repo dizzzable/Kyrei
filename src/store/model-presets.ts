@@ -1,8 +1,8 @@
 /**
  * Per-`provider::model` UI preset (effort/fast), remembered across sessions.
- * Client-only storage. As of Wave 3.4 these are wired through the gateway to
- * the engine (`modelParams` → `reasoning_effort`), so they affect the actual
- * model call — not just the label.
+ * Client-only storage. Supported OpenAI request protocols wire these through
+ * the gateway to the engine (`modelParams` → `reasoning_effort`); other
+ * protocols keep the controls unavailable instead of pretending to apply them.
  */
 
 import { useMemo } from "react";

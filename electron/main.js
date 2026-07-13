@@ -1,19 +1,39 @@
-import { app, BrowserWindow, Menu, dialog, safeStorage } from "electron";
+import { app, BrowserWindow, Menu, dialog, safeStorage, shell } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../core/gateway.js";
+import { installDesktopViewportGuard } from "./desktop-viewport-guard.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const appIcon = join(here, "..", "assets", "icon.png");
 
 let windowRef;
 let gateway; // { port, token, close }
+let shutdownStarted = false;
+let shutdownComplete = false;
+
+const ownsSingleInstance = app.requestSingleInstanceLock();
+if (!ownsSingleInstance) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!windowRef) return;
+    if (windowRef.isMinimized()) windowRef.restore();
+    windowRef.show();
+    windowRef.focus();
+  });
+}
 
 async function chooseFolder() {
   const result = await dialog.showOpenDialog(windowRef, {
     properties: ["openDirectory", "createDirectory"],
   });
   return result.canceled ? "" : result.filePaths[0] ?? "";
+}
+
+async function openPath(path) {
+  const error = await shell.openPath(path);
+  if (error) throw new Error(error);
 }
 
 async function createSecretsCodec() {
@@ -60,11 +80,15 @@ async function createWindow(port, gatewayToken) {
     },
   });
 
-  // Kyrei is a closed desktop workspace: it never creates browser tabs,
-  // hands URLs to the OS, or navigates away from its local renderer.
+  // Kyrei's renderer is a closed desktop workspace: it never creates browser
+  // tabs or navigates away from the local UI. Provider connectors may ask an
+  // official external CLI to open the system browser for authentication, but
+  // sign-in pages are never embedded in this BrowserWindow.
   windowRef.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   windowRef.webContents.on("will-navigate", (event) => event.preventDefault());
   windowRef.webContents.on("will-redirect", (event) => event.preventDefault());
+  const disposeViewportGuard = installDesktopViewportGuard(windowRef);
+  windowRef.once("closed", disposeViewportGuard);
 
   const devUrl = process.env.KYREI_RENDERER_URL;
   if (devUrl) {
@@ -79,7 +103,7 @@ async function createWindow(port, gatewayToken) {
   }
 }
 
-app.whenReady().then(async () => {
+if (ownsSingleInstance) app.whenReady().then(async () => {
   try {
     const devUrl = process.env.KYREI_RENDERER_URL;
     const rendererOrigin = devUrl ? new URL(devUrl).origin : "null";
@@ -87,8 +111,11 @@ app.whenReady().then(async () => {
     gateway = await startGateway({
       dataDir: join(app.getPath("userData"), "kyrei"),
       chooseFolder,
+      openPath,
       preferredPort: 8765,
       rendererOrigin,
+      runtimeBuildId: `${app.getVersion()}:${process.env.KYREI_BUILD_ID ?? "release"}`,
+      requireProtectedSecrets: true,
       ...(secretsCodec ? { secretsCodec } : {}),
     });
     await createWindow(gateway.port, gateway.token);
@@ -100,4 +127,15 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0 && gateway) createWindow(gateway.port, gateway.token); });
-app.on("before-quit", () => { if (gateway && typeof gateway.close === "function") gateway.close(); });
+app.on("before-quit", (event) => {
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  Promise.resolve(gateway && typeof gateway.close === "function" ? gateway.close() : undefined)
+    .catch(error => console.error("[kyrei] gateway shutdown failed:", error))
+    .finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
+});

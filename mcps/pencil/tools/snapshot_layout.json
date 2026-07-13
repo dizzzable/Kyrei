@@ -1,0 +1,28 @@
+{
+  "name": "snapshot_layout",
+  "description": "Check the current layout structure of an .pen file.\n\n- Be careful with omitting the maxDepth parameter, as large maxDepth values can result in a lot of data.\n- If you're only interested in overlapping elements, clipped elements, etc. then use the problemsOnly parameter.\n\nExample:\n- maxDepth=0 means only the top level nodes layout will be returned. Useful for finding space for a new frame on the canvas.",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "maxDepth": {
+        "description": "Limit how deep to descend in the node tree. If omitted, the search is limited to the node and its direct children. When maxDepth is reached, omitted children are replaced with \"...\". Unlimited depth can result in a lot of data, prefer specifying a maxDepth.",
+        "type": "number"
+      },
+      "parentId": {
+        "description": "Only return the layout rectangles in this node's subtree. If omitted returns the layout of the whole document.",
+        "type": "string"
+      },
+      "problemsOnly": {
+        "description": "Only return nodes that have some kind of problem with their layout, e.g. they are clipped by their parents. If omitted, the value is `false`.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "filePath"
+    ],
+    "type": "object"
+  }
+}

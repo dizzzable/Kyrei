@@ -122,12 +122,6 @@ const ContextBudgetSchema = z.object({
   hardPct: z.number().min(0).max(1).default(DEFAULT_ENGINE_CONFIG.contextBudget.hardPct),
 });
 
-const ProviderRolesSchema = z.object({
-  default: z.string().default(DEFAULT_ENGINE_CONFIG.providerRoles.default),
-  small: z.string().default(DEFAULT_ENGINE_CONFIG.providerRoles.small),
-  plan: z.string().default(DEFAULT_ENGINE_CONFIG.providerRoles.plan),
-});
-
 const GBrainConfigSchema = z.object({
   mode: z.enum(["off", "read", "read-write"]).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.mode),
   command: z.string().trim().min(1).max(1_024).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.command),
@@ -143,6 +137,13 @@ const MemoryConfigSchema = z.object({
   gbrain: GBrainConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.gbrain),
 });
 
+const DelegationConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.delegation.enabled),
+  maxTasks: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxTasks),
+  maxParallel: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxParallel),
+  maxSteps: z.number().int().min(1).max(24).default(DEFAULT_ENGINE_CONFIG.delegation.maxSteps),
+});
+
 /** Full engine config schema. All fields optional with sane defaults. */
 export const EngineConfigSchema = z.object({
   maxSteps: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.maxSteps),
@@ -150,12 +151,12 @@ export const EngineConfigSchema = z.object({
   maxToolOutput: z.number().int().min(500).max(200_000).default(DEFAULT_ENGINE_CONFIG.maxToolOutput),
   contextBudget: ContextBudgetSchema.default(DEFAULT_ENGINE_CONFIG.contextBudget),
   permissions: PermissionConfigSchema.default(DEFAULT_ENGINE_CONFIG.permissions),
-  providerRoles: ProviderRolesSchema.default(DEFAULT_ENGINE_CONFIG.providerRoles),
   fallbackChain: z.array(z.string()).default([]),
-  sandbox: z.enum(["off", "strict"]).default(DEFAULT_ENGINE_CONFIG.sandbox),
+  sandbox: z.enum(["off", "strict", "strict-required"]).default(DEFAULT_ENGINE_CONFIG.sandbox),
   apiMaxRetries: z.number().int().min(0).max(10).default(DEFAULT_ENGINE_CONFIG.apiMaxRetries),
   personality: z.string().max(4000).default(DEFAULT_ENGINE_CONFIG.personality),
   fileReadMaxChars: z.number().int().min(1000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.fileReadMaxChars),
+  delegation: DelegationConfigSchema.default(DEFAULT_ENGINE_CONFIG.delegation),
   memory: MemoryConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory),
 });
 
@@ -204,6 +205,35 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
     delete v["file_read_max_chars"];
     warnings.push("migrated Hermes 'file_read_max_chars' → fileReadMaxChars");
   }
+  // Early Kyrei builds exposed these aliases in Settings, but no runtime path
+  // ever consumed them. Drop the cosmetic contract rather than unexpectedly
+  // activating a previously inert value.
+  if (hasOwn(v, "providerRoles")) {
+    delete v["providerRoles"];
+    warnings.push("dropped legacy 'providerRoles' aliases (they had no runtime consumers)");
+  }
+  // Hermes uses one concurrency knob for both accepted batch width and active
+  // children. Kyrei exposes the two limits separately while preserving it.
+  if (isRecord(v["delegation"])) {
+    const delegation = { ...v["delegation"] };
+    const legacyConcurrency = delegation["max_concurrent_children"];
+    let migrated = false;
+    if (typeof legacyConcurrency === "number") {
+      if (delegation["maxTasks"] == null) {
+        delegation["maxTasks"] = legacyConcurrency;
+        migrated = true;
+      }
+      if (delegation["maxParallel"] == null) {
+        delegation["maxParallel"] = legacyConcurrency;
+        migrated = true;
+      }
+      delete delegation["max_concurrent_children"];
+    }
+    if (migrated) {
+      warnings.push("migrated Hermes 'delegation.max_concurrent_children' to maxTasks/maxParallel");
+    }
+    v["delegation"] = delegation;
+  }
   return { value: v, warnings };
 }
 
@@ -222,6 +252,10 @@ export function resolveEngineConfig(raw?: unknown): ResolveResult {
     if (cfg.contextBudget.softPct >= cfg.contextBudget.hardPct) {
       warnings.push("contextBudget.softPct >= hardPct — reset to defaults");
       cfg.contextBudget = { ...DEFAULT_ENGINE_CONFIG.contextBudget };
+    }
+    if (cfg.delegation.maxParallel > cfg.delegation.maxTasks) {
+      warnings.push("delegation.maxParallel > maxTasks - clamped to maxTasks");
+      cfg.delegation = { ...cfg.delegation, maxParallel: cfg.delegation.maxTasks };
     }
     return { config: cfg as EngineConfig, warnings };
   }

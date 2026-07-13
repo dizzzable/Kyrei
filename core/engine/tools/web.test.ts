@@ -111,6 +111,32 @@ describe("web tools", () => {
     expect(JSON.stringify(records)).not.toContain(deniedQuery);
   });
 
+  it("blocks known credentials and secret-shaped values before any outbound call", async () => {
+    let searches = 0;
+    let fetches = 0;
+    const records: unknown[] = [];
+    const guardedBrowser: WebBrowser = {
+      search: async () => { searches += 1; return []; },
+      fetch: async () => { fetches += 1; return { url: "https://example.com", title: "", text: "", links: [] }; },
+    };
+    const exactSecret = "opaque-runtime-token-123456";
+    const tools = buildWebTools(DEFAULT_ENGINE_CONFIG, {
+      browser: guardedBrowser,
+      sensitiveValues: [exactSecret],
+      audit: { write: async (record) => { records.push(record); } },
+    });
+
+    expect(await execute(tools, "web_search", { query: `lookup ${exactSecret}` })).toContain("sensitive data");
+    expect(await execute(tools, "web_fetch", { url: `https://example.com/?token=sk-${"A".repeat(24)}` })).toContain("sensitive data");
+    expect({ searches, fetches }).toEqual({ searches: 0, fetches: 0 });
+    expect(records).toMatchObject([
+      { decision: "deny", status: "denied" },
+      { decision: "deny", status: "denied" },
+    ]);
+    expect(JSON.stringify(records)).not.toContain(exactSecret);
+    expect(JSON.stringify(records)).not.toContain(`sk-${"A".repeat(24)}`);
+  });
+
   it("offers search only in search mode", () => {
     const cfg = { ...DEFAULT_ENGINE_CONFIG, permissions: { ...DEFAULT_ENGINE_CONFIG.permissions, web: "search" as const } };
     const tools = buildWebTools(cfg, { browser });

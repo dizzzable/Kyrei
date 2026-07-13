@@ -16,8 +16,13 @@ const PATTERNS: RegExp[] = [
   /\bBearer\s+[a-zA-Z0-9._-]{20,}/gi,
 ];
 
-export function redact(text: string): string {
-  let out = text;
+export function redact(text: string, exactValues: readonly string[] = []): string {
+  const exact = [...new Set(exactValues.filter((value) => typeof value === "string" && value.length > 0))]
+    .sort((left, right) => right.length - left.length);
+  const exactPattern = exact.length
+    ? new RegExp(exact.map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g")
+    : null;
+  let out = exactPattern ? text.replace(exactPattern, "[REDACTED]") : text;
   for (const re of PATTERNS) out = out.replace(re, "[REDACTED]");
   return out;
 }
@@ -29,12 +34,40 @@ export function containsSecret(text: string): boolean {
   });
 }
 
-/** Env sanitizer for run_command: strips secret-ish vars and proxies by default. */
+const SAFE_CHILD_ENV = new Set([
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "HOME",
+  "USERPROFILE",
+  "TMP",
+  "TEMP",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "SHELL",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+]);
+
+/**
+ * Child processes receive a minimal functional environment. A denylist cannot
+ * cover arbitrary names such as DATABASE_URL or CUSTOM_CREDENTIAL, and `env`
+ * would otherwise disclose them directly to an agent.
+ */
 export function sanitizeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
-  const denyKey = /(_KEY|_TOKEN|_SECRET|PASSWORD|APIKEY|API_KEY|AWS_|GITHUB_TOKEN|OPENAI|ANTHROPIC|_PROXY|PROXY_)/i;
   for (const [k, v] of Object.entries(env)) {
-    if (denyKey.test(k)) continue;
+    if (!SAFE_CHILD_ENV.has(k.toUpperCase()) || v == null || containsSecret(v)) continue;
     out[k] = v;
   }
   return out;

@@ -1,11 +1,20 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
+  "desktopName": "kyrei.desktop",
+  "homepage": "https://github.com/dizzzable/Kyrei",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dizzzable/Kyrei.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dizzzable/Kyrei/issues"
+  },
   "author": {
     "name": "dizzzable",
-    "email": "dizzable.23@gmail.com"
+    "email": "dizzzable@users.noreply.github.com"
   },
   "license": "MIT",
   "type": "module",
@@ -22,14 +31,20 @@
     "typecheck:renderer": "tsc --noEmit -p tsconfig.json",
     "check:js": "node scripts/check-js.mjs",
     "check:i18n": "node scripts/check-i18n.mjs",
+    "pretest": "npm run build:engine",
     "test": "vitest --run",
-    "gate": "npm run typecheck:engine && npm run typecheck:renderer && npm run build:engine && npm run check:js && npm run check:i18n && npm run test",
+    "gate": "npm run typecheck:engine && npm run typecheck:renderer && npm run check:js && npm run check:i18n && npm run test",
     "start": "vite build && node scripts/build-engine.mjs && electron .",
     "package:prepare": "npm run gen-icons && vite build && node scripts/build-engine.mjs",
     "dist": "npm run package:prepare && electron-builder",
     "dist:win": "npm run package:prepare && electron-builder --win",
     "dist:mac": "npm run package:prepare && electron-builder --mac",
-    "dist:linux": "npm run package:prepare && electron-builder --linux"
+    "dist:mac:x64": "npm run package:prepare && electron-builder --mac --x64",
+    "dist:mac:arm64": "npm run package:prepare && electron-builder --mac --arm64",
+    "dist:linux": "npm run package:prepare && electron-builder --linux",
+    "dist:linux:x64": "npm run package:prepare && electron-builder --linux AppImage deb pacman --x64",
+    "dist:linux:arm64": "npm run package:prepare && electron-builder --linux AppImage deb --arm64",
+    "dist:arch": "npm run package:prepare && electron-builder --linux pacman --x64"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.17",
@@ -95,6 +110,20 @@
       "assets/icon.ico",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "assets/fonts/OFL.txt",
+        "to": "THIRD_PARTY_LICENSES/JetBrainsMono-OFL.txt"
+      }
+    ],
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**",
       "**/node_modules/sqlite-vec*/**",
@@ -138,11 +167,37 @@
     },
     "mac": {
       "target": ["dmg", "zip"],
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
-      "icon": "assets/icon.png"
+      "target": ["AppImage", "deb", "pacman"],
+      "icon": "assets/icon.png",
+      "executableName": "kyrei",
+      "syncDesktopName": true,
+      "category": "Development",
+      "synopsis": "Local AI coding agent desktop",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "pacman": {
+      "artifactName": "${productName}-${version}-${arch}.pkg.tar.zst",
+      "depends": [
+        "c-ares",
+        "ffmpeg",
+        "gtk3",
+        "libevent",
+        "libvpx",
+        "libxslt",
+        "libxss",
+        "minizip",
+        "nss",
+        "re2",
+        "snappy",
+        "libnotify",
+        "libappindicator",
+        "libsecret",
+        "xdg-utils"
+      ]
     }
   }
 }

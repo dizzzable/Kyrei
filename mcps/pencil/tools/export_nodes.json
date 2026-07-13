@@ -1,0 +1,47 @@
+{
+  "name": "export_nodes",
+  "description": "Export nodes to image files in PNG/JPEG/WEBP/PDF formats.\n\n- Takes an array of node IDs and exports each one as a separate image file.\n- Supports PNG, JPEG, WEBP and PDF formats.\n- Writes files to the specified output directory using node IDs as filenames.\n- Returns the absolute paths of the created files.\n- Uses 2x scale and 8192 max resolution for high-quality exports.\n- For PDF, all nodes are combined into a single multi-page document.",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "format": {
+        "description": "Export format (default: png)",
+        "enum": [
+          "png",
+          "jpeg",
+          "webp",
+          "pdf"
+        ],
+        "type": "string"
+      },
+      "nodeIds": {
+        "description": "Array of node IDs to export",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "outputDir": {
+        "description": "Directory to write exported files to",
+        "type": "string"
+      },
+      "quality": {
+        "description": "Export quality for JPEG and WEBP (1-100). Defaults to 95 for JPEG, 100 (lossless) for WEBP.",
+        "type": "number"
+      },
+      "scale": {
+        "description": "Export scale factor (default: 2). Not applicable to PDF.",
+        "type": "number"
+      }
+    },
+    "required": [
+      "filePath",
+      "outputDir",
+      "nodeIds"
+    ],
+    "type": "object"
+  }
+}

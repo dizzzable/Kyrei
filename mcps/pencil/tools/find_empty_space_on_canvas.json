@@ -1,0 +1,46 @@
+{
+  "name": "find_empty_space_on_canvas",
+  "description": "Find empty space in a .pen file for a given direction and desired size.\n\nIf nodeId is provided, finds space around that specific node.\nIf nodeId is omitted, finds space around the entire canvas content.",
+  "inputSchema": {
+    "properties": {
+      "direction": {
+        "description": "The direction to search for empty space relative to the node",
+        "enum": [
+          "top",
+          "right",
+          "bottom",
+          "left"
+        ],
+        "type": "string"
+      },
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "height": {
+        "description": "The height of the required empty space",
+        "type": "number"
+      },
+      "nodeId": {
+        "description": "Optional starting point node ID to find space around. If omitted, the empty space will be found around the canvas content.",
+        "type": "string"
+      },
+      "padding": {
+        "description": "The minimum padding distance from other element",
+        "type": "number"
+      },
+      "width": {
+        "description": "The width of the required empty space",
+        "type": "number"
+      }
+    },
+    "required": [
+      "filePath",
+      "width",
+      "height",
+      "padding",
+      "direction"
+    ],
+    "type": "object"
+  }
+}

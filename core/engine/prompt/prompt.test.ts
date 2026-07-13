@@ -43,6 +43,59 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(writable).toContain("brain_capture");
   });
 
+  it("lists enabled skill summaries without inlining their instructions", () => {
+    const prompt = buildSystemPrompt({
+      hasTools: true,
+      workspace: "/w",
+      skills: [{ id: "review", name: "Code review", description: "Review changed code" }],
+    })!;
+    expect(prompt).toContain("read_skill");
+    expect(prompt).toContain("review — Code review: Review changed code");
+    expect(prompt).not.toContain("SECRET_SKILL_BODY");
+  });
+
+  it("mentions read-only delegation only when the capability is enabled", () => {
+    const disabled = buildSystemPrompt({ hasTools: true, workspace: "/w" })!;
+    const enabled = buildSystemPrompt({ hasTools: true, hasDelegation: true, workspace: "/w" })!;
+    expect(disabled).not.toContain("delegate_read");
+    expect(enabled).toContain("delegate_read");
+    expect(enabled).toContain("read-only research goals");
+    expect(enabled).toContain("verify child summaries");
+  });
+
+  it("describes the configured Team roster without exposing provider credentials", () => {
+    const prompt = buildSystemPrompt({
+      hasTools: true,
+      workspace: "/w",
+      team: {
+        name: "Project council",
+        workflow: "supervisor",
+        roles: [
+          { id: "reviewer", name: "Reviewer", description: "Checks evidence", model: "provider/model" },
+        ],
+      },
+    })!;
+
+    expect(prompt).toContain("team_delegate");
+    expect(prompt).toContain("Project council (supervisor)");
+    expect(prompt).toContain("reviewer: Reviewer [provider/model] - Checks evidence");
+    expect(prompt).toContain("majority agreement");
+    expect(prompt).not.toContain("apiKey");
+  });
+
+  it("gives consensus profiles a distinct fan-out contract", () => {
+    const prompt = buildSystemPrompt({
+      hasTools: true,
+      team: {
+        name: "Council",
+        workflow: "consensus",
+        roles: [{ id: "a", name: "A", model: "provider/a" }],
+      },
+    })!;
+    expect(prompt).toContain("fans it out to every configured role");
+    expect(prompt).toContain("without memberId or dependencies");
+  });
+
   it("snapshot: full prompt text is pinned to PROMPT_VERSION (change ⇒ bump version)", () => {
     const prompt = buildSystemPrompt({ hasTools: true, workspace: "WS" });
     // Snapshot guard: any wording change fails here, forcing a PROMPT_VERSION bump + CHANGELOG entry.

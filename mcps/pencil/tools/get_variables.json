@@ -1,0 +1,16 @@
+{
+  "name": "get_variables",
+  "description": "Get the variables and themes defined in this .pen file.\n\n- Use the result of this tool to create global CSS rules to use in a codebase.\n- When generating code from a design, use this tool to get the global styling rules associated with the design.",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "filePath"
+    ],
+    "type": "object"
+  }
+}

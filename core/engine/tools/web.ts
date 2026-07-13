@@ -12,6 +12,7 @@ import {
   type WebBrowser,
 } from "../web/browser.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
+import { containsSecret } from "../security/secrets.js";
 
 export interface WebToolAudit {
   write(record: AuditRecord): Promise<void>;
@@ -21,6 +22,9 @@ export interface WebToolOptions {
   browser?: WebBrowser;
   audit?: WebToolAudit;
   sessionId?: string;
+  signal?: AbortSignal;
+  /** Exact runtime credentials/headers that must never leave the process. */
+  sensitiveValues?: readonly string[];
 }
 
 const DEFAULT_SEARCH_LIMIT = 5;
@@ -84,9 +88,19 @@ function denialMessage(decision: "ask" | "deny"): string {
     : "Web access is disabled by the current permission policy.";
 }
 
+function containsSensitiveOutbound(value: string, sensitiveValues: readonly string[] = []): boolean {
+  if (containsSecret(value)) return true;
+  return sensitiveValues.some((candidate) => {
+    const secret = candidate.trim();
+    return secret.length >= 8 && value.includes(secret);
+  });
+}
+
+const SENSITIVE_OUTBOUND_MESSAGE = "Web request blocked because it contains sensitive data.";
+
 /** Build only tools allowed by the capability mode; user rules remain deny-wins. */
 export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): ToolSet {
-  const browser = options.browser ?? createWebBrowser();
+  const browser = options.browser ?? createWebBrowser({ signal: options.signal });
   const canSearch = isConfiguredFor(cfg, "web_search") || hasExplicitAllowRule(cfg, "web_search");
   const canFetch = isConfiguredFor(cfg, "web_fetch") || hasExplicitAllowRule(cfg, "web_fetch");
   const tools: ToolSet = {};
@@ -100,9 +114,13 @@ export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): 
       }),
       execute: async ({ query, limit }, { toolCallId }) => {
         const started = Date.now();
-        const decision = decisionFor(cfg, "web_search", query);
         const correlation = { sessionId: options.sessionId, toolCallId };
         const metadata = searchMetadata(query, limit);
+        if (containsSensitiveOutbound(query, options.sensitiveValues)) {
+          await audit(options.audit, correlation, { tool: "web_search", metadata, decision: "deny", status: "denied", durationS: (Date.now() - started) / 1000 });
+          return SENSITIVE_OUTBOUND_MESSAGE;
+        }
+        const decision = decisionFor(cfg, "web_search", query);
         if (decision !== "allow") {
           await audit(options.audit, correlation, { tool: "web_search", metadata, decision, status: "denied", durationS: (Date.now() - started) / 1000 });
           return denialMessage(decision);
@@ -136,9 +154,13 @@ export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): 
       }),
       execute: async ({ url, maxChars }, { toolCallId }) => {
         const started = Date.now();
-        const decision = decisionFor(cfg, "web_fetch", url);
         const correlation = { sessionId: options.sessionId, toolCallId };
         const metadata = urlMetadata(url, maxChars);
+        if (containsSensitiveOutbound(url, options.sensitiveValues)) {
+          await audit(options.audit, correlation, { tool: "web_fetch", metadata, decision: "deny", status: "denied", durationS: (Date.now() - started) / 1000 });
+          return SENSITIVE_OUTBOUND_MESSAGE;
+        }
+        const decision = decisionFor(cfg, "web_fetch", url);
         if (decision !== "allow") {
           await audit(options.audit, correlation, { tool: "web_fetch", metadata, decision, status: "denied", durationS: (Date.now() - started) / 1000 });
           return denialMessage(decision);

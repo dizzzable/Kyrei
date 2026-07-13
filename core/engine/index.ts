@@ -1,8 +1,8 @@
 /**
  * Kyrei engine v2 — public entry.
  *
- * Consumed by `core/gateway.js` when `KYREI_ENGINE=v2`. Keeps the exact v1
- * contract: `runKyreiChat({ emit, messages, ... }) -> { text, parts }`.
+ * Consumed by `core/gateway.js` when `KYREI_ENGINE=v2`. The result preserves
+ * terminal status and credential-free provider-attempt telemetry.
  *
  * Phase 0: types + ports + build pipeline only. `runKyreiChat` is a guarded
  * stub until Phase 1 (orchestrator on AI SDK v5) lands.
@@ -26,7 +26,13 @@ export type { Decision } from "./security/permissions.js";
 export { createAuditLog } from "./security/audit.js";
 export { runPreHooks, secretScanHook } from "./security/pre-hook.js";
 export type { PreHook } from "./security/pre-hook.js";
-export { createSandbox, maybeSandbox, commandExists, shSingleQuote } from "./security/sandbox.js";
+export {
+  SandboxUnavailableError,
+  createSandbox,
+  maybeSandbox,
+  commandExists,
+  shSingleQuote,
+} from "./security/sandbox.js";
 export type { Sandbox, SandboxMode, WrapInput } from "./security/sandbox.js";
 export { safePath, isWorkspaceDir } from "./security/jail.js";
 export { listModels } from "./provider/registry.js";
@@ -54,6 +60,13 @@ export type { OpenVikingClient, OpenVikingOptions } from "./memory/openviking.js
 export { createGBrainClient, formatGBrainResult, runGBrainProcess } from "./memory/gbrain.js";
 export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode } from "./memory/gbrain.js";
 export { buildGBrainTools } from "./tools/gbrain.js";
+export { runTeamDepartment } from "./team/department.js";
+export type {
+  RunTeamDepartmentOptions,
+  TeamDepartmentInputArtifact,
+  TeamDepartmentResult,
+} from "./team/department.js";
+export * from "./pipeline/index.js";
 
 export const ENGINE_VERSION = "2.0.0-dev";
 

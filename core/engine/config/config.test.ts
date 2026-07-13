@@ -16,6 +16,46 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(config.commandTimeoutMs).toBe(DEFAULT_ENGINE_CONFIG.commandTimeoutMs);
   });
 
+  it("preserves the fail-closed sandbox admission mode", () => {
+    expect(resolveEngineConfig({ sandbox: "strict-required" }).config.sandbox).toBe("strict-required");
+  });
+
+  it("validates bounded read-only delegation settings", () => {
+    const { config } = resolveEngineConfig({
+      delegation: { enabled: false, maxTasks: 6, maxParallel: 2, maxSteps: 12 },
+    });
+    expect(config.delegation).toEqual({
+      enabled: false,
+      maxTasks: 6,
+      maxParallel: 2,
+      maxSteps: 12,
+    });
+  });
+
+  it("clamps delegation parallelism to the accepted task count", () => {
+    const { config, warnings } = resolveEngineConfig({
+      delegation: { maxTasks: 2, maxParallel: 6 },
+    });
+    expect(config.delegation).toEqual({
+      ...DEFAULT_ENGINE_CONFIG.delegation,
+      maxTasks: 2,
+      maxParallel: 2,
+    });
+    expect(warnings.some((warning) => warning.includes("maxParallel"))).toBe(true);
+  });
+
+  it("migrates Hermes delegation concurrency into both bounded Kyrei limits", () => {
+    const { config, warnings } = resolveEngineConfig({
+      delegation: { max_concurrent_children: 4 },
+    });
+    expect(config.delegation).toEqual({
+      ...DEFAULT_ENGINE_CONFIG.delegation,
+      maxTasks: 4,
+      maxParallel: 4,
+    });
+    expect(warnings.some((warning) => warning.includes("max_concurrent_children"))).toBe(true);
+  });
+
   it("validates optional GBrain settings without enabling them by default", () => {
     expect(resolveEngineConfig().config.memory.gbrain).toEqual(DEFAULT_ENGINE_CONFIG.memory.gbrain);
     const { config } = resolveEngineConfig({
@@ -37,14 +77,20 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("validates nested permissions and provider roles", () => {
+  it("validates nested permissions", () => {
     const { config } = resolveEngineConfig({
       permissions: { terminal: "turbo", review: "always", rules: [{ pattern: "rm *", action: "deny" }] },
-      providerRoles: { default: "gpt", small: "mini", plan: "o1" },
     });
     expect(config.permissions.terminal).toBe("turbo");
     expect(config.permissions.rules[0]).toEqual({ pattern: "rm *", action: "deny" });
-    expect(config.providerRoles.plan).toBe("o1");
+  });
+
+  it("drops legacy provider role aliases that never had runtime consumers", () => {
+    const { config, warnings } = resolveEngineConfig({
+      providerRoles: { default: "gpt", small: "mini", plan: "o1" },
+    });
+    expect(config).not.toHaveProperty("providerRoles");
+    expect(warnings.some((warning) => warning.includes("providerRoles"))).toBe(true);
   });
 
   it("drops an invalid field and keeps valid ones (fail-open, never throws)", () => {

@@ -107,7 +107,7 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
       const provider = createOpenAICompatible({
         name: OPENAI_COMPATIBLE_PROVIDER_NAME,
         baseURL,
-        apiKey: opts.apiKey || "kyrei",
+        ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
         includeUsage: true,
         headers,
         ...(opts.fetch ? { fetch: opts.fetch } : {}),

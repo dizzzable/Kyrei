@@ -3,52 +3,151 @@ name: Package desktop apps
 on:
   workflow_dispatch:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          EXPECTED="v$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "$EXPECTED" || {
+            echo "Tag $GITHUB_REF_NAME does not match package version $EXPECTED" >&2
+            exit 1
+          }
+      - run: npm ci
+      - run: npm run gate
+      - run: npm audit --audit-level=high
+      - name: Scan committed source for secrets
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   package:
     name: ${{ matrix.label }}
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            command: dist:win
-            label: Windows
-            artifact: Kyrei-Windows
-            files: dist/app/*.exe
-          - os: macos-latest
-            command: dist:mac
-            label: macOS
-            artifact: Kyrei-macOS
+          - os: windows-2025
+            label: Windows x64
+            args: --win --x64
+            artifact: Kyrei-Windows-x64
+            files: |
+              dist/app/*.exe
+          - os: macos-15-intel
+            label: macOS Intel
+            args: --mac --x64
+            artifact: Kyrei-macOS-x64
             files: |
               dist/app/*.dmg
               dist/app/*.zip
-          - os: ubuntu-latest
-            command: dist:linux
-            label: Linux
-            artifact: Kyrei-Linux
+          - os: macos-15
+            label: macOS Apple Silicon
+            args: --mac --arm64
+            artifact: Kyrei-macOS-arm64
+            files: |
+              dist/app/*.dmg
+              dist/app/*.zip
+          - os: ubuntu-24.04
+            label: Linux and Arch x64
+            args: --linux AppImage deb pacman --x64
+            artifact: Kyrei-Linux-x64
+            files: |
+              dist/app/*.AppImage
+              dist/app/*.deb
+              dist/app/*.pkg.tar.zst
+              dist/app/*.pacman
+          - os: ubuntu-24.04-arm
+            label: Linux arm64
+            args: --linux AppImage deb --arm64
+            artifact: Kyrei-Linux-arm64
             files: |
               dist/app/*.AppImage
               dist/app/*.deb
     runs-on: ${{ matrix.os }}
     env:
-      # The workflow produces unsigned test/release artifacts. Supply signing
-      # credentials in a release workflow when public distribution is needed.
+      # Release artifacts remain unsigned until platform signing credentials
+      # are configured in GitHub Actions secrets.
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
+      - name: Install Linux packaging tools
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libarchive-tools libopenjp2-tools
       - run: npm ci
-      - run: npm run ${{ matrix.command }}
-      - uses: actions/upload-artifact@v4
+      - run: npm run package:prepare
+      - name: Build ${{ matrix.label }} packages
+        run: npx electron-builder ${{ matrix.args }} --publish never
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          find release-assets -maxdepth 1 -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#release-assets/##' \
+            > release-assets/SHA256SUMS.txt
+      - name: Create or update release
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NOTES="docs/releases/${TAG}.md"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            if [[ -f "$NOTES" ]]; then
+              gh release create "$TAG" --verify-tag --draft --title "Kyrei ${TAG}" --notes-file "$NOTES"
+            else
+              gh release create "$TAG" --verify-tag --draft --title "Kyrei ${TAG}" --generate-notes
+            fi
+          fi
+
+          gh release upload "$TAG" release-assets/* --clobber
+          gh release edit "$TAG" --draft=false --prerelease=false --latest

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { startGateway } from "../core/gateway.js";
 
 let dataDir = "";
-let server: { port: number; token: string; close(): void };
+let server: { port: number; token: string; close(): void | Promise<void> };
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "kyrei-gateway-i18n-"));
@@ -13,7 +13,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  server.close();
+  await server.close();
   await rm(dataDir, { recursive: true, force: true });
 });
 

@@ -106,4 +106,18 @@ describe("agent web reader — extraction", () => {
     });
     await expect(browser.fetch("https://example.com/slow")).rejects.toThrow("timed out");
   });
+
+  it("propagates an external Team cancellation into the active web request", async () => {
+    const controller = new AbortController();
+    const browser = createWebBrowser({
+      resolveHost: publicResolver,
+      signal: controller.signal,
+      fetch: async (_url, init) => new Promise<never>((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+    });
+    const pending = browser.fetch("https://example.com/cancelled");
+    controller.abort(new Error("team timeout"));
+    await expect(pending).rejects.toThrow("web request aborted");
+  });
 });

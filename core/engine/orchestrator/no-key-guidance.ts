@@ -8,5 +8,5 @@ export function emitNoKeyGuidance(emit: (e: KyreiEvent) => void): RunKyreiChatRe
     "Для локального режима — `http://localhost:11434/v1` (Ollama) или `http://localhost:1234/v1` (LM Studio).";
   emit({ type: "message.delta", payload: { text: guidance } });
   emit({ type: "message.complete", payload: { text: guidance, status: "complete" } });
-  return { text: guidance, parts: [{ type: "text", text: guidance }] };
+  return { text: guidance, parts: [{ type: "text", text: guidance }], status: "complete", attempts: [] };
 }

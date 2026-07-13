@@ -1,0 +1,340 @@
+import { describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import {
+  ProviderDiscoveryError,
+  discoverProviderModels,
+} from "../core/provider-discovery.js";
+
+const publicResolver = async () => [{ address: "93.184.216.34", family: 4 as const }];
+const benchmarkResolver = async () => [{ address: "198.18.0.127", family: 4 as const }];
+
+function response(status: number, body: string, headers: Record<string, string> = {}) {
+  return { status, body, headers };
+}
+
+describe("OpenAI-compatible provider discovery", () => {
+  it("uses the pinned lookup contract supported by current Node runtimes", async () => {
+    const server = createServer((request, response) => {
+      expect(request.url).toBe("/v1/models");
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "local-default-request" }] }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test-server-address-unavailable");
+
+    try {
+      await expect(discoverProviderModels({
+        protocol: "openai-chat",
+        baseURL: `http://localhost:${address.port}/v1`,
+        credentials: {},
+      })).resolves.toEqual([{ id: "local-default-request" }]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("pins the validated address, sends the credential once, and sanitizes models", async () => {
+    const credential = ["test", "credential"].join("-");
+    const request = vi.fn(async (_url: URL, options: Record<string, any>) => {
+      expect(options.pinnedAddress).toMatchObject({ address: "93.184.216.34", family: 4, loopback: false });
+      expect(options.headers.Authorization).toBe(`Bearer ${credential}`);
+      return response(200, JSON.stringify({
+        data: [
+          { id: "model-b", name: "Model B" },
+          { id: "model-a" },
+          { id: "model-b", name: "Duplicate" },
+          { id: "" },
+        ],
+      }));
+    });
+
+    const models = await discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1/",
+      credentials: { apiKey: credential },
+      resolveHost: publicResolver,
+      request,
+    });
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[0].href).toBe("https://models.example/v1/models");
+    expect(models).toEqual([
+      { id: "model-b", name: "Model B" },
+      { id: "model-a" },
+    ]);
+    expect(JSON.stringify(models)).not.toContain(credential);
+  });
+
+  it("never forwards credential-bearing public profile headers", async () => {
+    const credential = ["private", "credential"].join("-");
+    const request = vi.fn(async (_url: URL, options: Record<string, any>) => {
+      expect(options.headers).toMatchObject({
+        Authorization: `Bearer ${credential}`,
+        "HTTP-Referer": "https://kyrei.local",
+      });
+      expect(options.headers).not.toHaveProperty("X-API-Key");
+      expect(options.headers).not.toHaveProperty("Api-Key");
+      expect(options.headers).not.toHaveProperty("Cookie");
+      return response(200, JSON.stringify({ data: [] }));
+    });
+    await discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: { apiKey: credential },
+      headers: {
+        Authorization: "untrusted",
+        "X-API-Key": "untrusted",
+        "Api-Key": "untrusted",
+        Cookie: "untrusted",
+        "HTTP-Referer": "https://kyrei.local",
+      },
+      resolveHost: publicResolver,
+      request,
+    });
+  });
+
+  it("filters credential values echoed by a provider from discovered metadata", async () => {
+    const credential = ["echoed", "credential", "value"].join("-");
+    const longCredential = `long-secret-${"x".repeat(600)}`;
+    const models = await discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: { apiKey: credential, privateKey: longCredential },
+      resolveHost: publicResolver,
+      request: async () => response(200, JSON.stringify({
+        data: [
+          { id: credential, name: "must be dropped" },
+          { id: "safe-model", name: `name-${credential}` },
+          { id: "safe-model-two", name: "Safe model" },
+          { id: "safe-model-three", name: `${"p".repeat(500)}${longCredential}` },
+        ],
+      })),
+    });
+    expect(models).toEqual([
+      { id: "safe-model" },
+      { id: "safe-model-two", name: "Safe model" },
+      { id: "safe-model-three" },
+    ]);
+    expect(JSON.stringify(models)).not.toContain(credential);
+    expect(JSON.stringify(models)).not.toContain(longCredential.slice(0, 12));
+  });
+
+  it.each([
+    ["http://127.0.0.1:11434/v1", { address: "127.0.0.1", family: 4 }],
+    ["http://[::1]:11434/v1", { address: "::1", family: 6 }],
+  ])("allows an explicitly configured loopback endpoint: %s", async (baseURL, pinnedAddress) => {
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "local-model" }] })));
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL,
+      credentials: {},
+      request,
+    })).resolves.toEqual([{ id: "local-model" }]);
+    expect(request.mock.calls[0]?.[1].pinnedAddress).toMatchObject({ ...pinnedAddress, loopback: true });
+  });
+
+  it("requires a temporary opt-in for a trusted HTTPS benchmark-network hostname", async () => {
+    const request = vi.fn(async (_url: URL, options: Record<string, any>) => {
+      expect(options.pinnedAddress).toMatchObject({ address: "198.18.0.127", family: 4, loopback: false });
+      return response(200, JSON.stringify({ data: [{ id: "benchmark-model" }] }));
+    });
+    const options = {
+      protocol: "openai-chat",
+      baseURL: "https://trusted.example/v1",
+      credentials: {},
+      resolveHost: benchmarkResolver,
+      request,
+    } as const;
+
+    await expect(discoverProviderModels(options)).rejects.toMatchObject({
+      code: "provider_discovery_benchmark_opt_in_required",
+    });
+    expect(request).not.toHaveBeenCalled();
+
+    await expect(discoverProviderModels({ ...options, allowBenchmarkNetwork: true })).resolves.toEqual([
+      { id: "benchmark-model" },
+    ]);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["https://198.18.0.1/v1", undefined],
+    ["https://[::ffff:198.18.0.127]/v1", undefined],
+    ["http://trusted.example/v1", benchmarkResolver],
+    ["https://single-label/v1", benchmarkResolver],
+    ["https://private.example/v1", async () => [{ address: "10.0.0.2", family: 4 as const }]],
+    ["https://mixed.example/v1", async () => [
+      { address: "198.18.0.127", family: 4 as const },
+      { address: "10.0.0.2", family: 4 as const },
+    ]],
+  ])("does not widen the discovery SSRF boundary with benchmark opt-in: %s", async (baseURL, resolveHost) => {
+    const request = vi.fn();
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL,
+      credentials: {},
+      allowBenchmarkNetwork: true,
+      ...(resolveHost ? { resolveHost } : {}),
+      request,
+    })).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["http://169.254.169.254/latest", undefined],
+    ["http://10.0.0.2/v1", undefined],
+    ["http://192.0.2.10/v1", undefined],
+    ["http://192.88.99.10/v1", undefined],
+    ["http://198.18.0.1/v1", undefined],
+    ["http://240.0.0.1/v1", undefined],
+    ["https://private.example/v1", async () => [{ address: "192.168.1.2", family: 4 as const }]],
+    ["https://mixed.example/v1", async () => [
+      { address: "93.184.216.34", family: 4 as const },
+      { address: "10.0.0.2", family: 4 as const },
+    ]],
+    ["http://[::ffff:169.254.169.254]/v1", undefined],
+    ["http://[64:ff9b::a9fe:a9fe]/v1", undefined],
+    ["http://[2002:a9fe:a9fe::]/v1", undefined],
+  ])("blocks metadata and private targets: %s", async (baseURL, resolveHost) => {
+    const request = vi.fn();
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL,
+      credentials: {},
+      ...(resolveHost ? { resolveHost } : {}),
+      request,
+    })).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("requires HTTPS for every non-loopback discovery target", async () => {
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [] })));
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "http://models.example/v1",
+      credentials: { apiKey: ["do", "not", "send"].join("-") },
+      resolveHost: publicResolver,
+      request,
+    })).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [302, "provider_discovery_redirect_blocked"],
+    [401, "provider_discovery_unauthorized"],
+    [403, "provider_discovery_unauthorized"],
+    [429, "provider_discovery_rate_limited"],
+    [500, "provider_discovery_unavailable"],
+  ])("maps HTTP %s to %s without returning the upstream body", async (status, code) => {
+    const credential = ["never", "echo"].join("-");
+    const request = async () => response(status, `upstream-${credential}`);
+    const promise = discoverProviderModels({
+      protocol: "openai-responses",
+      baseURL: "https://models.example/v1",
+      credentials: { apiKey: credential },
+      resolveHost: publicResolver,
+      request,
+    });
+    await expect(promise).rejects.toMatchObject({ code });
+    await expect(promise).rejects.not.toThrow(credential);
+  });
+
+  it("destroys response bodies rejected before consumption", async () => {
+    const unauthorizedBody = { destroy: vi.fn() };
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      request: async () => ({ status: 401, headers: {}, body: unauthorizedBody }),
+    })).rejects.toMatchObject({ code: "provider_discovery_unauthorized" });
+    expect(unauthorizedBody.destroy).toHaveBeenCalledTimes(1);
+
+    const oversizedBody = { destroy: vi.fn() };
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      maxBytes: 10,
+      request: async () => ({ status: 200, headers: { "content-length": "100" }, body: oversizedBody }),
+    })).rejects.toMatchObject({ code: "provider_discovery_response_too_large" });
+    expect(oversizedBody.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds model count and response size", async () => {
+    const request = async () => response(200, JSON.stringify({
+      data: Array.from({ length: 5 }, (_, index) => ({ id: `model-${index}` })),
+    }));
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      request,
+      maxModels: 2,
+    })).resolves.toHaveLength(2);
+
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      request,
+      maxBytes: 10,
+    })).rejects.toMatchObject({ code: "provider_discovery_response_too_large" });
+  });
+
+  it("uses stable errors for unsupported protocols, invalid JSON, and timeout", async () => {
+    await expect(discoverProviderModels({
+      protocol: "anthropic-messages",
+      baseURL: "https://api.anthropic.com/v1",
+      credentials: {},
+    })).rejects.toMatchObject({ code: "provider_discovery_unsupported" });
+
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      request: async () => response(200, "not-json"),
+    })).rejects.toMatchObject({ code: "provider_discovery_invalid_response" });
+
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      timeoutMs: 5,
+      request: async (_url, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+    })).rejects.toMatchObject({ code: "provider_discovery_timeout" });
+  });
+
+  it("does not start an outbound request when the caller is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [] })));
+    const resolveHost = vi.fn(publicResolver);
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: {},
+      signal: controller.signal,
+      resolveHost,
+      request,
+    })).rejects.toMatchObject({ code: "provider_discovery_unavailable" });
+    expect(resolveHost).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("exposes only the stable code as the error message", () => {
+    const error = new ProviderDiscoveryError("provider_discovery_unavailable");
+    expect(error.message).toBe("provider_discovery_unavailable");
+  });
+});

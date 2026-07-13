@@ -46,9 +46,9 @@ describe("Hermes-inspired desktop shell", () => {
   });
 
   it("routes enabled activity rows to their existing task-specific settings", () => {
-    expect(settingsSectionForActivity("capabilities")).toBe("workspace");
+    expect(settingsSectionForActivity("capabilities")).toBe("skills");
     expect(settingsSectionForActivity("memory")).toBe("memory");
-    expect(settingsSectionForActivity("providers")).toBe("general");
+    expect(settingsSectionForActivity("providers")).toBe("providers");
   });
 
   it("provides real English and Russian labels for shell navigation", () => {

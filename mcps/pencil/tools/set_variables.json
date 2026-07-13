@@ -1,0 +1,26 @@
+{
+  "name": "set_variables",
+  "description": "Update the variables and themes defined in this .pen file.\n\n- Don't specify themes separately! If a variable is using theming, theme axes and values that aren't yet present in the document will be automatically registered.\n- IMPORTANT: variable names are arbitrary strings. They don't have to begin with a dollar sign!",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "replace": {
+        "description": "By default, the variables are merged into the document's existing variable definitions. If you want to completely replace the document's existing variable definitions, pass `true` for this flag.",
+        "type": "boolean"
+      },
+      "variables": {
+        "description": "Follow the variable definition in the .pen file schema. If you are not familiar with the .pen file schema, you can retrieve it by getting the `general` guidelines.",
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "required": [
+      "filePath",
+      "variables"
+    ],
+    "type": "object"
+  }
+}

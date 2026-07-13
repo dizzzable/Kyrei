@@ -50,6 +50,12 @@ export const TOOL_DESCRIPTIONS = {
 
   brain_capture: "Explicitly capture durable knowledge into GBrain. Available only when the user enables read-write brain access.",
 
+  read_skill: "Load the full markdown instructions for one enabled Agent Skill by its stable id. Use only when the task matches the skill summary.",
+
+  delegate_read: "Run up to the configured number of independent read-only research goals in isolated child contexts and return compact ordered summaries. Children cannot write, run commands, request approval, message, or delegate again.",
+
+  team_delegate: "Route an evidence-bearing dependency graph to configured Team roles. Independent tasks run in parallel; downstream tasks receive only completed dependency artifacts. The acting agent remains responsible for edits and the final verified result.",
+
   batch: "Run several READ-ONLY tools (list_dir/read_file/grep_search/find_path) in parallel; partial success.",
 
   retrieve: "Retrieve the full original content of an earlier compressed block by its hash.",

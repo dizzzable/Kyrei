@@ -23,7 +23,7 @@ export const DropdownMenuContent = forwardRef<
         ref={ref}
         sideOffset={sideOffset}
         className={cn(
-          "z-50 min-w-36 rounded-lg bg-elevated p-1 shadow-nous overlay-blur",
+          "z-[220] min-w-36 rounded-lg bg-elevated p-1 shadow-nous overlay-blur",
           "data-[state=open]:animate-in data-[state=open]:fade-in-0",
           className,
         )}
@@ -76,7 +76,7 @@ export const DropdownMenuSubContent = forwardRef<
         ref={ref}
         sideOffset={sideOffset}
         className={cn(
-          "z-50 min-w-40 rounded-lg bg-elevated p-1 shadow-nous overlay-blur",
+          "z-[220] min-w-40 rounded-lg bg-elevated p-1 shadow-nous overlay-blur",
           "data-[state=open]:animate-in data-[state=open]:fade-in-0",
           className,
         )}

@@ -15,11 +15,11 @@ export const DialogContent = forwardRef<
   const { t } = useI18n();
   return (
     <Primitive.Portal>
-      <Primitive.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+      <Primitive.Overlay className="fixed inset-x-0 top-[var(--app-titlebar-h)] bottom-[var(--app-statusbar-h)] z-[200] bg-black/50 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
       <Primitive.Content
         ref={ref}
         className={cn(
-          "fixed left-1/2 top-1/2 z-50 w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-surface p-4 shadow-nous overlay-blur",
+          "fixed left-1/2 top-1/2 z-[200] w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-surface p-4 shadow-nous overlay-blur",
           "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           className,
         )}

@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { isRetryable, isRateLimit, isToolUnsupported, isServerError } from "./errors.js";
+import { isAuthFailure, isRetryable, isRateLimit, isToolUnsupported, isServerError, retryAfterMsOf } from "./errors.js";
 import { resolve, isLocalBaseURL } from "./registry.js";
 import { KeyPool } from "./keys.js";
 import { openStream, type StreamLike } from "./open-stream.js";
@@ -92,6 +92,41 @@ describe("native provider builders", () => {
     expect(vertex.provider).toContain("google.vertex");
   });
 
+  it("does not invent OpenAI-compatible authorization and preserves explicit transport options", async () => {
+    const customFetch = vi.fn() as unknown as typeof fetch;
+    const noKey = buildModel({
+      protocol: "openai-chat",
+      baseURL: "http://127.0.0.1:11434/v1",
+      apiKey: "",
+      model: "local-model",
+      fetch: customFetch,
+    }) as unknown as {
+      config: {
+        fetch?: typeof fetch;
+        headers: () => Record<string, string | undefined>;
+      };
+    };
+    const keyed = buildModel({
+      protocol: "openai-chat",
+      baseURL: "https://custom.example/v1",
+      apiKey: "custom-key",
+      model: "remote-model",
+    }) as unknown as {
+      config: { headers: () => Record<string, string | undefined> };
+    };
+
+    const noKeyHeaders = Object.fromEntries(
+      Object.entries(await noKey.config.headers()).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    const keyedHeaders = Object.fromEntries(
+      Object.entries(await keyed.config.headers()).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+
+    expect(noKey.config.fetch).toBe(customFetch);
+    expect(noKeyHeaders).not.toHaveProperty("authorization");
+    expect(keyedHeaders.authorization).toBe("Bearer custom-key");
+  });
+
   it("requires protocol-complete credential sets", () => {
     expect(hasProviderCredentials("google-generative-ai", { apiKey: "key" })).toBe(true);
     expect(hasProviderCredentials("amazon-bedrock", { apiKey: "bearer" })).toBe(false);
@@ -139,6 +174,9 @@ describe("errors classification", () => {
     expect(isRetryable({ statusCode: 500 })).toBe(true);
     expect(isRetryable({ message: "fetch failed" })).toBe(true);
     expect(isRetryable({ statusCode: 400, message: "bad" })).toBe(false);
+    expect(isAuthFailure({ statusCode: 401 })).toBe(true);
+    expect(isAuthFailure({ status: 403 })).toBe(true);
+    expect(isAuthFailure({ statusCode: 400 })).toBe(false);
   });
   it("tool unsupported detection", () => {
     expect(isToolUnsupported({ statusCode: 400, message: "tools are not supported" })).toBe(true);
@@ -146,11 +184,16 @@ describe("errors classification", () => {
     expect(isToolUnsupported({ statusCode: 500, message: "tool" })).toBe(false);
     expect(isToolUnsupported({ statusCode: 400, message: "rate" })).toBe(false);
   });
+  it("extracts only a bounded Retry-After duration", () => {
+    expect(retryAfterMsOf({ response: { headers: { "Retry-After": "2.5", Authorization: "secret" } } })).toBe(2_500);
+    expect(retryAfterMsOf({ retryAfterMs: 500 })).toBe(500);
+    expect(retryAfterMsOf({ headers: { "Retry-After": "999999" } })).toBe(24 * 60 * 60_000);
+  });
 });
 
 describe("registry.resolve", () => {
-  it("resolves known role/id and unknown fallback", () => {
-    expect(resolve("default").id).toBe("gpt-4o-mini");
+  it("resolves known model ids and treats unknown ids literally", () => {
+    expect(resolve("default").id).toBe("default");
     expect(resolve("llama3.1:8b").provider).toBe("ollama");
     const custom = resolve("my-model", { baseURL: "http://localhost:11434/v1", id: "my-model" });
     expect(custom.provider).toBe("custom");

@@ -1,0 +1,16 @@
+{
+  "name": "get_editor_state",
+  "description": "Get the currently active canvas editor, the current user selection and other essential design information to get started on a design task.",
+  "inputSchema": {
+    "properties": {
+      "include_schema": {
+        "description": "Include the .pen file schema. Must be true before any read or write operations. Set to false only if the schema has already been loaded in this conversation.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "include_schema"
+    ],
+    "type": "object"
+  }
+}

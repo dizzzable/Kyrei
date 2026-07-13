@@ -1,0 +1,27 @@
+{
+  "name": "get_guidelines",
+  "description": "Load guides and styles for working with .pen files.\n\n- guide: Task-specific instructions that teach you how to perform a task correctly.\n- style: Visual style archetypes with configurable fonts, colors, and imagery.\n\nUsage:\n1. get_guidelines(): list available guides and styles\n2. get_guidelines({ category, name }): load guide with no params or get required params when required \n3. get_guidelines({ category, name, params }): load guide or style",
+  "inputSchema": {
+    "properties": {
+      "category": {
+        "description": "Guideline category",
+        "enum": [
+          "guide",
+          "style"
+        ],
+        "type": "string"
+      },
+      "name": {
+        "description": "Guideline name from the category listing",
+        "type": "string"
+      },
+      "params": {
+        "description": "Key-value pairs for required params returned in step 2",
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "required": [],
+    "type": "object"
+  }
+}

@@ -27,6 +27,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import type { ProviderProfile } from "@/lib/types";
 
 interface ComposerProps {
   streaming: boolean;
@@ -34,6 +35,7 @@ interface ComposerProps {
   sessionId?: string | null;
   model: string;
   provider: string;
+  providers?: readonly ProviderProfile[];
   hasWorkspace?: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
@@ -54,6 +56,7 @@ export function Composer({
   sessionId,
   model,
   provider,
+  providers = [],
   hasWorkspace,
   onSend,
   onStop,
@@ -426,7 +429,7 @@ export function Composer({
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
-            <ModelPill model={model} provider={provider} onModelChange={onModelChange} />
+            <ModelPill disabled={disabled} model={model} provider={provider} providers={providers} onModelChange={onModelChange} />
             <button
               onClick={() => setExpanded((v) => !v)}
               className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground"

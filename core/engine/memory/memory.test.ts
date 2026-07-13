@@ -98,10 +98,20 @@ describe("secrets", () => {
     expect(redact("AKIA1234567890ABCDEF")).toBe("[REDACTED]");
   });
   it("sanitizeEnv strips secret-ish vars", () => {
-    const out = sanitizeEnv({ PATH: "/usr/bin", OPENAI_API_KEY: "sk-x", HTTP_PROXY: "p" });
+    const out = sanitizeEnv({
+      PATH: "/usr/bin",
+      OPENAI_API_KEY: "sk-x",
+      HTTP_PROXY: "p",
+      DATABASE_URL: "postgres://user:password@db/private",
+      CUSTOM_CREDENTIAL: "local-secret",
+      LANG: "en_US.UTF-8",
+    });
     expect(out["PATH"]).toBe("/usr/bin");
+    expect(out["LANG"]).toBe("en_US.UTF-8");
     expect(out["OPENAI_API_KEY"]).toBeUndefined();
     expect(out["HTTP_PROXY"]).toBeUndefined();
+    expect(out["DATABASE_URL"]).toBeUndefined();
+    expect(out["CUSTOM_CREDENTIAL"]).toBeUndefined();
   });
 });
 

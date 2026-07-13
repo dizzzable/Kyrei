@@ -1,0 +1,16 @@
+{
+  "name": "open_document",
+  "description": "Use this tool in the following two scenarios ONLY:\n- if there is no active editor opened currently, pass \"new\" to open new document or\n- if user requests to open a specific .pen file, pass the absolute file path to open it.",
+  "inputSchema": {
+    "properties": {
+      "filePathOrTemplate": {
+        "description": "File path to an existing .pen file, OR 'new' for a new document. No other template names are valid.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "filePathOrTemplate"
+    ],
+    "type": "object"
+  }
+}

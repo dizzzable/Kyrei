@@ -76,6 +76,8 @@
  * a consistent text/stroke hierarchy for free.
  */
 :root {
+  --app-titlebar-h: 34px;
+  --app-statusbar-h: 20px;
   /* Text hierarchy as alpha over the ink color, so text reads correctly on any
      surface (Hermes approach). */
   --ui-text-primary: var(--k-text-primary, color-mix(in srgb, var(--k-foreground) 96%, transparent));
@@ -246,8 +248,8 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 
 /* Desktop shell: Hermes information architecture on Linear's surface ladder. */
 .shell-titlebar {
-  height: 34px;
-  min-height: 34px;
+  height: var(--app-titlebar-h);
+  min-height: var(--app-titlebar-h);
   padding-left: var(--native-titlebar-start, 6px);
   padding-right: var(--native-titlebar-end, 6px);
   background: var(--k-bg);
@@ -382,7 +384,7 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
   color: var(--k-bg);
 }
 .send-button:not(:disabled):hover, .primary-action:hover { background: var(--k-primary-strong); }
-.statusbar { height: 20px; min-height: 20px; background: var(--k-bg); }
+.statusbar { height: var(--app-statusbar-h); min-height: var(--app-statusbar-h); background: var(--k-bg); }
 
 @media (max-width: 960px) {
   .shell-layout { display: block; }

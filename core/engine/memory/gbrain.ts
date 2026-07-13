@@ -8,6 +8,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { sanitizeEnv } from "../security/secrets.js";
 
 export type GBrainMode = "off" | "read" | "read-write";
 
@@ -114,6 +115,7 @@ export const runGBrainProcess: GBrainRunner = (command, args, options) => new Pr
     shell: false,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
+    env: sanitizeEnv(process.env),
   });
 
   const cleanup = () => {

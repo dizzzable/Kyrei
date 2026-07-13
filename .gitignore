@@ -5,6 +5,14 @@ core/engine/.dist/
 tests/eval/out/
 .playwright-cli/
 output/
+.jez/
+
+# Local signing material must never enter a release.
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
 
 # --- local runtime / vendored subprojects (never publish) ---
 hermes/

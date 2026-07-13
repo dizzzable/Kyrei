@@ -10,7 +10,32 @@ import { dirname, join } from "node:path";
  * on-disk format can evolve without breaking older installs.
  */
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 4;
+
+function boundedTarget(value, maxLength) {
+  return typeof value === "string" && value.trim() && value.trim().length <= maxLength
+    ? value.trim()
+    : "";
+}
+
+function normalizeSessionRecord(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const accountBindingWasSupplied = Object.prototype.hasOwnProperty.call(source, "providerAccountId");
+  const { providerId: rawProviderId, modelId: rawModelId, providerAccountId: rawProviderAccountId, ...rest } = source;
+  const providerId = boundedTarget(rawProviderId, 64);
+  const modelId = boundedTarget(rawModelId, 512);
+  const providerAccountId = boundedTarget(rawProviderAccountId, 64);
+  return {
+    ...rest,
+    ...(providerId ? { providerId } : {}),
+    ...(modelId ? { modelId } : {}),
+    ...(providerAccountId && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(providerAccountId)
+      ? { providerAccountId }
+      : accountBindingWasSupplied
+        ? { providerAccountId: undefined }
+        : {}),
+  };
+}
 const LEGACY_UNTITLED_TITLES = new Set(["Новый диалог", "New chat", "New session"]);
 
 export class SessionStore {
@@ -19,6 +44,7 @@ export class SessionStore {
     this.file = join(runtimeDir, "state.json");
     this.maxMessages = maxMessages;
     this.flushTimer = null;
+    this.flushPromise = Promise.resolve();
     this.state = {
       schemaVersion: SCHEMA_VERSION,
       sessions: [],
@@ -45,7 +71,7 @@ export class SessionStore {
     // Bring any older shape up to the current schema without losing data.
     const messages = parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {};
     const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
-    const migratedSessions = Number(parsed.schemaVersion ?? 1) < 2
+    const titleMigratedSessions = Number(parsed.schemaVersion ?? 1) < 2
       ? sessions.map(session => {
           const hasMessages = Array.isArray(messages[session.id]) && messages[session.id].length > 0;
           return !hasMessages && LEGACY_UNTITLED_TITLES.has(session.title)
@@ -53,6 +79,7 @@ export class SessionStore {
             : session;
         })
       : sessions;
+    const migratedSessions = titleMigratedSessions.map(normalizeSessionRecord);
     const next = {
       schemaVersion: SCHEMA_VERSION,
       sessions: migratedSessions,
@@ -71,11 +98,12 @@ export class SessionStore {
   }
 
   upsertSession(session) {
-    const index = this.state.sessions.findIndex(item => item.id === session.id);
-    if (index === -1) this.state.sessions.unshift(session);
-    else this.state.sessions[index] = { ...this.state.sessions[index], ...session };
+    const normalized = normalizeSessionRecord(session);
+    const index = this.state.sessions.findIndex(item => item.id === normalized.id);
+    if (index === -1) this.state.sessions.unshift(normalized);
+    else this.state.sessions[index] = normalizeSessionRecord({ ...this.state.sessions[index], ...normalized });
     this.touch();
-    return this.getSession(session.id);
+    return this.getSession(normalized.id);
   }
 
   removeSession(id) {
@@ -127,9 +155,22 @@ export class SessionStore {
   }
 
   async flush() {
-    await mkdir(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    await writeFile(tmp, JSON.stringify(this.state, null, 2), "utf8");
-    await rename(tmp, this.file);
+    const write = async () => {
+      await mkdir(dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.tmp`;
+      await writeFile(tmp, JSON.stringify(this.state, null, 2), "utf8");
+      await rename(tmp, this.file);
+    };
+    const operation = this.flushPromise.then(write, write);
+    this.flushPromise = operation.catch(() => {});
+    return operation;
+  }
+
+  async close() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flush();
   }
 }

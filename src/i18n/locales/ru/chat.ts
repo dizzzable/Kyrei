@@ -59,6 +59,7 @@ export const ruChat = {
   "chat.model.effort.medium": "Средняя",
   "chat.model.effort.high": "Высокая",
   "chat.model.effort.max": "Макс.",
+  "chat.model.tuningUnavailable": "Протокол этого провайдера пока не поддерживает рассуждение и режим «Быстро».",
   "chat.model.variant.fast": "Быстро",
   "chat.model.variant.thinking": "Рассуждение",
   "chat.model.variant.preview": "Предпросмотр",

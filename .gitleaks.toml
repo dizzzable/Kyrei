@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic Stripe token used only by the long-term-memory redaction test"
+paths = ['''^ltm/bin/ltm\.py$''']
+regexes = ['''sk_live_abc123def456''']

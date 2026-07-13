@@ -1,15 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectProviderCredentialValues,
   defaultBaseURLForProtocol,
+  deleteProviderAccountCredentials,
+  getProviderAccountCredentials,
   getActiveProvider,
   normalizeGatewayConfig,
   normalizeProviderSecret,
   normalizeProviderSecrets,
   publicGatewayConfig,
+  readyProviderAccounts,
   removeProvider,
+  resolveProviderModel,
   selectProviderModel,
+  setProviderAccountCredentials,
   upsertProvider,
+  validateProviderAccountInput,
+  validateProviderInput,
 } from "../core/provider-config.js";
+import { redactSensitiveText } from "../core/secret-redaction.js";
 
 describe("provider registry config", () => {
   it("uses stable error codes instead of localized provider copy", () => {
@@ -18,14 +27,128 @@ describe("provider registry config", () => {
     const { config: multiple } = upsertProvider(single, { name: "Second", models: [{ id: "model" }] });
     expect(() => removeProvider(multiple, "missing")).toThrow("provider_not_found");
     expect(() => selectProviderModel(single, "missing", "model")).toThrow("provider_unavailable");
+    expect(() => selectProviderModel(single, single.activeProviderId, "x".repeat(513))).toThrow("provider_model_invalid");
   });
 
   it("migrates a legacy single provider and keeps its selected model", () => {
     const config = normalizeGatewayConfig({ provider: "http://127.0.0.1:11434/v1", apiKey: "legacy", model: "llama3" });
-    expect(config.version).toBe(2);
+    expect(config.version).toBe(3);
     expect(config.providers).toHaveLength(1);
     expect(config.activeModelId).toBe("llama3");
     expect(config.providers[0]).toMatchObject({ protocol: "openai-chat", requiresApiKey: false });
+    expect(config.providers[0]?.accountPool).toMatchObject({
+      enabled: false,
+      strategy: "balanced",
+      sessionAffinity: true,
+      members: [{ id: "primary" }],
+    });
+  });
+
+  it("migrates extra account secrets separately and redacts every credential", () => {
+    const config = normalizeGatewayConfig({
+      providers: [{
+        id: "pooled",
+        name: "Pooled",
+        baseURL: "https://api.example.test/v1",
+        models: [{ id: "alpha" }],
+        accountPool: {
+          enabled: true,
+          members: [
+            { id: "primary", name: "Primary" },
+            { id: "backup", name: "Backup", weight: 2, maxConcurrency: 3 },
+          ],
+        },
+      }],
+    });
+    let secrets = normalizeProviderSecrets({
+      providers: { pooled: { apiKey: "primary-secret" } },
+      accounts: { pooled: { backup: { apiKey: "backup-secret" }, primary: { apiKey: "ignored" } } },
+    });
+
+    expect(secrets.version).toBe(2);
+    expect(getProviderAccountCredentials(secrets, "pooled", "primary").apiKey).toBe("primary-secret");
+    expect(getProviderAccountCredentials(secrets, "pooled", "backup").apiKey).toBe("backup-secret");
+    expect(readyProviderAccounts(config.providers[0], secrets).map((account) => account.id)).toEqual(["primary", "backup"]);
+    const publicConfig = publicGatewayConfig(config, secrets);
+    expect(publicConfig.providers[0]?.accountPool.members).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "backup", hasStoredCredentials: true, ready: true, weight: 2, maxConcurrency: 3 }),
+    ]));
+    expect(JSON.stringify(publicConfig)).not.toMatch(/primary-secret|backup-secret|ignored/);
+
+    secrets = setProviderAccountCredentials(secrets, "pooled", "third", { apiKey: "third-secret" });
+    expect(getProviderAccountCredentials(secrets, "pooled", "third").apiKey).toBe("third-secret");
+    secrets = deleteProviderAccountCredentials(secrets, "pooled", "third");
+    expect(getProviderAccountCredentials(secrets, "pooled", "third")).toEqual({});
+  });
+
+  it("keeps account model-rule intent, intersects stale IDs, and strictly validates mutations", () => {
+    const config = normalizeGatewayConfig({
+      providers: [{
+        id: "scoped",
+        name: "Scoped",
+        baseURL: "https://api.example.test/v1",
+        models: [{ id: "alpha" }, { id: "beta" }],
+        accountPool: {
+          enabled: true,
+          members: [
+            { id: "primary", name: "Primary", modelIds: ["alpha", "stale", "alpha"] },
+            { id: "unrestricted", name: "Unrestricted" },
+            { id: "denied", name: "Denied", modelIds: [] },
+          ],
+        },
+      }],
+    });
+    const members = config.providers[0]!.accountPool.members;
+    expect(members.find((member) => member.id === "primary")?.modelIds).toEqual(["alpha"]);
+    expect(Object.hasOwn(members.find((member) => member.id === "unrestricted")!, "modelIds")).toBe(false);
+    expect(members.find((member) => member.id === "denied")?.modelIds).toEqual([]);
+    expect(publicGatewayConfig(config, normalizeProviderSecrets({})).providers[0]?.accountPool.members)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "primary", modelIds: ["alpha"] }),
+        expect.objectContaining({ id: "denied", modelIds: [] }),
+      ]));
+
+    expect(validateProviderAccountInput({
+      id: "backup",
+      name: "Backup",
+      modelIds: ["beta", "beta"],
+    }, {
+      accountId: "backup",
+      providerModels: config.providers[0]!.models,
+    })).toMatchObject({ modelIds: ["beta"] });
+    expect(() => validateProviderAccountInput({
+      id: "backup",
+      name: "Backup",
+      modelIds: ["unknown"],
+    }, {
+      accountId: "backup",
+      providerModels: config.providers[0]!.models,
+    })).toThrow("provider_account_models_invalid");
+    expect(() => validateProviderAccountInput({
+      id: "backup",
+      name: "Backup",
+      modelIds: "alpha",
+    }, {
+      accountId: "backup",
+      providerModels: config.providers[0]!.models,
+    })).toThrow("provider_account_models_invalid");
+    expect(() => validateProviderAccountInput({
+      id: "backup",
+      name: "Backup",
+      modelIds: Array.from({ length: 2_001 }, () => "alpha"),
+    }, {
+      accountId: "backup",
+      providerModels: config.providers[0]!.models,
+    })).toThrow("provider_account_models_invalid");
+    const cleared = validateProviderAccountInput({
+      id: "backup",
+      name: "Backup",
+      modelIds: null,
+    }, {
+      accountId: "backup",
+      providerModels: config.providers[0]!.models,
+    });
+    expect(Object.hasOwn(cleared, "modelIds")).toBe(false);
   });
 
   it("accepts built-in native transport protocols and protocol-specific base URL defaults", () => {
@@ -90,6 +213,38 @@ describe("provider registry config", () => {
     expect(JSON.stringify(publicConfig)).not.toMatch(/secret-value|access-id|session-value/);
   });
 
+  it("collects short credentials and client identity without redacting cloud routing metadata", () => {
+    const values = collectProviderCredentialValues({
+      providers: {
+        cloud: {
+          apiKey: "k",
+          accessKeyId: "id2",
+          secretAccessKey: "s3cr3t",
+          sessionToken: "tok",
+          privateKey: "pk",
+          region: "r",
+          project: "proj",
+          location: "loc",
+          clientEmail: "me@x",
+        },
+      },
+    }, [{
+      headers: {
+        "X-Auth-Token": "hdr",
+        "X-Region": "north",
+      },
+    }]);
+
+    expect(new Set(values)).toEqual(new Set(["k", "id2", "s3cr3t", "tok", "pk", "me@x", "hdr"]));
+    const redacted = redactSensitiveText(
+      "k id2 s3cr3t tok pk hdr | r proj loc me@x north",
+      values,
+    );
+    expect(redacted).toBe(
+      "[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED] | r proj loc [REDACTED] north",
+    );
+  });
+
   it("does not persist credentials in endpoint URLs or custom headers", () => {
     const config = normalizeGatewayConfig({
       providers: [{
@@ -135,5 +290,156 @@ describe("provider registry config", () => {
     config = removeProvider(config, second.id);
     expect(config.activeProviderId).not.toBe(second.id);
     expect(getActiveProvider(config)).not.toBeNull();
+  });
+
+  it("strictly rejects custom header names that can carry credentials", () => {
+    expect(() => validateProviderInput({
+      id: "secret-header",
+      name: "Secret header",
+      protocol: "openai-chat",
+      baseURL: "https://example.test/v1",
+      models: [{ id: "model" }],
+      headers: { "X-Auth-Token": "opaque-value" },
+    }, { creating: true })).toThrow("provider_header_secret_forbidden");
+  });
+
+  it("validates an explicit stable id separately from the display name", () => {
+    const input = validateProviderInput({
+      id: "xpiki",
+      displayName: "Xpiki",
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      models: [{ id: "chat-model", name: "Chat model" }],
+      enabled: true,
+      requiresApiKey: true,
+    }, { creating: true });
+    expect(input).toMatchObject({ id: "xpiki", name: "Xpiki" });
+
+    let config = normalizeGatewayConfig({});
+    ({ config } = upsertProvider(config, input, input.id));
+    ({ config } = upsertProvider(config, { ...input, name: "Xpiki Cloud" }, input.id));
+    expect(config.providers.find((provider) => provider.id === "xpiki")?.name).toBe("Xpiki Cloud");
+    expect(() => validateProviderInput({ ...input, id: "Not valid!" }, { creating: true })).toThrow("provider_id_invalid");
+    expect(() => validateProviderInput({ ...input, id: "other" }, { providerId: "xpiki" })).toThrow("provider_id_immutable");
+    expect(() => validateProviderInput({ ...input, baseURL: "file:///tmp/models" }, { creating: true })).toThrow("provider_base_url_invalid");
+    expect(() => validateProviderInput({ ...input, models: [] }, { creating: true })).toThrow("provider_models_required");
+  });
+
+  it("normalizes and reconciles the provider-scoped worker assignment", () => {
+    let config = normalizeGatewayConfig({});
+    ({ config } = upsertProvider(config, {
+      id: "worker",
+      name: "Worker",
+      protocol: "openai-chat",
+      baseURL: "https://worker.example/v1",
+      models: [{ id: "worker-model" }],
+    }, "worker"));
+    config = normalizeGatewayConfig({
+      ...config,
+      modelAssignments: { worker: { providerId: "worker", modelId: "worker-model" } },
+    });
+    expect(config.modelAssignments.worker).toEqual({ providerId: "worker", modelId: "worker-model" });
+    expect(publicGatewayConfig(config, normalizeProviderSecrets({})).modelAssignments.worker).toEqual({
+      providerId: "worker",
+      modelId: "worker-model",
+    });
+
+    config = removeProvider(config, "worker");
+    expect(config.modelAssignments.worker).toBeUndefined();
+  });
+
+  it("normalizes ordered provider-scoped fallback assignments without confusing model slashes", () => {
+    const config = normalizeGatewayConfig({
+      providers: [
+        {
+          id: "primary",
+          name: "Primary",
+          protocol: "openai-chat",
+          baseURL: "https://primary.example/v1",
+          models: [{ id: "main" }],
+        },
+        {
+          id: "backup",
+          name: "Backup",
+          protocol: "anthropic-messages",
+          baseURL: "https://backup.example/v1",
+          models: [{ id: "vendor/model-with/slashes" }, { id: "second" }],
+        },
+      ],
+      activeProviderId: "primary",
+      activeModelId: "main",
+      modelAssignments: {
+        fallbacks: [
+          { providerId: "backup", modelId: "vendor/model-with/slashes" },
+          { providerId: "backup", modelId: "second" },
+          { providerId: "backup", modelId: "vendor/model-with/slashes" },
+          { providerId: "missing", modelId: "ignored" },
+        ],
+      },
+    });
+
+    expect(config.modelAssignments.fallbacks).toEqual([
+      { providerId: "backup", modelId: "vendor/model-with/slashes" },
+      { providerId: "backup", modelId: "second" },
+    ]);
+    expect(publicGatewayConfig(config, normalizeProviderSecrets({})).modelAssignments.fallbacks)
+      .toEqual(config.modelAssignments.fallbacks);
+
+    expect(removeProvider(config, "backup").modelAssignments.fallbacks).toEqual([]);
+  });
+
+  it("resolves a session target strictly or falls back to the configured default", () => {
+    const config = normalizeGatewayConfig({ provider: "https://default.example/v1", model: "default-model" });
+    expect(resolveProviderModel(config, config.activeProviderId, "default-model")).toMatchObject({
+      provider: { id: config.activeProviderId },
+      model: { id: "default-model" },
+    });
+    expect(() => resolveProviderModel(config, "missing", "missing")).toThrow("provider_unavailable");
+    expect(resolveProviderModel(config, "missing", "missing", { fallbackToDefault: true })).toMatchObject({
+      provider: { id: config.activeProviderId },
+      model: { id: "default-model" },
+    });
+  });
+
+  it("never resolves a disabled provider as the default fallback", () => {
+    const config = normalizeGatewayConfig({
+      providers: [{
+        id: "disabled",
+        name: "Disabled",
+        protocol: "openai-chat",
+        baseURL: "https://disabled.example/v1",
+        models: [{ id: "model" }],
+        enabled: false,
+      }],
+      activeProviderId: "disabled",
+      activeModelId: "model",
+    });
+    expect(getActiveProvider(config)).toBeNull();
+    expect(() => resolveProviderModel(config, "missing", "missing", { fallbackToDefault: true })).toThrow("provider_unavailable");
+  });
+
+  it("keeps the selected default model when an unrelated provider is removed", () => {
+    let config = normalizeGatewayConfig({
+      providers: [
+        {
+          id: "active",
+          name: "Active",
+          protocol: "openai-chat",
+          baseURL: "https://active.example/v1",
+          models: [{ id: "first" }, { id: "chosen" }],
+        },
+        {
+          id: "other",
+          name: "Other",
+          protocol: "openai-chat",
+          baseURL: "https://other.example/v1",
+          models: [{ id: "other" }],
+        },
+      ],
+      activeProviderId: "active",
+      activeModelId: "chosen",
+    });
+    config = removeProvider(config, "other");
+    expect(config).toMatchObject({ activeProviderId: "active", activeModelId: "chosen" });
   });
 });

@@ -78,6 +78,38 @@ describe("tools — guarded mutations and audit", () => {
     });
   });
 
+  it("does not inherit arbitrary parent credentials into agent commands", async () => {
+    const previousDatabase = process.env.DATABASE_URL;
+    const previousCustom = process.env.CUSTOM_CREDENTIAL;
+    process.env.DATABASE_URL = "postgres://user:password@db/private";
+    process.env.CUSTOM_CREDENTIAL = "custom-local-secret";
+    try {
+      const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map());
+      const out = await execFrom(guarded, "run_command", {
+        command: "node -e \"console.log(process.env.DATABASE_URL, process.env.CUSTOM_CREDENTIAL)\"",
+      });
+      expect(out).toContain("undefined undefined");
+      expect(out).not.toContain("postgres://");
+      expect(out).not.toContain("custom-local-secret");
+    } finally {
+      if (previousDatabase == null) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabase;
+      if (previousCustom == null) delete process.env.CUSTOM_CREDENTIAL;
+      else process.env.CUSTOM_CREDENTIAL = previousCustom;
+    }
+  });
+
+  it("redacts exact runtime credentials of any length from tool output", async () => {
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      sensitiveValues: ["x", "tiny"],
+    });
+    const out = await execFrom(guarded, "run_command", {
+      command: "node -e \"console.log('x tiny')\"",
+    });
+    expect(out).toContain("[REDACTED]");
+    expect(out).not.toContain("tiny");
+  });
+
   it("routes diagnostics through terminal policy", async () => {
     await writeFile(join(ws, "tsconfig.json"), "{}", "utf8");
     const guarded = buildTools(

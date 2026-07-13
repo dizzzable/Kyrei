@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { createSandbox, maybeSandbox, shSingleQuote, commandExists } from "./sandbox.js";
+import {
+  SandboxUnavailableError,
+  createSandbox,
+  maybeSandbox,
+  shSingleQuote,
+  commandExists,
+} from "./sandbox.js";
 
 describe("sandbox port (task 19.1)", () => {
   it("shSingleQuote escapes embedded single quotes for sh -c", () => {
@@ -26,6 +32,33 @@ describe("sandbox port (task 19.1)", () => {
     expect(["linux", "macos", "windows", "noop"]).toContain(sb.id);
     expect(sb.describe()).toBeTypeOf("string");
     expect(sb.describe().length).toBeGreaterThan(0);
+  });
+
+  it("strict-required fails closed when the host primitive is unavailable", async () => {
+    const unavailable = {
+      id: "test-unavailable",
+      available: async () => false,
+      wrap: ({ command }: { command: string }) => command,
+      describe: () => "test sandbox unavailable",
+    };
+    await expect(maybeSandbox(
+      unavailable,
+      { command: "echo must-not-run", cwd: process.cwd() },
+      { required: true },
+    )).rejects.toBeInstanceOf(SandboxUnavailableError);
+  });
+
+  it("strict-required uses the platform primitive when available", () => {
+    const required = createSandbox("strict-required");
+    expect(required.id).toBe(createSandbox("strict").id);
+    expect(required.required).toBe(true);
+  });
+
+  it("binds fail-closed behavior to the strict-required sandbox instance", async () => {
+    const required = createSandbox("strict-required");
+    if (await required.available()) return;
+    await expect(maybeSandbox(required, { command: "echo blocked", cwd: process.cwd() }))
+      .rejects.toBeInstanceOf(SandboxUnavailableError);
   });
 
   it("never breaks the command: when unavailable, maybeSandbox returns it unchanged (fail-open)", async () => {

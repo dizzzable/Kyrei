@@ -1,8 +1,10 @@
 import type { TranslationKey } from "@/i18n";
 
 export type SettingsSectionId =
-  | "general"
+  | "model"
+  | "providers"
   | "workspace"
+  | "skills"
   | "chat"
   | "memory"
   | "appearance"
@@ -15,12 +17,14 @@ export type SettingsSectionId =
 export type VisibleSettingsSectionId = Exclude<SettingsSectionId, "voice">;
 
 export const SETTINGS_SECTIONS = [
-  { id: "general", labelKey: "settings.sections.general" },
-  { id: "workspace", labelKey: "settings.sections.workspace" },
+  { id: "model", labelKey: "settings.sections.model" },
   { id: "chat", labelKey: "settings.sections.chat" },
-  { id: "memory", labelKey: "settings.sections.memory" },
   { id: "appearance", labelKey: "settings.sections.appearance" },
+  { id: "workspace", labelKey: "settings.sections.workspace" },
+  { id: "memory", labelKey: "settings.sections.memory" },
   { id: "notifications", labelKey: "settings.sections.notifications" },
+  { id: "providers", labelKey: "settings.sections.providers" },
+  { id: "skills", labelKey: "settings.sections.skills" },
   { id: "keybinds", labelKey: "settings.sections.keybinds" },
   { id: "advanced", labelKey: "settings.sections.advanced" },
   { id: "about", labelKey: "settings.sections.about" },

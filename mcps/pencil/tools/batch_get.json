@@ -1,0 +1,84 @@
+{
+  "name": "batch_get",
+  "description": "Retrieve nodes by searching for matching patterns and by node ids in batches.\n\n- IMPORTANT: Combine multiple search patterns and node ID searches into one call.\n- IMPORTANT: When you want to perform multiple searches and node id reads after another, combine them into one call.\n- If neither patterns nor nodeIds is specified, returns the top-level children of the document.\n- When using design system components, AVOID reading each component one-by-one. Instead list all of the available components in a single tool call.\n- To list components of a design system, search for reusable nodes inside the design systems frame.\n- Use this tool in the beginning to list components of a design system or design kit to understand its available components.\n- This tool will return the searched nodes and its direct children. Use searchDepth to define how many levels to search in.\n- Be careful using readDepth > 3, because it can return large amounts of data overflowing the context. Prefer using low numbers.\n- Path geometry is abbreviated by default; set includePathGeometry=true for full geometry data\n- Set resolveVariables=true to see computed values instead of variable references\n\nTraversing large documents:\n1. Start by reading top-level nodes, or nodes you already know the IDs of to understand overall structure\n2. Decide if the nodes you have already read are sufficient for your task\n2. If you need more data and you see \"...\" for children, make new read calls with those specific child IDs\n\n## Example\n\nTo search for the reusable components in the design system:\n{\n  \"filePath\": \"designs/forms.pen\",\n  \"patterns\": [{ \"reusable\": true }],\n  \"readDepth\": 2,\n  \"searchDepth\": 3\n}\n",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "includePathGeometry": {
+        "description": "By default the `geometry` property of `path` nodes is replaced with \"...\". To see the path geometry in full, pass `true` for this flag.",
+        "type": "boolean"
+      },
+      "nodeIds": {
+        "description": "Array of node IDs to read. Prefer reading multiple node IDs to read at once rather than separately.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "parentId": {
+        "description": "Parent node ID to search within. If omitted, will search the whole document.",
+        "type": "string"
+      },
+      "patterns": {
+        "description": "List of search patterns",
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "Only return nodes whose name matches this Regex pattern",
+              "type": "string"
+            },
+            "reusable": {
+              "description": "Only return nodes with `reusable` equal to this value",
+              "type": "boolean"
+            },
+            "type": {
+              "description": "Only return nodes with this type",
+              "enum": [
+                "frame",
+                "group",
+                "rectangle",
+                "ellipse",
+                "line",
+                "polygon",
+                "path",
+                "text",
+                "connection",
+                "note",
+                "icon_font",
+                "image",
+                "ref"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "readDepth": {
+        "description": "Limit how deep to descend in the node tree for a read node. If omitted, set to 1, meaning only the node itself is returned and its direct children. When maxDepth is reached, omitted children are replaced with \"...\".",
+        "type": "number"
+      },
+      "resolveInstances": {
+        "description": "If you pass `true` for this flag, then `ref` nodes won't appear in the output; component instances will be fully expanded. This can be used to examine the full structure of a component instance. The `id`s of resolved shadow nodes will be their full ID paths, which can be used to customize them via update_properties.",
+        "type": "boolean"
+      },
+      "resolveVariables": {
+        "description": "Node properties can be bound to variables, whose value depends on the theme settings of the node. If you want to see the currently visible values of such properties, pass `true` for this flag.",
+        "type": "boolean"
+      },
+      "searchDepth": {
+        "description": "Limit how deep the search should descend in the node tree. If omitted, the search is unlimited in depth.",
+        "type": "number"
+      }
+    },
+    "required": [
+      "filePath"
+    ],
+    "type": "object"
+  }
+}

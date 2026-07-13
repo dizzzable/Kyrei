@@ -39,7 +39,7 @@ export const SelectContent = forwardRef<
         position={position}
         sideOffset={6}
         className={cn(
-          "z-50 max-h-72 min-w-32 overflow-hidden rounded-lg bg-elevated p-1 shadow-nous overlay-blur",
+          "z-[220] max-h-72 min-w-32 overflow-hidden rounded-lg bg-elevated p-1 shadow-nous overlay-blur",
           position === "popper" && "w-(--radix-select-trigger-width)",
           className,
         )}

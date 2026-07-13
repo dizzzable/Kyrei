@@ -2,22 +2,41 @@
  * Orchestrator: the engine entry. Builds provider candidates + tools, runs the
  * AI SDK tool-calling loop via streamText (with no-tools + provider fallback
  * via openStream), bridges the normalized stream to our events, returns
- * { text, parts }.
+ * { text, parts, status, attempts }.
  *
  * Deferred: prepareStep compaction (Phase 4).
  */
 
-import { streamText } from "ai";
+import { streamText, type ToolSet } from "ai";
 import { join } from "node:path";
-import type { RunKyreiChatOpts, RunKyreiChatResult, MessagePart } from "../types.js";
+import type {
+  RunKyreiChatOpts,
+  RunKyreiChatResult,
+  MessagePart,
+  ProviderAttemptOutcome,
+  ProviderAttemptTarget,
+  RuntimeProviderTarget,
+} from "../types.js";
 import { buildModel, buildProviderOptions, hasProviderCredentials } from "../provider/build.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { KeyPool } from "../provider/keys.js";
-import { openStream, type StreamLike } from "../provider/open-stream.js";
+import {
+  openStream,
+  streamAttemptsFromError,
+  type ProviderStreamAttemptOutcome,
+  type StreamLike,
+} from "../provider/open-stream.js";
 import { buildTools, type ToolMeta } from "../tools/index.js";
 import { buildWebTools } from "../tools/web.js";
 import { buildGBrainTools } from "../tools/gbrain.js";
+import { buildSkillTools } from "../tools/skills.js";
+import { buildDelegateTool } from "../orchestration/delegate.js";
+import { createReadOnlyChildRunner, selectReadOnlyChildTools } from "../orchestration/read-child.js";
+import {
+  buildTeamDelegateTool,
+  createTeamRoleExecutors,
+} from "../team/index.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { assembleSystemContext } from "../memory/layers.js";
@@ -28,6 +47,46 @@ import { emitNoKeyGuidance } from "./no-key-guidance.js";
 import { bridgeStream } from "../stream-bridge/bridge.js";
 import { toParts } from "./persist.js";
 import { createAuditLog } from "../security/audit.js";
+import { redact } from "../security/secrets.js";
+
+function throwWithProviderAttempts(error: unknown, attempts: ProviderAttemptOutcome[]): never {
+  let target: Error;
+  if (error instanceof Error && Object.isExtensible(error)) {
+    target = error;
+  } else {
+    target = new Error(error instanceof Error ? error.message : "provider_run_error", { cause: error });
+    if (error instanceof Error) target.name = error.name;
+  }
+  Object.defineProperty(target, "providerAttempts", {
+    configurable: true,
+    enumerable: false,
+    value: attempts.map((attempt) => ({ ...attempt })),
+  });
+  throw target;
+}
+
+function sensitiveRuntimeValues(...sources: unknown[]): string[] {
+  const values = new Set<string>();
+  const secretFields = new Set(["apiKey", "accessKeyId", "secretAccessKey", "sessionToken", "privateKey"]);
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 4 || value == null) return;
+    if (typeof value === "string") {
+      if (value.length > 0) values.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value === "object") {
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (secretFields.has(key)) visit(item, depth + 1);
+      }
+    }
+  };
+  sources.forEach((source) => visit(source, 0));
+  return [...values];
+}
 
 export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
   const { config: cfg, warnings } = resolveEngineConfig(opts.config);
@@ -38,6 +97,14 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     ...(opts.providerCredentials ?? {}),
     ...(!opts.providerCredentials?.apiKey && opts.apiKey ? { apiKey: opts.apiKey } : {}),
   };
+  const sensitiveValues = sensitiveRuntimeValues(
+    opts.apiKey,
+    providerCredentials,
+    opts.workerProvider?.apiKey,
+    opts.workerProvider?.credentials,
+    opts.fallbackProviders?.map((target) => [target.apiKey, target.credentials]),
+    opts.team?.roles.map((role) => [role.target.apiKey, role.target.credentials]),
+  );
   if (opts.requiresApiKey !== false && !hasProviderCredentials(opts.providerProtocol, providerCredentials)) {
     return emitNoKeyGuidance(opts.emit);
   }
@@ -46,17 +113,52 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const toolMeta = new Map<string, ToolMeta>();
   const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
   const audit = opts.auditLogPath ? createAuditLog(opts.auditLogPath) : undefined;
-  let tools = workspaceReady
-    ? buildTools(opts.workspace!, cfg, toolMeta, { abortSignal: opts.abortSignal, audit, sessionId: opts.sessionId })
+  const workspaceTools = workspaceReady
+    ? buildTools(opts.workspace!, cfg, toolMeta, {
+        abortSignal: opts.abortSignal,
+        audit,
+        sessionId: opts.sessionId,
+        sensitiveValues,
+      })
     : undefined;
-  if (tools && ccr) tools = { ...tools, retrieve: makeRetrieveTool(ccr) };
-  const webTools = buildWebTools(cfg, { ...(audit ? { audit } : {}), sessionId: opts.sessionId });
-  if (Object.keys(webTools).length) tools = { ...(tools ?? {}), ...webTools };
+  const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};
+  const webTools = buildWebTools(cfg, {
+    ...(audit ? { audit } : {}),
+    sessionId: opts.sessionId,
+    signal: opts.abortSignal,
+    sensitiveValues,
+  });
   const brainTools = buildGBrainTools(cfg.memory.gbrain, {
     signal: opts.abortSignal,
     maxModelOutputChars: cfg.maxToolOutput,
   });
-  if (Object.keys(brainTools).length) tools = { ...(tools ?? {}), ...brainTools };
+  const skillTools = buildSkillTools(opts.skills ?? [], {
+    maxOutputChars: cfg.maxToolOutput,
+    onUsed: opts.onSkillUsed,
+  });
+  // Delegates receive a separately constructed reader without the parent's
+  // usage callback. Loading instructions must remain a read-only child action.
+  const childSkillTools = buildSkillTools(opts.skills ?? [], {
+    maxOutputChars: cfg.maxToolOutput,
+  });
+  const baseToolSet: ToolSet = {
+    ...(workspaceTools ?? {}),
+    ...retrieveTools,
+    ...webTools,
+    ...brainTools,
+    ...skillTools,
+  };
+  const tools = Object.keys(baseToolSet).length ? baseToolSet : undefined;
+  const childTools = selectReadOnlyChildTools(
+    workspaceTools,
+    retrieveTools,
+    webTools,
+    brainTools,
+    childSkillTools,
+  );
+  const delegationEnabled = cfg.delegation.enabled;
+  const teamEnabled = Boolean(opts.team?.roles.length);
+  const hasTools = Boolean(tools) || delegationEnabled || teamEnabled;
 
   let projectContext: string | undefined;
   if (workspaceReady) {
@@ -67,63 +169,248 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       console.warn("[kyrei v2] project context disabled:", error);
     }
   }
+
+  const teamExecutors = opts.team
+    ? await createTeamRoleExecutors({
+        spec: opts.team,
+        config: cfg,
+        workspace: opts.workspace,
+        auditLogPath: opts.auditLogPath,
+        sessionId: opts.sessionId,
+        abortSignal: opts.abortSignal,
+        skills: opts.skills,
+        projectContext,
+        sensitiveValues,
+        emit: opts.emit,
+        onSkillUsed: opts.onSkillUsed,
+        providerAttemptLifecycle: opts.providerAttemptLifecycle,
+      })
+    : [];
+  const teamTools = opts.team
+    ? buildTeamDelegateTool({
+        spec: { ...opts.team, roles: teamExecutors.map((executor) => executor.role) },
+        executors: teamExecutors,
+        emit: opts.emit,
+        abortSignal: opts.abortSignal,
+        maxResultChars: cfg.maxToolOutput,
+      })
+    : {};
   const instructions = buildSystemPrompt({
     workspace: opts.workspace,
-    hasTools: Boolean(tools),
+    hasTools,
     personality: cfg.personality,
     projectContext,
     hasBrainTools: Object.keys(brainTools).length > 0,
     hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
+    hasDelegation: delegationEnabled,
+    skills: opts.skills?.map(({ id, name, description }) => ({ id, name, description })),
+    team: opts.team && teamExecutors.length
+      ? {
+          name: opts.team.name,
+          workflow: opts.team.workflow,
+          roles: teamExecutors.map(({ role }) => ({
+            id: role.id,
+            name: role.name,
+            description: role.description,
+            model: `${role.target.providerId}/${role.target.model}`,
+          })),
+        }
+      : undefined,
   });
 
-  // Candidate models: primary (from settings) + provider-local fallbacks.
-  // A fallback must never move the active provider's API key or custom headers
-  // to an unrelated endpoint. Until fallback credentials are stored per
-  // provider, every candidate deliberately stays on the primary endpoint.
+  // Candidate models: primary, gateway-resolved provider fallbacks, then the
+  // legacy provider-local model list. Each qualified target carries its own
+  // protocol, endpoint, headers, and credentials so secrets never cross an
+  // endpoint boundary. Bare legacy model names deliberately stay local.
   const primary = resolveModel(opts.model, { baseURL: opts.providerBase, id: opts.model, provider: opts.providerId });
-  const entries = [
-    primary,
-    ...cfg.fallbackChain.map((id) => resolveModel(id, { baseURL: primary.baseURL, provider: primary.provider })),
-  ];
+  const primaryTarget: RuntimeProviderTarget = {
+    providerId: opts.providerId ?? primary.provider,
+    ...(opts.providerAccountId ? { accountId: opts.providerAccountId } : {}),
+    protocol: opts.providerProtocol,
+    baseURL: opts.providerBase,
+    model: opts.model,
+    apiKey: opts.apiKey,
+    credentials: providerCredentials,
+    ...(opts.providerHeaders ? { headers: opts.providerHeaders } : {}),
+    requiresApiKey: opts.requiresApiKey,
+  };
+  const legacyTargets: RuntimeProviderTarget[] = cfg.fallbackChain.map((model) => ({
+    ...primaryTarget,
+    model,
+  }));
+  const seenTargets = new Set<string>();
+  const targets = [primaryTarget, ...(opts.fallbackProviders ?? []), ...legacyTargets].filter((target) => {
+    const credentials = {
+      ...(target.credentials ?? {}),
+      ...(!target.credentials?.apiKey && target.apiKey ? { apiKey: target.apiKey } : {}),
+    };
+    if (target.requiresApiKey !== false && !hasProviderCredentials(target.protocol, credentials)) return false;
+    const key = `${target.providerId}\0${target.accountId ?? "primary"}\0${target.model}`;
+    if (seenTargets.has(key)) return false;
+    seenTargets.add(key);
+    return true;
+  });
+  const candidates = targets.map((target, index) => ({
+    target,
+    credentials: {
+      ...(target.credentials ?? {}),
+      ...(!target.credentials?.apiKey && target.apiKey ? { apiKey: target.apiKey } : {}),
+    },
+    entry: index === 0
+      ? primary
+      : resolveModel(target.model, {
+          baseURL: target.baseURL,
+          id: target.model,
+          provider: target.providerId,
+        }),
+  }));
+  const attemptTarget = (candidateIndex: number): ProviderAttemptTarget => {
+    const candidate = candidates[candidateIndex];
+    if (!candidate) throw new Error("provider_attempt_candidate_invalid");
+    return {
+      providerId: candidate.target.providerId,
+      ...(candidate.target.accountId ? { accountId: candidate.target.accountId } : {}),
+      modelId: candidate.entry.id,
+    };
+  };
+  const publicAttempt = (attempt: ProviderStreamAttemptOutcome): ProviderAttemptOutcome => ({
+    ...attemptTarget(attempt.candidateIndex),
+    outcome: attempt.outcome,
+    phase: attempt.phase,
+    ...(attempt.statusCode !== undefined ? { statusCode: attempt.statusCode } : {}),
+    ...(attempt.retryAfterMs !== undefined ? { retryAfterMs: attempt.retryAfterMs } : {}),
+  });
+  const publicAttempts = (attempts: ProviderStreamAttemptOutcome[] | undefined): ProviderAttemptOutcome[] => (
+    Array.isArray(attempts) ? attempts.map(publicAttempt) : []
+  );
+  const attemptLifecycle = opts.providerAttemptLifecycle
+    ? {
+        acquire: (candidateIndex: number): unknown | null => opts.providerAttemptLifecycle!.acquire(attemptTarget(candidateIndex)),
+        release: (handle: unknown, outcome: ProviderStreamAttemptOutcome): void => {
+          opts.providerAttemptLifecycle!.release(handle, publicAttempt(outcome));
+        },
+      }
+    : undefined;
   const keyPool = new KeyPool({ keys: [opts.apiKey] });
-  const prepareStep = ccr ? makePrepareStep(cfg, primary.id, primary.limits.contextWindow, ccr) : undefined;
-  const providerOptions = buildProviderOptions(opts.providerProtocol, opts.modelParams);
+  const explicitWorker = delegationEnabled ? opts.workerProvider : undefined;
+  const workerEntry = explicitWorker
+    ? resolveModel(explicitWorker.model, {
+        baseURL: explicitWorker.baseURL,
+        id: explicitWorker.model,
+        provider: explicitWorker.providerId,
+      })
+    : undefined;
+  const workerCredentials = explicitWorker
+    ? {
+        ...(explicitWorker.credentials ?? {}),
+        ...(!explicitWorker.credentials?.apiKey && explicitWorker.apiKey
+          ? { apiKey: explicitWorker.apiKey }
+          : {}),
+      }
+    : undefined;
+  const explicitWorkerProviderOptions = explicitWorker
+    ? buildProviderOptions(explicitWorker.protocol, undefined)
+    : undefined;
 
   const start = (ci: number, useTools: boolean): StreamLike => {
-    const entry = entries[ci] ?? primary;
+    const candidate = candidates[ci] ?? candidates[0]!;
+    const { entry, target, credentials } = candidate;
+    const providerOptions = buildProviderOptions(target.protocol, opts.modelParams);
+    const prepareStep = ccr ? makePrepareStep(cfg, entry.id, entry.limits.contextWindow, ccr) : undefined;
     const model = buildModel({
-      protocol: opts.providerProtocol,
-      baseURL: entry.baseURL,
-      apiKey: opts.apiKey,
-      credentials: providerCredentials,
+      protocol: target.protocol,
+      baseURL: target.baseURL,
+      apiKey: target.apiKey,
+      credentials,
       model: entry.id,
-      headers: opts.providerHeaders,
-      ...(keyPool.isMulti() ? { fetch: keyPool.fetchMiddleware() } : {}),
+      headers: target.headers,
+      ...(ci === 0 && keyPool.isMulti() ? { fetch: keyPool.fetchMiddleware() } : {}),
     });
+    const workerModel = explicitWorker
+      ? buildModel({
+          protocol: explicitWorker.protocol,
+          baseURL: explicitWorker.baseURL,
+          apiKey: explicitWorker.apiKey,
+          credentials: workerCredentials ?? {},
+          model: explicitWorker.model,
+          headers: explicitWorker.headers,
+        })
+      : model;
+    const delegateTools = buildDelegateTool({
+      enabled: delegationEnabled,
+      maxTasks: cfg.delegation.maxTasks,
+      maxParallel: cfg.delegation.maxParallel,
+      abortSignal: opts.abortSignal,
+      emit: opts.emit,
+      idPrefix: opts.sessionId ? `session:${opts.sessionId}` : undefined,
+      runTask: createReadOnlyChildRunner({
+        model: workerModel,
+        modelId: workerEntry?.id ?? entry.id,
+        tools: childTools,
+        maxSteps: cfg.delegation.maxSteps,
+        maxRetries: cfg.apiMaxRetries,
+        cost: workerEntry?.cost ?? entry.cost,
+        providerOptions: explicitWorkerProviderOptions ?? providerOptions,
+        workspace: workspaceReady ? opts.workspace : undefined,
+        skills: opts.skills?.map(({ id, name, description }) => ({ id, name, description })),
+        ...(opts.providerAttemptLifecycle
+          ? {
+              providerAttempt: {
+                lifecycle: opts.providerAttemptLifecycle,
+                target: {
+                  providerId: explicitWorker?.providerId ?? target.providerId,
+                  ...((explicitWorker?.accountId ?? target.accountId)
+                    ? { accountId: explicitWorker?.accountId ?? target.accountId }
+                    : {}),
+                  modelId: workerEntry?.id ?? entry.id,
+                },
+              },
+            }
+          : {}),
+      }),
+    });
+    const mergedTools: ToolSet = { ...(tools ?? {}), ...delegateTools, ...teamTools };
+    const callTools: ToolSet | undefined = useTools && Object.keys(mergedTools).length
+      ? mergedTools
+      : undefined;
     const result = streamText({
       model,
       ...(instructions ? { instructions } : {}),
       messages: opts.messages,
-      ...(useTools && tools ? { tools, stopWhen: buildStopWhen(cfg) } : {}),
-      ...(useTools && tools && prepareStep ? { prepareStep } : {}),
+      ...(callTools ? { tools: callTools, stopWhen: buildStopWhen(cfg) } : {}),
+      ...(callTools && prepareStep ? { prepareStep } : {}),
       ...(providerOptions ? { providerOptions } : {}),
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
       maxRetries: cfg.apiMaxRetries,
       onError: ({ error }: { error: unknown }) => {
-        console.error("[kyrei v2] stream error:", error);
+        const message = error instanceof Error ? error.message : String(error ?? "provider_stream_error");
+        console.error("[kyrei v2] stream error:", redact(message, sensitiveValues));
       },
     });
     return { stream: result.stream, responseMessages: result.responseMessages };
   };
 
-  const stream = await openStream(entries.length, Boolean(tools), start);
+  let stream: StreamLike;
+  try {
+    stream = attemptLifecycle
+      ? await openStream(candidates.length, hasTools, start, { attemptLifecycle })
+      : await openStream(candidates.length, hasTools, start);
+  } catch (error) {
+    return throwWithProviderAttempts(error, publicAttempts(streamAttemptsFromError(error)));
+  }
+  const selected = candidates[stream.candidateIndex ?? 0] ?? candidates[0]!;
 
-  const bridged = await bridgeStream(stream.stream, opts.emit, {
-    toolMeta,
-    provider: primary.provider,
-    model: primary.id,
-    maxSteps: cfg.maxSteps,
-  });
+  let bridged;
+  try {
+    bridged = await bridgeStream(stream.stream, opts.emit, {
+      toolMeta,
+      provider: selected.target.providerId,
+      model: selected.entry.id,
+      maxSteps: cfg.maxSteps,
+    });
+  } catch (error) {
+    return throwWithProviderAttempts(error, publicAttempts(stream.attempts));
+  }
 
   let parts: MessagePart[];
   try {
@@ -133,5 +420,15 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     parts = bridged.parts;
   }
 
-  return { text: bridged.text, parts };
+  return {
+    text: bridged.text,
+    parts,
+    status: bridged.status,
+    attempts: publicAttempts(stream.attempts),
+    route: {
+      providerId: selected.target.providerId,
+      modelId: selected.entry.id,
+      ...(selected.target.accountId ? { accountId: selected.target.accountId } : {}),
+    },
+  };
 }

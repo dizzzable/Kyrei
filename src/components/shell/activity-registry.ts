@@ -14,13 +14,13 @@ export interface ActivityDefinition {
 
 export const ACTIVITY_REGISTRY: readonly ActivityDefinition[] = [
   { id: "sessions", labelKey: "shell.activity.sessions", descriptionKey: "shell.activity.sessionsDescription", adapter: "sessions" },
-  { id: "capabilities", labelKey: "shell.activity.capabilities", descriptionKey: "shell.activity.capabilitiesDescription", adapter: "settings", settingsSection: "workspace" },
+  { id: "capabilities", labelKey: "shell.activity.capabilities", descriptionKey: "shell.activity.capabilitiesDescription", adapter: "settings", settingsSection: "skills" },
   { id: "messaging", labelKey: "shell.activity.messaging", descriptionKey: "shell.activity.messagingDescription", adapter: "unavailable" },
   { id: "artifacts", labelKey: "shell.activity.artifacts", descriptionKey: "shell.activity.artifactsDescription", adapter: "unavailable" },
   { id: "memory", labelKey: "shell.activity.memory", descriptionKey: "shell.activity.memoryDescription", adapter: "settings", settingsSection: "memory" },
-  { id: "providers", labelKey: "shell.activity.providers", descriptionKey: "shell.activity.providersDescription", adapter: "settings", settingsSection: "general" },
+  { id: "providers", labelKey: "shell.activity.providers", descriptionKey: "shell.activity.providersDescription", adapter: "settings", settingsSection: "providers" },
 ] as const;
 
 export function settingsSectionForActivity(id: "capabilities" | "memory" | "providers"): SettingsSectionId {
-  return ACTIVITY_REGISTRY.find((item) => item.id === id)?.settingsSection ?? "general";
+  return ACTIVITY_REGISTRY.find((item) => item.id === id)?.settingsSection ?? "model";
 }

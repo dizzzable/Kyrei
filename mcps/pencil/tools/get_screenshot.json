@@ -1,0 +1,21 @@
+{
+  "name": "get_screenshot",
+  "description": "\nThis tool returns a screenshot of a node in a .pen file.\n\nUsage:\n- IMPORTANT: Always analyze the returned screenshot image to make sure that the generated result looks correct, satisfies the design requirements and doesn't contain any visual errors, glitches or misalignment.\n- IMPORTANT: Think carefully after you received a screenshot to detect any possible design issues or inconsistencies in the generated design.\n- Use this tool to get a screenshot image representation of specific nodes, frames or other elements based on their IDs. This is useful to verify and compare the generated layout with the original design.\n- You can also use this tool to check elements and design system components, to verify their layout and look.\n",
+  "inputSchema": {
+    "properties": {
+      "filePath": {
+        "description": "An optional file path to access a .pen file.",
+        "type": "string"
+      },
+      "nodeId": {
+        "description": "The ID of the node to get a screenshot of",
+        "type": "string"
+      }
+    },
+    "required": [
+      "filePath",
+      "nodeId"
+    ],
+    "type": "object"
+  }
+}

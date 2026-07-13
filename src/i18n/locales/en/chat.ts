@@ -56,6 +56,7 @@ export const enChat = {
   "chat.model.effort.medium": "Med",
   "chat.model.effort.high": "High",
   "chat.model.effort.max": "Max",
+  "chat.model.tuningUnavailable": "Reasoning and Fast are not supported by this provider protocol yet.",
   "chat.model.variant.fast": "Fast",
   "chat.model.variant.thinking": "Thinking",
   "chat.model.variant.preview": "Preview",

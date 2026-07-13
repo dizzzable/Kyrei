@@ -2,6 +2,7 @@ import type { MessageCatalog } from "../../types";
 
 export const enCommon = {
   "common.cancel": "Cancel",
+  "common.retry": "Retry",
   "common.save": "Save",
   "common.delete": "Delete",
   "common.close": "Close",

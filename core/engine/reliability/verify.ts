@@ -4,6 +4,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { sanitizeEnv } from "../security/secrets.js";
 
 export interface VerifyCommand {
   ecosystem: string;
@@ -30,7 +31,7 @@ export interface VerifyResult {
 
 export function runVerify(command: string, cwd: string, timeoutMs = 120_000): Promise<VerifyResult> {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, { cwd, shell: true, windowsHide: true });
+    const child = spawn(command, { cwd, shell: true, windowsHide: true, env: sanitizeEnv(process.env) });
     let out = "";
     const timer = setTimeout(() => child.kill(), timeoutMs);
     child.stdout?.on("data", (d) => (out += d.toString()));
