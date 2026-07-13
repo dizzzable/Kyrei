@@ -14,26 +14,52 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
 import { dirname, relative } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { rgPath } from "@vscode/ripgrep";
 import fg from "fast-glob";
 import type { EngineConfig } from "../types.js";
-import { safePath } from "../security/jail.js";
+import { safePath, validateWorkspaceTarget, validateWriteTarget } from "../security/jail.js";
+import { decideAll, type ActionContext, type Decision } from "../security/permissions.js";
+import { runPreHooks, secretScanHook } from "../security/pre-hook.js";
+import type { AuditRecord } from "../security/audit.js";
 import { createSandbox, maybeSandbox } from "../security/sandbox.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 import { parsePatch } from "../apply/parse-patch.js";
 import { applyPatch, ApplyError } from "../apply/apply.js";
 import { renderFileDiff } from "../apply/diff.js";
 import { createSnapshotStore } from "../apply/snapshot.js";
-import { detectEcosystem, runVerify } from "../reliability/verify.js";
+import { detectEcosystem } from "../reliability/verify.js";
 import { buildProjectIntelTools } from "./project-intel.js";
 
 export interface ToolMeta {
   inlineDiff?: string;
 }
 
+export interface ToolAuditWriter {
+  write(record: AuditRecord): Promise<void>;
+}
+
+export interface BuildToolsOptions {
+  abortSignal?: AbortSignal;
+  audit?: ToolAuditWriter;
+  sessionId?: string;
+}
+
 const MAX_DIFF_LINES = 2000;
 const WRITE_THRESHOLD_LINES = 400;
+
+function normalizeBuildOptions(options?: BuildToolsOptions | AbortSignal): BuildToolsOptions {
+  if (options && typeof (options as AbortSignal).addEventListener === "function") {
+    return { abortSignal: options as AbortSignal };
+  }
+  return (options as BuildToolsOptions | undefined) ?? {};
+}
+
+function blockedResult(decision: Exclude<Decision, "allow">): string {
+  return decision === "ask"
+    ? "Tool action requires interactive approval, but interactive approval is not available yet; nothing was executed."
+    : "Tool action was denied by the local permission policy; nothing was executed.";
+}
 
 function clip(text: unknown, limit: number): string {
   const s = String(text ?? "");
@@ -77,33 +103,90 @@ function lineDiff(oldStr: string, newStr: string): string {
   return out.join("\n");
 }
 
+function abortError(): Error {
+  const error = new Error("Tool execution was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function terminateProcessTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (!pid) {
+    try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    return;
+  }
+  if (process.platform !== "win32") {
+    try { process.kill(-pid, "SIGKILL"); }
+    catch {
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    }
+    return;
+  }
+  await new Promise<void>((resolvePromise) => {
+    const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    const finish = () => resolvePromise();
+    killer.once("error", () => {
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+      finish();
+    });
+    killer.once("close", finish);
+  });
+}
+
 function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<string> {
-  return new Promise((resolvePromise) => {
-    const child = spawn(command, { cwd, shell: true, windowsHide: true });
+  return new Promise((resolvePromise, reject) => {
+    if (abortSignal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      detached: process.platform !== "win32",
+      windowsHide: true,
+    });
     let out = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      out += "\n[превышен таймаут команды]";
-    }, timeoutMs);
-    const onAbort = () => {
-      child.kill();
+    let settled = false;
+    let stoppedBy: "abort" | "timeout" | null = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", onAbort);
     };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const succeed = (value: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(value);
+    };
+    const stop = (reason: "abort" | "timeout") => {
+      if (settled || stoppedBy) return;
+      stoppedBy = reason;
+      void terminateProcessTree(child).then(() => {
+        fail(reason === "abort" ? abortError() : new Error("Command timed out"));
+      });
+    };
+    const timer = setTimeout(() => stop("timeout"), timeoutMs);
+    const onAbort = () => stop("abort");
     abortSignal?.addEventListener("abort", onAbort, { once: true });
-    child.stdout?.on("data", (d) => {
-      out += d.toString();
-    });
-    child.stderr?.on("data", (d) => {
-      out += d.toString();
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      abortSignal?.removeEventListener("abort", onAbort);
-      resolvePromise(`Ошибка запуска: ${err.message}`);
-    });
+    if (abortSignal?.aborted) stop("abort");
+    child.stdout?.on("data", (data) => { out += data.toString(); });
+    child.stderr?.on("data", (data) => { out += data.toString(); });
+    child.on("error", (error) => fail(new Error(`Command failed to start: ${error.message}`)));
     child.on("close", (code) => {
-      clearTimeout(timer);
-      abortSignal?.removeEventListener("abort", onAbort);
-      resolvePromise(`(код выхода: ${code})\n${out}`.trim());
+      if (stoppedBy === "abort") return fail(abortError());
+      if (stoppedBy === "timeout") return fail(new Error("Command timed out"));
+      if (code !== 0) return fail(new Error(`Command exited with code ${code}\n${clip(out, 2_000)}`));
+      succeed(`(код выхода: ${code})\n${out}`.trim());
     });
   });
 }
@@ -126,24 +209,108 @@ function runRg(args: string[], cwd: string, signal?: AbortSignal): Promise<strin
   });
 }
 
-export function buildTools(
-  workspace: string,
-  cfg: EngineConfig,
-  toolMeta: Map<string, ToolMeta>,
-  abortSignal?: AbortSignal,
-): ToolSet {
+export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<string, ToolMeta>, optionsOrSignal?: BuildToolsOptions | AbortSignal): ToolSet {
+  const options = normalizeBuildOptions(optionsOrSignal);
+  const abortSignal = options.abortSignal;
   const snapshots = createSnapshotStore(workspace);
   const sandbox = createSandbox(cfg.sandbox);
 
+  const audit = async (toolName: string, toolCallId: string, record: Omit<AuditRecord, "ts" | "tool" | "toolCallId" | "sessionId">): Promise<void> => {
+    try {
+      await options.audit?.write({
+        ...record,
+        ts: new Date().toISOString(),
+        tool: toolName,
+        toolCallId,
+        sessionId: options.sessionId,
+      });
+    } catch {
+      // Audit is best-effort and must never change a policy decision or effect result.
+    }
+  };
+
+  const executeGuarded = async (
+    toolName: "run_command" | "write_file" | "edit_file" | "diagnostics",
+    toolCallId: string,
+    actions: ActionContext[],
+    hookArgs: unknown,
+    metadata: Record<string, unknown>,
+    effect: () => Promise<string>,
+  ): Promise<string> => {
+    const started = Date.now();
+    const decision = decideAll(cfg.permissions, actions);
+    if (decision !== "allow") {
+      await audit(toolName, toolCallId, {
+        decision,
+        status: "denied",
+        metadata,
+        durationS: (Date.now() - started) / 1000,
+      });
+      return blockedResult(decision);
+    }
+
+    const hookResult = await runPreHooks([secretScanHook], { tool: toolName, args: hookArgs }, true);
+    if (!hookResult.allow) {
+      await audit(toolName, toolCallId, {
+        decision: "deny",
+        status: "denied",
+        metadata: { ...metadata, blockedBy: "pre-hook" },
+        durationS: (Date.now() - started) / 1000,
+      });
+      return `Tool action was denied by the secret-scan pre-hook; nothing was executed. ${hookResult.reason ?? ""}`.trim();
+    }
+
+    await audit(toolName, toolCallId, { decision, status: "start", metadata });
+    try {
+      if (abortSignal?.aborted) throw abortError();
+      const result = await effect();
+      await audit(toolName, toolCallId, {
+        decision,
+        status: "complete",
+        metadata,
+        durationS: (Date.now() - started) / 1000,
+      });
+      return result;
+    } catch (error) {
+      await audit(toolName, toolCallId, {
+        decision,
+        status: isAbortError(error) ? "interrupted" : "error",
+        metadata,
+        error: error instanceof Error ? error.name : "ToolExecutionError",
+        durationS: (Date.now() - started) / 1000,
+      });
+      throw error;
+    }
+  };
+
+  const rejectInvalidInput = async (
+    toolName: "write_file" | "edit_file",
+    toolCallId: string,
+    metadata: Record<string, unknown>,
+  ): Promise<string> => {
+    await audit(toolName, toolCallId, {
+      decision: "deny",
+      status: "denied",
+      metadata,
+      error: "InvalidToolTarget",
+    });
+    return "Tool action was denied because its target is invalid or outside the workspace; nothing was executed.";
+  };
+
   const execListDir = async (path?: string): Promise<string> => {
-    const dir = safePath(workspace, path || ".");
+    const dir = await validateWorkspaceTarget(workspace, path || ".");
     const entries = await readdir(dir, { withFileTypes: true });
-    return entries.length ? entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).sort().join("\n") : "(пусто)";
+    return entries.length
+      ? entries
+          .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+          .sort()
+          .join("\n")
+      : "(пусто)";
   };
   const execReadFile = async (path: string): Promise<string> =>
-    clip(await readFile(safePath(workspace, path), "utf8"), cfg.fileReadMaxChars);
+    clip(await readFile(await validateWorkspaceTarget(workspace, path), "utf8"), cfg.fileReadMaxChars);
   const execGrep = async (a: { query: string; path?: string; glob?: string; maxResults?: number }): Promise<string> => {
-    const base = safePath(workspace, a.path || ".");
+    const base = await validateWorkspaceTarget(workspace, a.path || ".");
     const args = ["--json", "--line-number", "-m", String(a.maxResults ?? 100), "--smart-case"];
     if (a.glob) args.push("--glob", a.glob);
     args.push("--", a.query, base);
@@ -152,7 +319,14 @@ export function buildTools(
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
       try {
-        const j = JSON.parse(line) as { type: string; data: { path: { text: string }; line_number: number; lines: { text: string } } };
+        const j = JSON.parse(line) as {
+          type: string;
+          data: {
+            path: { text: string };
+            line_number: number;
+            lines: { text: string };
+          };
+        };
         if (j.type === "match") {
           const p = relative(workspace, j.data.path.text).replaceAll("\\", "/");
           hits.push(`${p}:${j.data.line_number}: ${j.data.lines.text.trim()}`);
@@ -208,25 +382,38 @@ export function buildTools(
         content: z.string().describe("Full new content of the file."),
       }),
       execute: async ({ path, content }, { toolCallId }) => {
-        const file = safePath(workspace, path);
         const next = String(content ?? "");
-        let previous: string | null = null;
+        let file: string;
+        let canonicalPath: string;
         try {
-          previous = await readFile(file, "utf8");
+          file = safePath(workspace, path);
+          canonicalPath = relative(workspace, file).replaceAll("\\", "/");
         } catch {
-          /* new file */
+          return rejectInvalidInput("write_file", toolCallId, { pathLength: path.length, contentLength: next.length });
         }
-        if (previous !== null && previous.split("\n").length > WRITE_THRESHOLD_LINES) {
-          return `Файл ${path} > ${WRITE_THRESHOLD_LINES} строк — используйте edit_file (точечная правка), а не write_file.`;
-        }
-        await mkdir(dirname(file), { recursive: true });
-        await writeFile(file, next, "utf8");
-        const rel = relative(workspace, file) || path;
-        const diff = previous !== null ? lineDiff(previous, next) : "";
-        if (diff) toolMeta.set(toolCallId, { inlineDiff: diff });
-        return previous === null
-          ? `Файл создан: ${rel} (${next.length} символов)`
-          : `Файл обновлён: ${rel}`;
+        return executeGuarded("write_file", toolCallId, [{ tool: "write_file", target: canonicalPath }], { path: canonicalPath, content: next }, { path: canonicalPath, contentLength: next.length }, async () => {
+          await validateWriteTarget(workspace, canonicalPath);
+          if (abortSignal?.aborted) throw abortError();
+          let previous: string | null = null;
+          try {
+            previous = await readFile(file, "utf8");
+          } catch {
+            /* new file */
+          }
+          if (previous !== null && previous.split("\n").length > WRITE_THRESHOLD_LINES) {
+            return `Файл ${path} > ${WRITE_THRESHOLD_LINES} строк — используйте edit_file (точечная правка), а не write_file.`;
+          }
+          if (abortSignal?.aborted) throw abortError();
+          await validateWriteTarget(workspace, canonicalPath);
+          await mkdir(dirname(file), { recursive: true });
+          if (abortSignal?.aborted) throw abortError();
+          await validateWriteTarget(workspace, canonicalPath);
+          await writeFile(file, next, "utf8");
+          const rel = relative(workspace, file) || path;
+          const diff = previous !== null ? lineDiff(previous, next) : "";
+          if (diff) toolMeta.set(toolCallId, { inlineDiff: diff });
+          return previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
+        });
       },
     }),
 
@@ -238,20 +425,32 @@ export function buildTools(
       execute: async ({ patch }, { toolCallId }) => {
         const patches = parsePatch(patch);
         if (patches.length === 0) {
-          return "Пустой/неразобранный патч. Ожидается строка '*** Update File: <путь>' с хунками (@@, ' ', '-', '+').";
+          return rejectInvalidInput("edit_file", toolCallId, { patchLength: patch.length, targetCount: 0 });
         }
+        const canonicalTarget = (target: string): string =>
+          relative(workspace, safePath(workspace, target)).replaceAll("\\", "/");
+        let actions: ActionContext[];
         try {
-          const report = await applyPatch(workspace, patches, snapshots);
-          const rendered = report.files.map((f) =>
-            renderFileDiff(f.op === "add" ? "add" : f.op === "delete" ? "delete" : "modify", f.rel, f.oldText, f.newText),
-          );
-          const combined = rendered.map((r) => `${r.header} (${r.counter})\n${r.body}`).join("\n---\n");
-          if (combined) toolMeta.set(toolCallId, { inlineDiff: combined });
-          return rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
-        } catch (e) {
-          if (e instanceof ApplyError) return `Правка отклонена [${e.code}]: ${e.message}`;
-          return `Ошибка применения патча: ${(e as Error).message}`;
+          actions = patches.flatMap((filePatch) => [
+            { tool: "edit_file", target: canonicalTarget(filePatch.file) },
+            ...(filePatch.dest ? [{ tool: "edit_file", target: canonicalTarget(filePatch.dest) }] : []),
+          ]);
+        } catch {
+          return rejectInvalidInput("edit_file", toolCallId, { patchLength: patch.length, targetCount: patches.length });
         }
+        const paths = actions.map((action) => action.target!);
+        return executeGuarded("edit_file", toolCallId, actions, { patch }, { paths, targetCount: paths.length, patchLength: patch.length }, async () => {
+          try {
+            const report = await applyPatch(workspace, patches, snapshots, abortSignal);
+            const rendered = report.files.map((f) => renderFileDiff(f.op === "add" ? "add" : f.op === "delete" ? "delete" : "modify", f.rel, f.oldText, f.newText));
+            const combined = rendered.map((r) => `${r.header} (${r.counter})\n${r.body}`).join("\n---\n");
+            if (combined) toolMeta.set(toolCallId, { inlineDiff: combined });
+            return rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
+          } catch (e) {
+            if (e instanceof ApplyError) throw new Error(`Правка отклонена [${e.code}]: ${e.message}`);
+            throw e;
+          }
+        });
       },
     }),
 
@@ -260,10 +459,16 @@ export function buildTools(
       inputSchema: z.object({
         command: z.string().describe("The shell command to execute."),
       }),
-      execute: async ({ command }) => {
-        const sb = await maybeSandbox(sandbox, { command: String(command ?? ""), cwd: workspace });
-        const out = await runCommand(sb.command, workspace, cfg.commandTimeoutMs, abortSignal);
-        return clip(out, cfg.maxToolOutput);
+      execute: async ({ command }, { toolCallId }) => {
+        const exactCommand = String(command ?? "");
+        return executeGuarded("run_command", toolCallId, [{ tool: "run_command", command: exactCommand }], { command: exactCommand }, { commandLength: exactCommand.length }, async () => {
+          const sb = await maybeSandbox(sandbox, {
+            command: exactCommand,
+            cwd: workspace,
+          });
+          const out = await runCommand(sb.command, workspace, cfg.commandTimeoutMs, abortSignal);
+          return clip(out, cfg.maxToolOutput);
+        });
       },
     }),
 
@@ -280,27 +485,46 @@ export function buildTools(
 
     find_path: tool({
       description: TOOL_DESCRIPTIONS.find_path,
-      inputSchema: z.object({ pattern: z.string(), limit: z.number().optional() }),
+      inputSchema: z.object({
+        pattern: z.string(),
+        limit: z.number().optional(),
+      }),
       execute: async (a) => execFind(a),
     }),
 
     diagnostics: tool({
       description: TOOL_DESCRIPTIONS.diagnostics,
       inputSchema: z.object({}),
-      execute: async () => {
+      execute: async (_args, { toolCallId }) => {
         const files = (await readdir(workspace).catch(() => [])) as string[];
         const cmds = detectEcosystem(files);
         const pick = cmds.find((c) => c.ecosystem === "typescript") ?? cmds.find((c) => ["python", "rust", "go"].includes(c.ecosystem));
         if (!pick) return "[типчекер/линтер не обнаружен]";
-        const r = await runVerify(pick.command, workspace, 60_000);
-        return clip(`$ ${pick.command}\n${r.output}`, cfg.maxToolOutput);
+        return executeGuarded(
+          "diagnostics",
+          toolCallId,
+          [{ tool: "diagnostics" }, { tool: "run_command", command: pick.command }],
+          { command: pick.command },
+          { ecosystem: pick.ecosystem, commandLength: pick.command.length },
+          async () => {
+            const wrapped = await maybeSandbox(sandbox, { command: pick.command, cwd: workspace });
+            return clip(`$ ${pick.command}\n${await runCommand(wrapped.command, workspace, 60_000, abortSignal)}`, cfg.maxToolOutput);
+          },
+        );
       },
     }),
 
     batch: tool({
       description: TOOL_DESCRIPTIONS.batch,
       inputSchema: z.object({
-        calls: z.array(z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()) })).max(16),
+        calls: z
+          .array(
+            z.object({
+              tool: z.string(),
+              args: z.record(z.string(), z.unknown()),
+            }),
+          )
+          .max(16),
       }),
       execute: async ({ calls }) => {
         const dispatch: Record<string, (a: Record<string, unknown>) => Promise<string>> = {

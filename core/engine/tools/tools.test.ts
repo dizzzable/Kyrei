@@ -1,19 +1,294 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolSet } from "ai";
 import { buildTools, type ToolMeta } from "./index.js";
 import { DEFAULT_ENGINE_CONFIG } from "../types.js";
+import type { AuditRecord } from "../security/audit.js";
 
 let ws: string;
 let tools: ToolSet;
 
 async function exec(name: string, args: unknown): Promise<string> {
-  const t = tools[name] as { execute: (a: unknown, o: unknown) => Promise<unknown> };
-  const out = await t.execute(args, { toolCallId: "t", messages: [] });
+  return execFrom(tools, name, args);
+}
+
+async function execFrom(toolSet: ToolSet, name: string, args: unknown, toolCallId = "t"): Promise<string> {
+  const t = toolSet[name] as {
+    execute: (a: unknown, o: unknown) => Promise<unknown>;
+  };
+  const out = await t.execute(args, { toolCallId, messages: [] });
   return String(out);
 }
+
+async function exists(path: string): Promise<boolean> {
+  return access(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+describe("tools — guarded mutations and audit", () => {
+  it("fails closed for commands requiring approval without running them", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: {
+        ...DEFAULT_ENGINE_CONFIG.permissions,
+        terminal: "off" as const,
+      },
+    };
+    const records: AuditRecord[] = [];
+    const audit = {
+      write: async (record: AuditRecord) => void records.push(record),
+    };
+    const guarded = buildTools(ws, cfg, new Map(), {
+      audit,
+      sessionId: "session-a",
+    });
+    const command = `node -e "require('node:fs').writeFileSync('command-ran.txt','yes')"`;
+    const out = await execFrom(guarded, "run_command", { command }, "call-denied");
+    expect(out).toContain("interactive approval");
+    expect(out).toContain("nothing was executed");
+    expect(await exists(join(ws, "command-ran.txt"))).toBe(false);
+    expect(records).toMatchObject([{ sessionId: "session-a", toolCallId: "call-denied", status: "denied" }]);
+    expect(JSON.stringify(records)).not.toContain(command);
+  });
+
+  it("executes an allowed safe command and audits its lifecycle", async () => {
+    const records: AuditRecord[] = [];
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      audit: { write: async (record) => void records.push(record) },
+      sessionId: "session-safe",
+    });
+
+    const out = await execFrom(
+      guarded,
+      "run_command",
+      { command: `node -e "console.log('allowed-command')"` },
+      "call-safe",
+    );
+
+    expect(out).toContain("allowed-command");
+    expect(records.map((record) => record.status)).toEqual(["start", "complete"]);
+    expect(records[0]).toMatchObject({
+      sessionId: "session-safe",
+      toolCallId: "call-safe",
+      decision: "allow",
+    });
+  });
+
+  it("routes diagnostics through terminal policy", async () => {
+    await writeFile(join(ws, "tsconfig.json"), "{}", "utf8");
+    const guarded = buildTools(
+      ws,
+      {
+        ...DEFAULT_ENGINE_CONFIG,
+        permissions: { ...DEFAULT_ENGINE_CONFIG.permissions, terminal: "off" },
+      },
+      new Map(),
+    );
+
+    const out = await execFrom(guarded, "diagnostics", {});
+    expect(out).toContain("interactive approval");
+    expect(out).toContain("nothing was executed");
+
+    const ruleDenied = buildTools(
+      ws,
+      {
+        ...DEFAULT_ENGINE_CONFIG,
+        permissions: {
+          ...DEFAULT_ENGINE_CONFIG.permissions,
+          terminal: "turbo",
+          rules: [{ pattern: "^diagnostics$", action: "deny" }],
+        },
+      },
+      new Map(),
+    );
+    expect(await execFrom(ruleDenied, "diagnostics", {})).toContain("denied by the local permission policy");
+  });
+
+  it("treats a pre-aborted signal as an effect barrier", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const records: AuditRecord[] = [];
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      abortSignal: controller.signal,
+      audit: { write: async (record) => void records.push(record) },
+    });
+    const before = await readFile(join(ws, "src", "a.ts"), "utf8");
+
+    await expect(
+      execFrom(guarded, "write_file", { path: "aborted.txt", content: "no" }, "abort-write"),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      execFrom(guarded, "edit_file", {
+        patch: [
+          "*** Begin Patch",
+          "*** Update File: src/a.ts",
+          "@@",
+          "-export const foo = 1;",
+          "+export const foo = 99;",
+          " export const bar = 2;",
+          "*** End Patch",
+        ].join("\n"),
+      }, "abort-edit"),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      execFrom(guarded, "run_command", {
+        command: `node -e "require('node:fs').writeFileSync('aborted-command.txt','no')"`,
+      }, "abort-command"),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(await exists(join(ws, "aborted.txt"))).toBe(false);
+    expect(await exists(join(ws, "aborted-command.txt"))).toBe(false);
+    expect(await readFile(join(ws, "src", "a.ts"), "utf8")).toBe(before);
+    expect(records.filter((record) => record.status === "interrupted")).toHaveLength(3);
+  });
+
+  it("terminates a running command tree on cancellation", async () => {
+    const controller = new AbortController();
+    const records: AuditRecord[] = [];
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      abortSignal: controller.signal,
+      audit: { write: async (record) => void records.push(record) },
+    });
+    const pending = execFrom(guarded, "run_command", {
+      command: `node -e "setTimeout(()=>require('node:fs').writeFileSync('late-child.txt','x'),500)"`,
+    }, "abort-tree");
+    setTimeout(() => controller.abort(), 75);
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+    expect(await exists(join(ws, "late-child.txt"))).toBe(false);
+    expect(records.at(-1)).toMatchObject({ toolCallId: "abort-tree", status: "interrupted" });
+  });
+
+  it("blocks review and path-rule writes before mutation", async () => {
+    const review = buildTools(
+      ws,
+      {
+        ...DEFAULT_ENGINE_CONFIG,
+        permissions: {
+          ...DEFAULT_ENGINE_CONFIG.permissions,
+          review: "always" as const,
+        },
+      },
+      new Map(),
+    );
+    expect(
+      await execFrom(review, "write_file", {
+        path: "blocked.txt",
+        content: "x",
+      }),
+    ).toContain("interactive approval");
+    expect(await exists(join(ws, "blocked.txt"))).toBe(false);
+
+    const deny = buildTools(
+      ws,
+      {
+        ...DEFAULT_ENGINE_CONFIG,
+        permissions: {
+          ...DEFAULT_ENGINE_CONFIG.permissions,
+          rules: [{ pattern: "^write_file:src/a\\.ts$", action: "deny" as const }],
+        },
+      },
+      new Map(),
+    );
+    const before = await readFile(join(ws, "src", "a.ts"), "utf8");
+    expect(
+      await execFrom(deny, "write_file", {
+        path: "./src/a.ts",
+        content: "changed",
+      }),
+    ).toContain("denied by the local permission policy");
+    expect(await readFile(join(ws, "src", "a.ts"), "utf8")).toBe(before);
+  });
+
+  it("secret-scans writes and patches before mutation", async () => {
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map());
+    expect(
+      await execFrom(guarded, "write_file", {
+        path: "new/secret.txt",
+        content: "token = sk-ABCDEFGHIJKLMNOPQRSTUVWX",
+      }),
+    ).toContain("secret");
+    expect(await exists(join(ws, "new"))).toBe(false);
+    const before = await readFile(join(ws, "src", "a.ts"), "utf8");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/a.ts",
+      "@@",
+      "-export const foo = 1;",
+      "+export const foo = 'sk-ABCDEFGHIJKLMNOPQRSTUVWX';",
+      " export const bar = 2;",
+      "*** End Patch",
+    ].join("\n");
+    expect(await execFrom(guarded, "edit_file", { patch })).toContain("secret");
+    expect(await readFile(join(ws, "src", "a.ts"), "utf8")).toBe(before);
+  });
+
+  it("uses the strongest target decision and blocks multi-file edits atomically", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: {
+        ...DEFAULT_ENGINE_CONFIG.permissions,
+        rules: [{ pattern: "^edit_file:src/b\\.ts$", action: "deny" as const }],
+      },
+    };
+    const guarded = buildTools(ws, cfg, new Map());
+    const beforeA = await readFile(join(ws, "src", "a.ts"), "utf8");
+    const beforeB = await readFile(join(ws, "src", "b.ts"), "utf8");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/a.ts",
+      "@@",
+      "-export const foo = 1;",
+      "+export const foo = 10;",
+      " export const bar = 2;",
+      "*** Update File: src/b.ts",
+      "@@",
+      "-console.log('hello');",
+      "+console.log('changed');",
+      "*** End Patch",
+    ].join("\n");
+    expect(await execFrom(guarded, "edit_file", { patch })).toContain("denied by the local permission policy");
+    expect(await readFile(join(ws, "src", "a.ts"), "utf8")).toBe(beforeA);
+    expect(await readFile(join(ws, "src", "b.ts"), "utf8")).toBe(beforeB);
+  });
+
+  it("records metadata-only start/complete audit and ignores sink failures", async () => {
+    const records: AuditRecord[] = [];
+    const content = "unique-file-content-payload";
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      audit: { write: async (r) => void records.push(r) },
+      sessionId: "s1",
+    });
+    await execFrom(guarded, "write_file", { path: "audit.txt", content }, "write-1");
+    expect(records.map((r) => r.status)).toEqual(["start", "complete"]);
+    expect(records[0]).toMatchObject({
+      sessionId: "s1",
+      toolCallId: "write-1",
+      metadata: { path: "audit.txt", contentLength: content.length },
+    });
+    expect(JSON.stringify(records)).not.toContain(content);
+
+    const brokenAudit = {
+      write: async () => {
+        throw new Error("unavailable");
+      },
+    };
+    const resilient = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      audit: brokenAudit,
+    });
+    await expect(
+      execFrom(resilient, "write_file", {
+        path: "resilient.txt",
+        content: "ok",
+      }),
+    ).resolves.toContain("resilient.txt");
+  });
+});
 
 beforeEach(async () => {
   ws = await mkdtemp(join(tmpdir(), "kyrei-tools-"));
@@ -56,7 +331,9 @@ describe("tools — batch (partial success, read-only only)", () => {
     expect(out).toContain("find_path ✓");
   });
   it("rejects non-read-only tools", async () => {
-    const out = await exec("batch", { calls: [{ tool: "write_file", args: { path: "x", content: "y" } }] });
+    const out = await exec("batch", {
+      calls: [{ tool: "write_file", args: { path: "x", content: "y" } }],
+    });
     expect(out).toContain("write_file ✗");
     expect(out).toContain("не read-only");
   });

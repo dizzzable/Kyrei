@@ -20,7 +20,11 @@ export interface WebToolAudit {
 export interface WebToolOptions {
   browser?: WebBrowser;
   audit?: WebToolAudit;
+  sessionId?: string;
 }
+
+const DEFAULT_SEARCH_LIMIT = 5;
+const DEFAULT_MAX_CHARS = 18_000;
 
 function decisionFor(cfg: EngineConfig, toolName: "web_search" | "web_fetch", target: string): "allow" | "ask" | "deny" {
   return decide(cfg.permissions, { tool: toolName, target });
@@ -45,9 +49,33 @@ function hasExplicitAllowRule(cfg: EngineConfig, toolName: string): boolean {
 
 async function audit(
   sink: WebToolAudit | undefined,
-  record: Omit<AuditRecord, "ts" | "tool"> & { tool: string },
+  correlation: { sessionId?: string; toolCallId: string },
+  record: Omit<AuditRecord, "ts" | "tool" | "sessionId" | "toolCallId"> & { tool: string },
 ): Promise<void> {
-  await sink?.write({ ...record, ts: new Date().toISOString() }).catch(() => {});
+  await sink?.write({ ...record, ...correlation, ts: new Date().toISOString() }).catch(() => {});
+}
+
+function searchMetadata(query: string, limit: number | undefined): Record<string, unknown> {
+  return { queryLength: query.length, limit: limit ?? DEFAULT_SEARCH_LIMIT };
+}
+
+function urlMetadata(raw: string, maxChars: number | undefined): Record<string, unknown> {
+  const url = new URL(raw);
+  return {
+    origin: url.origin,
+    pathDepth: url.pathname.split("/").filter(Boolean).length,
+    urlLength: raw.length,
+    maxChars: maxChars ?? DEFAULT_MAX_CHARS,
+  };
+}
+
+function finalUrlMetadata(raw: string): Record<string, unknown> {
+  const url = new URL(raw);
+  return {
+    finalOrigin: url.origin,
+    finalPathDepth: url.pathname.split("/").filter(Boolean).length,
+    finalUrlLength: raw.length,
+  };
 }
 
 function denialMessage(decision: "ask" | "deny"): string {
@@ -70,25 +98,27 @@ export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): 
         query: z.string().min(1).max(500).describe("Public web search query."),
         limit: z.number().int().min(1).max(10).optional(),
       }),
-      execute: async ({ query, limit }) => {
+      execute: async ({ query, limit }, { toolCallId }) => {
         const started = Date.now();
         const decision = decisionFor(cfg, "web_search", query);
+        const correlation = { sessionId: options.sessionId, toolCallId };
+        const metadata = searchMetadata(query, limit);
         if (decision !== "allow") {
-          await audit(options.audit, { tool: "web_search", args: { query }, decision, status: "denied", durationS: (Date.now() - started) / 1000 });
+          await audit(options.audit, correlation, { tool: "web_search", metadata, decision, status: "denied", durationS: (Date.now() - started) / 1000 });
           return denialMessage(decision);
         }
-        await audit(options.audit, { tool: "web_search", args: { query }, decision, status: "start" });
+        await audit(options.audit, correlation, { tool: "web_search", metadata, decision, status: "start" });
         try {
           const result = formatWebSearchResults(await browser.search(query, limit));
-          await audit(options.audit, { tool: "web_search", args: { query }, decision, status: "complete", durationS: (Date.now() - started) / 1000 });
+          await audit(options.audit, correlation, { tool: "web_search", metadata, decision, status: "complete", durationS: (Date.now() - started) / 1000 });
           return result;
         } catch (error) {
-          await audit(options.audit, {
+          await audit(options.audit, correlation, {
             tool: "web_search",
-            args: { query },
+            metadata,
             decision,
             status: "error",
-            error: (error as Error).message,
+            error: "web search failed",
             durationS: (Date.now() - started) / 1000,
           });
           return `Web search failed: ${(error as Error).message}`;
@@ -104,31 +134,38 @@ export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): 
         url: z.string().url().describe("Public http(s) URL returned by web_search or supplied by the user."),
         maxChars: z.number().int().min(1_000).max(60_000).optional(),
       }),
-      execute: async ({ url, maxChars }) => {
+      execute: async ({ url, maxChars }, { toolCallId }) => {
         const started = Date.now();
         const decision = decisionFor(cfg, "web_fetch", url);
+        const correlation = { sessionId: options.sessionId, toolCallId };
+        const metadata = urlMetadata(url, maxChars);
         if (decision !== "allow") {
-          await audit(options.audit, { tool: "web_fetch", args: { url }, decision, status: "denied", durationS: (Date.now() - started) / 1000 });
+          await audit(options.audit, correlation, { tool: "web_fetch", metadata, decision, status: "denied", durationS: (Date.now() - started) / 1000 });
           return denialMessage(decision);
         }
-        await audit(options.audit, { tool: "web_fetch", args: { url }, decision, status: "start" });
+        await audit(options.audit, correlation, { tool: "web_fetch", metadata, decision, status: "start" });
         try {
           const page = await browser.fetch(url, maxChars);
-          await audit(options.audit, {
+          await audit(options.audit, correlation, {
             tool: "web_fetch",
-            args: { url, finalUrl: page.url },
+            metadata: {
+              ...metadata,
+              ...finalUrlMetadata(page.url),
+              textLength: page.text.length,
+              linkCount: page.links.length,
+            },
             decision,
             status: "complete",
             durationS: (Date.now() - started) / 1000,
           });
           return formatWebPage(page);
         } catch (error) {
-          await audit(options.audit, {
+          await audit(options.audit, correlation, {
             tool: "web_fetch",
-            args: { url },
+            metadata,
             decision,
             status: "error",
-            error: (error as Error).message,
+            error: "web page fetch failed",
             durationS: (Date.now() - started) / 1000,
           });
           return `Web page could not be fetched: ${(error as Error).message}`;

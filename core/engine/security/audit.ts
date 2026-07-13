@@ -10,10 +10,13 @@ import { redact } from "./secrets.js";
 export interface AuditRecord {
   ts: string;
   sessionId?: string;
+  toolCallId?: string;
   tool: string;
+  /** Non-sensitive execution facts only; never store command, content, or patch bodies. */
+  metadata?: Record<string, unknown>;
   args?: unknown;
   decision?: string;
-  status: "start" | "complete" | "error" | "denied";
+  status: "start" | "complete" | "error" | "denied" | "interrupted";
   durationS?: number;
   error?: string;
 }
@@ -35,6 +38,7 @@ export function createAuditLog(logPath: string) {
     await rotateIfNeeded();
     const safe: AuditRecord = {
       ...rec,
+      metadata: rec.metadata !== undefined ? JSON.parse(redact(JSON.stringify(rec.metadata))) : undefined,
       args: rec.args !== undefined ? JSON.parse(redact(JSON.stringify(rec.args))) : undefined,
       error: rec.error ? redact(rec.error) : undefined,
     };

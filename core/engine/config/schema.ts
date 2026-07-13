@@ -13,8 +13,12 @@
  */
 
 import { z } from "zod";
-import type { EngineConfig } from "../types.js";
+import type { EngineConfig, PermissionConfig } from "../types.js";
 import { DEFAULT_ENGINE_CONFIG } from "../types.js";
+
+const TerminalPermissionSchema = z.enum(["off", "auto", "turbo"]);
+const WebPermissionSchema = z.enum(["off", "search", "read"]);
+const ReviewPermissionSchema = z.enum(["always", "agent", "request"]);
 
 const PermissionRuleSchema = z.object({
   pattern: z.string().min(1),
@@ -22,11 +26,96 @@ const PermissionRuleSchema = z.object({
 });
 
 const PermissionConfigSchema = z.object({
-  terminal: z.enum(["off", "auto", "turbo"]).default(DEFAULT_ENGINE_CONFIG.permissions.terminal),
-  web: z.enum(["off", "search", "read"]).default(DEFAULT_ENGINE_CONFIG.permissions.web),
-  review: z.enum(["always", "agent", "request"]).default(DEFAULT_ENGINE_CONFIG.permissions.review),
+  terminal: TerminalPermissionSchema.default(DEFAULT_ENGINE_CONFIG.permissions.terminal),
+  web: WebPermissionSchema.default(DEFAULT_ENGINE_CONFIG.permissions.web),
+  review: ReviewPermissionSchema.default(DEFAULT_ENGINE_CONFIG.permissions.review),
   rules: z.array(PermissionRuleSchema).default([]),
 });
+
+const DENY_ALL_RULE: PermissionConfig["rules"][number] = { pattern: ".*", action: "deny" };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isUsableRulePattern(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    new RegExp(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Permission input is normalized separately from general config recovery.
+ * Missing fields keep the product defaults, but present malformed security
+ * fields fail closed: terminal/web -> off, review -> always. Rules are
+ * salvaged independently; an invalid action becomes deny for its valid scope,
+ * while an unusable scope becomes deny-all because silently dropping a rule
+ * could discard an intended denial.
+ */
+function normalizePermissions(value: Record<string, unknown>, warnings: string[]): void {
+  if (!hasOwn(value, "permissions") || value.permissions === undefined) return;
+
+  if (!isRecord(value.permissions)) {
+    warnings.push("config.permissions: expected an object — using conservative security defaults");
+    value.permissions = {
+      terminal: "off",
+      web: "off",
+      review: "always",
+      rules: [{ ...DENY_ALL_RULE }],
+    } satisfies PermissionConfig;
+    return;
+  }
+
+  const permissions = { ...value.permissions };
+  const normalizeEnum = <T extends string>(
+    key: "terminal" | "web" | "review",
+    schema: z.ZodType<T>,
+    fallback: T,
+  ): void => {
+    if (!hasOwn(permissions, key) || permissions[key] === undefined) return;
+    const parsed = schema.safeParse(permissions[key]);
+    if (parsed.success) {
+      permissions[key] = parsed.data;
+      return;
+    }
+    warnings.push(`config.permissions.${key}: invalid security value — using conservative fallback '${fallback}'`);
+    permissions[key] = fallback;
+  };
+
+  normalizeEnum("terminal", TerminalPermissionSchema, "off");
+  normalizeEnum("web", WebPermissionSchema, "off");
+  normalizeEnum("review", ReviewPermissionSchema, "always");
+
+  if (hasOwn(permissions, "rules") && permissions.rules !== undefined) {
+    if (!Array.isArray(permissions.rules)) {
+      warnings.push("config.permissions.rules: expected an array — using deny-all fallback");
+      permissions.rules = [{ ...DENY_ALL_RULE }];
+    } else {
+      permissions.rules = permissions.rules.map((rule, index) => {
+        if (!isRecord(rule) || !isUsableRulePattern(rule.pattern)) {
+          warnings.push(`config.permissions.rules.${index}: invalid rule pattern — using deny-all fallback`);
+          return { ...DENY_ALL_RULE };
+        }
+        const action = PermissionRuleSchema.shape.action.safeParse(rule.action);
+        if (!action.success) {
+          warnings.push(`config.permissions.rules.${index}.action: invalid security value — using conservative fallback 'deny'`);
+          return { pattern: rule.pattern, action: "deny" as const };
+        }
+        return { pattern: rule.pattern, action: action.data };
+      });
+    }
+  }
+
+  value.permissions = permissions;
+}
 
 const ContextBudgetSchema = z.object({
   softPct: z.number().min(0).max(1).default(DEFAULT_ENGINE_CONFIG.contextBudget.softPct),
@@ -125,6 +214,7 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
  */
 export function resolveEngineConfig(raw?: unknown): ResolveResult {
   const { value, warnings } = migrate(raw);
+  normalizePermissions(value, warnings);
   const parsed = EngineConfigSchema.safeParse(value);
   if (parsed.success) {
     const cfg = parsed.data;

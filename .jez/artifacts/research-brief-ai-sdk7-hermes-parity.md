@@ -73,3 +73,11 @@ The exhaustive local audit is recorded in `docs/research/hermes-parity-matrix.md
 5. Typed auxiliary model routing and provider-profile-scoped fallbacks.
 
 Cloud gateway/account coupling, mass messaging platforms, unrestricted CDP/browser eval, and cosmetic pet/embed features are rejected for Kyrei's local desktop direction.
+
+## First parity slice delivered
+
+The post-migration safety slice now enforces permission rules, terminal mode, review mode, secret scanning, cancellation, sandbox wrapping, and correlated metadata-only audit for local mutations, commands, diagnostics, and web tools. Malformed permission config recovers conservatively instead of resetting to permissive defaults. Live target validation rejects symlink/junction/reparse and Windows alias escapes for reads and writes.
+
+`ask` is intentionally fail-closed: it returns a model-visible denial and executes nothing. Interactive approve/deny remains a separate durable AI SDK approval-message resume flow; an in-memory waiting promise was rejected because renderer disconnect, cancellation, or app restart could orphan it.
+
+Verification after independent security review: 43 test files / 349 tests, both TypeScript projects, JavaScript checks, engine and renderer production builds, package preparation, and zero production audit findings.

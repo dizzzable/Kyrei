@@ -209,6 +209,7 @@ export async function startGateway({
       model: config.activeModelId,
       workspace: config.workspace,
       auditLogPath: join(dataDir, "audit.jsonl"),
+      sessionId,
     };
 
     const controller = new AbortController();

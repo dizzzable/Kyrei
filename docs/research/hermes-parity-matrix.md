@@ -18,7 +18,7 @@ Hermes sources: `apps/desktop/src/app/settings/index.tsx`, `apps/desktop/src/app
 | Chat | Personality, timezone, reasoning blocks, image mode | Personality/reasoning visibility | Port timezone and image mode |
 | Appearance | Language, theme profiles, zoom, translucency, tool view, embed consent | Theme/import, scale, density, tool view, language | Adapt translucency; reject third-party inline embeds |
 | Workspace | cwd, project/strict execution, persistent shell, env passthrough, read cap | Workspace jail and read cap | Adapt local PTY/process and optional Docker |
-| Safety | approvals, timeout, allowlist, secret redaction, private URLs, checkpoints | Policy modules exist but local tools bypass them | Port first; this is P0 |
+| Safety | approvals, timeout, allowlist, secret redaction, private URLs, checkpoints | Local tools now enforce policy/pre-hooks/audit fail-closed; interactive resume is missing | Finish durable approval lifecycle |
 | Memory/context | Built-in/external memory, compression thresholds and protected messages | Strong dormant stores, CCR pruning, GBrain/OpenViking | Adapt structured summary and reviewed learning |
 | Voice | STT/TTS provider matrix plus local engines | Web Speech | Keep Web Speech; optional Piper/Whisper later |
 | Advanced | Toolsets, backend, caps, retries, delegation, updates | Base caps/retries only | Adapt schema-driven UI; hide unsupported controls |
@@ -75,15 +75,15 @@ Hermes additionally supports profile `.env`, `auth.json`, 1Password, and Bitward
 | Status | Capabilities |
 |---|---|
 | Implemented | Electron-only shell, loopback authenticated gateway, provider profiles, six transports, stream/tool loop, workspace tools/jail, safe web search/fetch, project context, project intelligence, GBrain opt-in, session basics |
-| Partial | Secret fallback on Linux, active-provider-only fallbacks, terminal safety, audit, OS sandbox, context management, composer, settings, voice |
-| Dormant | Role models, approval policy engine, SQLite/vector memory, LTM writer/handoff, OpenViking, reliability modules, reviewer/plans, draft/history helpers |
+| Partial | Secret fallback on Linux, active-provider-only fallbacks, interactive approvals, OS sandbox, context management, composer, settings, voice |
+| Dormant | Role models, SQLite/vector memory, LTM writer/handoff, OpenViking, reliability modules, reviewer/plans, draft/history helpers |
 | Missing live | Image inputs, skills, MCP, subagents, MoA, persistent PTY, LSP, archive/branch lineage, update manager |
 
-The critical defect is that `permissions.terminal`, review mode, and deny rules are visible in Settings but `run_command`, `write_file`, and `edit_file` do not call the permission decision, pre-hook, secret scan, or approval path. Until fixed, these controls can create a false sense of protection.
+The original critical defect is now closed for execution: `run_command`, `diagnostics`, `write_file`, and `edit_file` enforce deny/ask/allow, secret scanning, cancellation barriers, live workspace target validation, and correlated metadata-only audit. `ask` deliberately executes nothing. What remains is the durable UI approval/resume flow; until that lands, users must use explicit policy rules rather than an approve-once button.
 
 ## Prioritised delivery order
 
-1. End-to-end local-tool safety gate and approval lifecycle.
+1. Durable signed approval response and resume lifecycle on top of the completed fail-closed local-tool gate.
 2. Flat bounded read-only subagents with a single writer.
 3. Skills list/view with provenance, then controlled install/manage.
 4. Two-stage context compression with structured summaries and reversible CCR recall.

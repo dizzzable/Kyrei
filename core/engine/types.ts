@@ -169,6 +169,8 @@ export interface RunKyreiChatOpts {
   workspace?: string;
   /** Gateway-owned local audit location; never supplied by the renderer. */
   auditLogPath?: string;
+  /** Gateway-owned session correlation for local audit records. */
+  sessionId?: string;
   abortSignal?: AbortSignal;
   config?: Partial<EngineConfig>;
   /** Reasoning/effort tuning applied to the provider request (opt-in). */

@@ -57,7 +57,61 @@ describe("resolveEngineConfig (task 2.6)", () => {
 
   it("rejects invalid enum values without throwing", () => {
     const { config } = resolveEngineConfig({ permissions: { terminal: "yolo" } });
-    expect(config.permissions.terminal).toBe(DEFAULT_ENGINE_CONFIG.permissions.terminal);
+    expect(config.permissions.terminal).toBe("off");
+  });
+
+  it("salvages valid permission fields and rules when a sibling is malformed", () => {
+    const { config, warnings } = resolveEngineConfig({
+      permissions: {
+        terminal: "off",
+        web: "search",
+        review: "sometimes",
+        rules: [
+          { pattern: "run_command:rm", action: "deny" },
+          { pattern: "write_file:secrets", action: "maybe" },
+        ],
+      },
+    });
+
+    expect(config.permissions).toEqual({
+      terminal: "off",
+      web: "search",
+      review: "always",
+      rules: [
+        { pattern: "run_command:rm", action: "deny" },
+        { pattern: "write_file:secrets", action: "deny" },
+      ],
+    });
+    expect(warnings.some((warning) => warning.includes("permissions.review"))).toBe(true);
+    expect(warnings.some((warning) => warning.includes("rules.1.action"))).toBe(true);
+  });
+
+  it("turns a rule with an unusable pattern into deny-all instead of dropping sibling rules", () => {
+    const { config, warnings } = resolveEngineConfig({
+      permissions: {
+        rules: [
+          { pattern: "web_fetch:trusted", action: "allow" },
+          { pattern: "[", action: "deny" },
+        ],
+      },
+    });
+
+    expect(config.permissions.rules).toEqual([
+      { pattern: "web_fetch:trusted", action: "allow" },
+      { pattern: ".*", action: "deny" },
+    ]);
+    expect(warnings.some((warning) => warning.includes("rules.1"))).toBe(true);
+  });
+
+  it("fails closed for unknown terminal, review, and web policies", () => {
+    const { config, warnings } = resolveEngineConfig({
+      permissions: { terminal: "yolo", review: "never", web: "unrestricted" },
+    });
+
+    expect(config.permissions.terminal).toBe("off");
+    expect(config.permissions.review).toBe("always");
+    expect(config.permissions.web).toBe("off");
+    expect(warnings.filter((warning) => warning.includes("invalid security value"))).toHaveLength(3);
   });
 
   it("enforces softPct < hardPct invariant", () => {

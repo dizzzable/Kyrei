@@ -10,6 +10,8 @@ const buildToolsMock = vi.fn();
 const resolveModelMock = vi.fn();
 const buildGBrainToolsMock = vi.fn();
 const toPartsMock = vi.fn(() => []);
+const buildWebToolsMock = vi.fn(() => ({}));
+const createAuditLogMock = vi.fn();
 
 vi.mock("ai", () => ({
   streamText: streamTextMock,
@@ -75,6 +77,14 @@ vi.mock("../tools/gbrain.js", () => ({
   buildGBrainTools: buildGBrainToolsMock,
 }));
 
+vi.mock("../tools/web.js", () => ({
+  buildWebTools: buildWebToolsMock,
+}));
+
+vi.mock("../security/audit.js", () => ({
+  createAuditLog: createAuditLogMock,
+}));
+
 vi.mock("../security/jail.js", () => ({
   isWorkspaceDir: isWorkspaceDirMock,
 }));
@@ -119,6 +129,7 @@ describe("runKyreiChat project context wiring", () => {
     buildSystemPromptMock.mockReturnValue("system prompt");
     buildToolsMock.mockReturnValue({ read_file: { name: "read_file" } });
     buildGBrainToolsMock.mockReturnValue({});
+    buildWebToolsMock.mockReturnValue({});
     isWorkspaceDirMock.mockResolvedValue(true);
     assembleSystemContextMock.mockResolvedValue("PROJECT_CTX");
     streamTextMock.mockReturnValue({
@@ -223,6 +234,32 @@ describe("runKyreiChat project context wiring", () => {
     });
 
     expect(toPartsMock).toHaveBeenCalledWith(responseMessages, bridged);
+  });
+
+  it("shares one audit sink with local and web tools and correlates the session", async () => {
+    const audit = { write: vi.fn() };
+    createAuditLogMock.mockReturnValueOnce(audit);
+    const { runKyreiChat } = await import("./run.js");
+
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      auditLogPath: "/audit.jsonl",
+      sessionId: "session-1",
+    });
+
+    expect(createAuditLogMock).toHaveBeenCalledTimes(1);
+    expect(buildToolsMock).toHaveBeenCalledWith(
+      "/workspace",
+      expect.any(Object),
+      expect.any(Map),
+      { abortSignal: undefined, audit, sessionId: "session-1" },
+    );
+    expect(buildWebToolsMock).toHaveBeenCalledWith(expect.any(Object), { audit, sessionId: "session-1" });
   });
 
   it("makes enabled brain tools available without a workspace", async () => {

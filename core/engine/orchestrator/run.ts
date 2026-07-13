@@ -45,9 +45,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const workspaceReady = Boolean(opts.workspace) && (await isWorkspaceDir(opts.workspace!));
   const toolMeta = new Map<string, ToolMeta>();
   const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
-  let tools = workspaceReady ? buildTools(opts.workspace!, cfg, toolMeta, opts.abortSignal) : undefined;
+  const audit = opts.auditLogPath ? createAuditLog(opts.auditLogPath) : undefined;
+  let tools = workspaceReady
+    ? buildTools(opts.workspace!, cfg, toolMeta, { abortSignal: opts.abortSignal, audit, sessionId: opts.sessionId })
+    : undefined;
   if (tools && ccr) tools = { ...tools, retrieve: makeRetrieveTool(ccr) };
-  const webTools = buildWebTools(cfg, opts.auditLogPath ? { audit: createAuditLog(opts.auditLogPath) } : {});
+  const webTools = buildWebTools(cfg, { ...(audit ? { audit } : {}), sessionId: opts.sessionId });
   if (Object.keys(webTools).length) tools = { ...(tools ?? {}), ...webTools };
   const brainTools = buildGBrainTools(cfg.memory.gbrain, {
     signal: opts.abortSignal,

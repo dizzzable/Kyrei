@@ -7,7 +7,7 @@
 
 import { readFile, writeFile, mkdir, rm, rename, open } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { safePath } from "../security/jail.js";
+import { validateWriteTarget } from "../security/jail.js";
 import { detectMeta, decodeToLines, serialize, defaultNewMeta, type FileMeta } from "./file-meta.js";
 import { seekSequence } from "./seek.js";
 import type { FilePatch, PatchHunk } from "./parse-patch.js";
@@ -116,11 +116,14 @@ export async function applyPatch(
   workspace: string,
   patches: FilePatch[],
   snapshot: SnapshotStore,
+  abortSignal?: AbortSignal,
 ): Promise<ApplyReport> {
+  abortSignal?.throwIfAborted();
   // ── Phase 1: stage in memory (no writes). Any failure throws before disk. ──
   const staged: StagedFile[] = [];
   for (const p of patches) {
-    const absTarget = safePath(workspace, p.file);
+    abortSignal?.throwIfAborted();
+    const absTarget = await validateWriteTarget(workspace, p.file);
     const rel = relative(workspace, absTarget) || p.file;
 
     if (p.op === "delete") {
@@ -155,7 +158,7 @@ export async function applyPatch(
     if (newText === oldText && p.op === "update") throw new ApplyError("NOOP", p.file, `Правка не меняет файл (no-op): ${rel}`);
 
     if (p.op === "move") {
-      const destAbs = safePath(workspace, p.dest!);
+      const destAbs = await validateWriteTarget(workspace, p.dest!);
       if (await exists(destAbs)) throw new ApplyError("EXISTS", p.dest!, `Целевой файл уже существует: ${p.dest}`);
       staged.push({
         rel: relative(workspace, destAbs) || p.dest!,
@@ -172,17 +175,24 @@ export async function applyPatch(
   }
 
   // ── Phase 2: snapshot before any write. ──
+  abortSignal?.throwIfAborted();
   const affected = new Set<string>();
   for (const s of staged) {
+    await validateWriteTarget(workspace, relative(workspace, s.absTarget));
+    if (s.moveFrom) await validateWriteTarget(workspace, relative(workspace, s.moveFrom));
     affected.add(relative(workspace, s.absTarget) || s.rel);
     if (s.moveFrom) affected.add(relative(workspace, s.moveFrom));
   }
   const snapshotId = await snapshot.create([...affected]);
 
   // ── Phase 3: write all, with inline undo journal for best-effort rollback. ──
+  abortSignal?.throwIfAborted();
   const undo: Array<() => Promise<void>> = [];
   try {
     for (const s of staged) {
+      abortSignal?.throwIfAborted();
+      await validateWriteTarget(workspace, relative(workspace, s.absTarget));
+      if (s.moveFrom) await validateWriteTarget(workspace, relative(workspace, s.moveFrom));
       if (s.op === "delete") {
         const prev = await readFile(s.absTarget);
         await rm(s.absTarget, { force: true });
