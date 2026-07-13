@@ -49,13 +49,13 @@ export function getBinding(actionId: string): string[] {
 // Reverse lookup combo → actionId for dispatch. First action wins on conflict;
 // the panel surfaces conflicts so users can resolve them. Keys go through
 // `canonicalizeCombo` so a `ctrl+…` binding resolves everywhere.
-export function comboIndex(): Map<string, string> {
+export function comboIndex(isMac?: boolean): Map<string, string> {
   const current = bindings();
   const index = new Map<string, string>();
 
   for (const id of KEYBIND_ACTION_IDS) {
     for (const combo of current[id] ?? []) {
-      const key = canonicalizeCombo(combo);
+      const key = canonicalizeCombo(combo, isMac);
 
       if (!index.has(key)) {
         index.set(key, id);
@@ -67,8 +67,8 @@ export function comboIndex(): Map<string, string> {
 }
 
 /** Resolve a live/typed combo to the action it triggers, if any. */
-export function actionForCombo(combo: string): string | undefined {
-  return comboIndex().get(canonicalizeCombo(combo));
+export function actionForCombo(combo: string, isMac?: boolean): string | undefined {
+  return comboIndex(isMac).get(canonicalizeCombo(combo, isMac));
 }
 
 // Persist the new combos as a diff: drop the key when it equals the shipped
@@ -105,11 +105,13 @@ export function resetAll(): void {
 
 // Other actions that already use `combo` (excluding `actionId` itself). Compared
 // canonically so `ctrl+…` and its folded `mod+…` form clash off macOS.
-export function conflictsFor(actionId: string, combo: string): string[] {
+export function conflictsFor(actionId: string, combo: string, isMac?: boolean): string[] {
   const current = bindings();
-  const key = canonicalizeCombo(combo);
+  const key = canonicalizeCombo(combo, isMac);
 
   return KEYBIND_ACTION_IDS.filter(
-    (id) => id !== actionId && (current[id] ?? []).some((c) => canonicalizeCombo(c) === key),
+    (id) =>
+      id !== actionId &&
+      (current[id] ?? []).some((c) => canonicalizeCombo(c, isMac) === key),
   );
 }

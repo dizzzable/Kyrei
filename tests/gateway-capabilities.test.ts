@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -88,16 +88,17 @@ describe("gateway operational capabilities", () => {
     const external = join(dataDir, "external-skills");
     await mkdir(join(external, "reviewer"), { recursive: true });
     await writeFile(join(external, "reviewer", "SKILL.md"), "---\nname: reviewer\ndescription: Review changes\n---\n\nReview the diff.\n", "utf8");
+    const canonicalExternal = await realpath(external);
     selectedFolder = external;
 
     const roots = await request<{ roots: Array<{ id: string; path: string; provenance: string; owned: boolean }> }>("/api/skills/roots", { method: "POST" });
     const custom = roots.roots.find(root => root.provenance === "custom");
-    expect(custom).toMatchObject({ path: external, owned: false });
+    expect(custom).toMatchObject({ path: canonicalExternal, owned: false });
 
     const listed = await request<{ skills: Array<{ name: string; owned: boolean }> }>("/api/skills");
     expect(listed.skills).toContainEqual(expect.objectContaining({ name: "reviewer", owned: false }));
     await request(`/api/skills/roots/${encodeURIComponent(custom!.id)}/open`, { method: "POST" });
-    expect(openedPath).toBe(external);
+    expect(openedPath).toBe(canonicalExternal);
 
     await request(`/api/skills/roots/${encodeURIComponent(custom!.id)}`, { method: "DELETE" });
     expect((await request<{ skills: unknown[] }>("/api/skills")).skills).toEqual([]);

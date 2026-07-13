@@ -75,7 +75,7 @@ function baseKeyFromCode(code: string): string | null {
 
 // Returns the canonical combo for a keydown, or null while only modifiers are
 // held (so capture mode keeps waiting for a real key).
-export function comboFromEvent(event: KeyboardEvent): string | null {
+export function comboFromEvent(event: KeyboardEvent, isMac = IS_MAC): string | null {
   if (MODIFIER_CODES.has(event.code)) {
     return null;
   }
@@ -90,11 +90,11 @@ export function comboFromEvent(event: KeyboardEvent): string | null {
 
   // macOS reports Cmd (`mod`) and Control (`ctrl`) separately; elsewhere
   // Control IS the accelerator, so it folds into `mod`.
-  if (event.metaKey || (event.ctrlKey && !IS_MAC)) {
+  if (event.metaKey || (event.ctrlKey && !isMac)) {
     parts.push("mod");
   }
 
-  if (event.ctrlKey && IS_MAC) {
+  if (event.ctrlKey && isMac) {
     parts.push("ctrl");
   }
 
@@ -114,8 +114,8 @@ export function comboFromEvent(event: KeyboardEvent): string | null {
 // Rewrites a binding to the form `comboFromEvent` emits, so it indexes under
 // the same key a live keypress produces. Off macOS, `ctrl+…` and `mod+…` are
 // the one Control chord, so a shipped `ctrl+tab` matches a real Control+Tab.
-export function canonicalizeCombo(combo: string): string {
-  return IS_MAC ? combo : combo.replace(/\bctrl\b/g, "mod");
+export function canonicalizeCombo(combo: string, isMac = IS_MAC): string {
+  return isMac ? combo : combo.replace(/\bctrl\b/g, "mod");
 }
 
 const TOKEN_LABELS: Record<string, string> = {
@@ -142,21 +142,21 @@ function labelForBase(base: string): string {
   return base.length === 1 ? base.toUpperCase() : base;
 }
 
-function labelForMod(mod: string): string {
+function labelForMod(mod: string, isMac: boolean): string {
   if (mod === "mod") {
-    return IS_MAC ? "⌘" : "Ctrl";
+    return isMac ? "⌘" : "Ctrl";
   }
 
   if (mod === "ctrl") {
-    return IS_MAC ? "⌃" : "Ctrl";
+    return isMac ? "⌃" : "Ctrl";
   }
 
   if (mod === "alt") {
-    return IS_MAC ? "⌥" : "Alt";
+    return isMac ? "⌥" : "Alt";
   }
 
   if (mod === "shift") {
-    return IS_MAC ? "⇧" : "Shift";
+    return isMac ? "⇧" : "Shift";
   }
 
   return mod;
@@ -164,18 +164,18 @@ function labelForMod(mod: string): string {
 
 // Per-key display tokens, e.g. ["⌘", "K"] on macOS, ["Ctrl", "K"] elsewhere —
 // one cap per token for a <KbdGroup>.
-export function comboTokens(combo: string): string[] {
+export function comboTokens(combo: string, isMac = IS_MAC): string[] {
   const parts = combo.split("+");
   const base = parts.pop() ?? "";
 
-  return [...parts.map(labelForMod), labelForBase(base)];
+  return [...parts.map((part) => labelForMod(part, isMac)), labelForBase(base)];
 }
 
 // Human-readable label, e.g. "⌘⇧K" on macOS, "Ctrl+Shift+K" elsewhere.
-export function formatCombo(combo: string): string {
-  const tokens = comboTokens(combo);
+export function formatCombo(combo: string, isMac = IS_MAC): string {
+  const tokens = comboTokens(combo, isMac);
 
-  return IS_MAC ? tokens.join("") : tokens.join("+");
+  return isMac ? tokens.join("") : tokens.join("+");
 }
 
 // True when focus currently sits inside an element matching `selector`. The

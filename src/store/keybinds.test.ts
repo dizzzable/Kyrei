@@ -12,6 +12,9 @@ import {
   resetAll,
 } from "@/store/keybinds";
 
+const NON_MAC = false;
+const MAC = true;
+
 // The store is a module singleton, so isolate each test on a clean diff.
 beforeEach(() => {
   resetAll();
@@ -65,35 +68,40 @@ describe("keybinds store", () => {
 
   describe("reverse-lookup — combo → action", () => {
     it("resolves default combos to their action", () => {
-      expect(actionForCombo("mod+k")).toBe("nav.commandPalette");
-      expect(actionForCombo("mod+b")).toBe("view.toggleSidebar");
+      expect(actionForCombo("mod+k", NON_MAC)).toBe("nav.commandPalette");
+      expect(actionForCombo("mod+b", NON_MAC)).toBe("view.toggleSidebar");
     });
 
     it("folds ctrl → mod when resolving off macOS", () => {
       // session.next ships as ctrl+tab, indexed canonically as mod+tab.
-      expect(actionForCombo("ctrl+tab")).toBe("session.next");
-      expect(actionForCombo("mod+tab")).toBe("session.next");
+      expect(actionForCombo("ctrl+tab", NON_MAC)).toBe("session.next");
+      expect(actionForCombo("mod+tab", NON_MAC)).toBe("session.next");
+    });
+
+    it("keeps ctrl and mod distinct when resolving on macOS", () => {
+      expect(actionForCombo("ctrl+tab", MAC)).toBe("session.next");
+      expect(actionForCombo("mod+tab", MAC)).toBeUndefined();
     });
 
     it("follows a rebind", () => {
       rebind("nav.commandPalette", ["mod+p"]);
-      expect(actionForCombo("mod+p")).toBe("nav.commandPalette");
-      expect(actionForCombo("mod+k")).toBeUndefined();
+      expect(actionForCombo("mod+p", NON_MAC)).toBe("nav.commandPalette");
+      expect(actionForCombo("mod+k", NON_MAC)).toBeUndefined();
     });
   });
 
   describe("conflict detection", () => {
     it("detects an existing action already using the combo", () => {
       // mod+b is view.toggleSidebar's default; assigning it elsewhere clashes.
-      expect(conflictsFor("session.togglePin", "mod+b")).toEqual(["view.toggleSidebar"]);
+      expect(conflictsFor("session.togglePin", "mod+b", NON_MAC)).toEqual(["view.toggleSidebar"]);
     });
 
     it("does not report the action itself as a conflict", () => {
-      expect(conflictsFor("view.toggleSidebar", "mod+b")).toEqual([]);
+      expect(conflictsFor("view.toggleSidebar", "mod+b", NON_MAC)).toEqual([]);
     });
 
     it("reports no conflict for a free combo", () => {
-      expect(conflictsFor("session.togglePin", "mod+shift+g")).toEqual([]);
+      expect(conflictsFor("session.togglePin", "mod+shift+g", NON_MAC)).toEqual([]);
     });
   });
 });
