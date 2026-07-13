@@ -1,11 +1,10 @@
 import { normalize } from "@/lib/text";
 import type { SessionInfo } from "@/lib/types";
 
-/** Human-readable session title, falling back to a stable placeholder.
- *  Adapted from Hermes' `sessionTitle`, simplified to our fields. */
-export function sessionTitle(session: SessionInfo): string {
+/** Human-readable session title with display copy supplied by the caller. */
+export function sessionTitle(session: SessionInfo, fallback = ""): string {
   const title = session.title?.trim();
-  return title ? title : "Untitled";
+  return title || fallback;
 }
 
 /**

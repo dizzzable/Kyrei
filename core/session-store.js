@@ -10,7 +10,8 @@ import { dirname, join } from "node:path";
  * on-disk format can evolve without breaking older installs.
  */
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_UNTITLED_TITLES = new Set(["Новый диалог", "New chat", "New session"]);
 
 export class SessionStore {
   constructor({ runtimeDir, maxMessages = 500 } = {}) {
@@ -42,10 +43,20 @@ export class SessionStore {
 
   migrate(parsed) {
     // Bring any older shape up to the current schema without losing data.
+    const messages = parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {};
+    const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+    const migratedSessions = Number(parsed.schemaVersion ?? 1) < 2
+      ? sessions.map(session => {
+          const hasMessages = Array.isArray(messages[session.id]) && messages[session.id].length > 0;
+          return !hasMessages && LEGACY_UNTITLED_TITLES.has(session.title)
+            ? { ...session, title: "" }
+            : session;
+        })
+      : sessions;
     const next = {
       schemaVersion: SCHEMA_VERSION,
-      sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
-      messages: parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {},
+      sessions: migratedSessions,
+      messages,
       mission: parsed.mission ?? null,
       updatedAt: parsed.updatedAt ?? new Date().toISOString(),
     };

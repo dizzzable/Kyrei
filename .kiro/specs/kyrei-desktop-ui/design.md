@@ -6,6 +6,25 @@
 
 Референс для дословного переноса алгоритмов: `hermes/hermes-agent/apps/desktop/src/**` (локально, .gitignore).
 
+### Visual direction (2026-07-13)
+
+Визуальный язык Kyrei строится по референсу **Linear / Refero Styles**: near-black canvas `#08090a`, поверхности `#0f1011` и `#161718`, hairline-разделители `#23252a` / `#383b3f`, бело-серая типографическая шкала и один функциональный primary-accent `#e4f222`. Accent используется только для главного действия или текущего состояния, не для декора. Базовый ритм — 4px; основные интервалы — 8/12/24px; radius — 4px для badges, 6px для controls, 12px для cards. Панели разделяются токенизированными hairlines, а не декоративными тенями или градиентами.
+
+UX-компоновка следует живому Hermes Desktop в режиме `panesFlipped=true`:
+
+```text
+titlebar 34px
+developer rail (files + terminal) | conversation | activity/session rail
+statusbar 20px
+```
+
+- Developer rail по умолчанию слева: workspace tree сверху, terminal/activity снизу.
+- Conversation остаётся единственной центральной фокусной поверхностью; composer закреплён снизу и ограничен шириной 48.75rem.
+- Activity rail по умолчанию справа: New session, Capabilities, Messaging, Artifacts, search, pinned и project/session tree. Kyrei-specific Memory, Providers, Agents и Cron добавляются через registry, а не вшиваются в JSX.
+- При узком окне боковые панели становятся overlay rails и не уменьшают центральную колонку ниже пригодной ширины.
+- Видимого embedded browser/webview нет. Агентский web остаётся engine capability, а результаты отображаются как tool activity, citations и artifacts.
+- Нативные Windows/macOS/Linux window controls, drag regions и offsets учитываются платформенно.
+
 ## Architecture
 
 ```
@@ -143,7 +162,9 @@ interface Settings {           // клиентские настройки (local
 
 ## i18n
 
-`i18n/catalog.ts` (ru/en), провайдер + хук `useI18n()`; строки выносятся при касании компонента (не рефакторим всё сразу — по мере переработки экрана).
+Все пользовательские строки мигрируются полностью, а не «по мере касания». Используется один строго типизированный `TranslationCatalog` с полным совпадением ключей `en` и `ru`, функциями для interpolation/plural и форматтерами на `Intl`. Через каталог проходят visible copy, placeholders, tooltips, `aria-*`, empty/error/loading states, menu items и built-in presets. Provider/model IDs, пути, команды, raw tool data и пользовательский контент остаются данными и не переводятся.
+
+Backend не сохраняет локализованные UI-строки как состояние: новая сессия имеет семантический untitled-state, renderer разрешает его через locale. Built-in registries хранят стабильные IDs и translation keys; пользовательские provider names, snippets и session titles не изменяются при смене языка. Gate включает автоматическую проверку полноты каталогов и запрета нового user-facing hardcode.
 
 ## Testing Strategy
 

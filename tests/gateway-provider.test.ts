@@ -170,7 +170,7 @@ describe("gateway provider registry", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ credentials: { region: "us-east-1", accessKeyId: "missing-secret" } }),
-    })).rejects.toThrow("incomplete credentials");
+    })).rejects.toThrow("provider_credentials_incomplete");
 
     const configured = await request<{ providers: Array<{ id: string; hasKey: boolean }> }>(`/api/providers/${bedrock.id}/secret`, {
       method: "PUT",
@@ -216,5 +216,29 @@ describe("gateway provider registry", () => {
     server = await startGateway({ dataDir, preferredPort: 0, secretsCodec });
     const reloaded = await request<{ hasKey: boolean }>("/api/config");
     expect(reloaded.hasKey).toBe(true);
+  });
+
+  it("clears stored credentials when explicit authentication is disabled", async () => {
+    const initial = await request<{ activeProviderId: string }>("/api/config");
+    await request(`/api/providers/${initial.activeProviderId}/secret`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "must-be-cleared" }),
+    });
+
+    const updated = await request<{ providers: Array<{ id: string; hasKey: boolean; hasStoredCredentials: boolean }> }>(
+      `/api/providers/${initial.activeProviderId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: { requiresApiKey: false } }),
+      },
+    );
+
+    expect(updated.providers.find(provider => provider.id === initial.activeProviderId)).toMatchObject({
+      hasKey: true,
+      hasStoredCredentials: false,
+    });
+    expect(await readFile(join(dataDir, "kyrei-secrets.json"), "utf8")).not.toContain("must-be-cleared");
   });
 });

@@ -2,16 +2,29 @@ import { describe, expect, it } from "vitest";
 
 import {
   canonicalSlashCommand,
+  getSlashCommands,
   isModelPickerCommand,
   isPickerCommand,
   isSlashCommand,
   isSlashSuggestion,
+  parseSlash,
   resolveSlashCommand,
   slashCommandTakesArgs,
   slashDescription,
 } from "@/lib/slash-commands";
+import { createTranslator } from "@/i18n/translate";
+import { enChat } from "@/i18n/locales/en/chat";
+import { ruChat } from "@/i18n/locales/ru/chat";
+
+const en = createTranslator(enChat, "en");
+const ru = createTranslator(ruChat, "ru");
 
 describe("resolve / canonical", () => {
+  it("parses a command into the legacy bare-name dispatch shape", () => {
+    expect(parseSlash("/theme midnight")).toEqual({ name: "theme", arg: "midnight" });
+    expect(parseSlash("//MODEL  gpt-5")).toEqual({ name: "model", arg: "gpt-5" });
+  });
+
   it("resolves /new and its aliases to the same canonical spec", () => {
     expect(canonicalSlashCommand("/new")).toBe("/new");
     expect(canonicalSlashCommand("/clear")).toBe("/new");
@@ -77,13 +90,30 @@ describe("picker / description / takesArgs", () => {
   });
 
   it("exposes descriptions via alias", () => {
-    expect(slashDescription("/new")).toBe("Start a new chat");
-    expect(slashDescription("/clear")).toBe("Start a new chat");
-    expect(slashDescription("/bogus", "fallback")).toBe("fallback");
+    expect(slashDescription("/new", en)).toBe("Start a new chat");
+    expect(slashDescription("/clear", ru)).toBe("Начать новый диалог");
+    expect(slashDescription("/bogus", en, "fallback")).toBe("fallback");
   });
 
   it("flags the two-step arg command", () => {
     expect(slashCommandTakesArgs("/theme")).toBe(true);
     expect(slashCommandTakesArgs("/new")).toBe(false);
+  });
+});
+
+describe("localized command registry", () => {
+  it("derives the palette from locale-neutral ids", () => {
+    const english = getSlashCommands(en);
+    const russian = getSlashCommands(ru);
+
+    expect(english.map((command) => command.id)).toEqual(["new", "help", "theme", "settings"]);
+    expect(english[0]).toMatchObject({
+      id: "new",
+      name: "new",
+      command: "/new",
+      desc: "Start a new chat",
+    });
+    expect(russian[0]?.desc).toBe("Начать новый диалог");
+    expect(russian.find((command) => command.id === "theme")?.arg).toBe("dark | light | midnight");
   });
 });

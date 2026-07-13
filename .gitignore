@@ -3,6 +3,8 @@ dist/
 build/
 core/engine/.dist/
 tests/eval/out/
+.playwright-cli/
+output/
 
 # --- local runtime / vendored subprojects (never publish) ---
 hermes/

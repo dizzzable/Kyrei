@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DisclosureRow } from "@/components/ui";
 import { Markdown } from "@/components/Markdown";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 /**
  * Reasoning block: collapsible "Размышление" with a live timer + shimmer while
@@ -9,6 +10,7 @@ import { cn } from "@/lib/utils";
  * reasoning renders nothing.
  */
 export function ThinkingDisclosure({ text, pending }: { text: string; pending?: boolean }) {
+  const { t } = useI18n();
   // null = defer to streaming default (open while pending); first toggle wins.
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -28,8 +30,8 @@ export function ThinkingDisclosure({ text, pending }: { text: string; pending?: 
   return (
     <div className="my-1.5 text-[13px] text-muted">
       <DisclosureRow open={open} onToggle={() => setUserOpen(!open)}>
-        <span className={cn("text-[12px] font-medium text-secondary", pending && "shimmer")}>Размышление</span>
-        {pending && <span className="font-mono text-[10.5px] tabular-nums text-muted">{elapsed.toFixed(1)}s</span>}
+        <span className={cn("text-[12px] font-medium text-secondary", pending && "shimmer")}>{t("chat.thinking.label")}</span>
+        {pending && <span className="font-mono text-[10.5px] tabular-nums text-muted">{t("chat.thinking.elapsed", { seconds: elapsed.toFixed(1) })}</span>}
       </DisclosureRow>
       {open && text.trim() && (
         <div className="mt-0.5 border-l-2 border-border-soft pl-3 text-[12.5px] italic opacity-80">

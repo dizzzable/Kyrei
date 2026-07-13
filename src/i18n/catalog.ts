@@ -1,93 +1,35 @@
-/**
- * i18n каталог (Wave 0.3). ru — по умолчанию, en — переключаемый. Строки
- * выносятся сюда по мере касания компонентов (не мигрируем всё разом).
- */
+import { enChat } from "./locales/en/chat";
+import { enCommon } from "./locales/en/common";
+import { enSettings } from "./locales/en/settings";
+import { enShell } from "./locales/en/shell";
+import { ruChat } from "./locales/ru/chat";
+import { ruCommon } from "./locales/ru/common";
+import { ruSettings } from "./locales/ru/settings";
+import { ruShell } from "./locales/ru/shell";
+import type { LanguageOption, LocaleFor, MessageCatalog } from "./types";
 
-export type Lang = "ru" | "en";
+export const enCatalog = {
+  ...enCommon,
+  ...enShell,
+  ...enChat,
+  ...enSettings,
+} as const satisfies MessageCatalog;
 
-export interface Dict {
-  common: {
-    cancel: string;
-    save: string;
-    delete: string;
-    close: string;
-    search: string;
-    settings: string;
-    newChat: string;
-  };
-  composer: {
-    placeholder: string;
-    send: string;
-    stop: string;
-    attach: string;
-  };
-  settings: {
-    title: string;
-    appearance: string;
-    theme: string;
-    language: string;
-    exportConfig: string;
-    importConfig: string;
-    reset: string;
-  };
-}
+export const ruCatalog = {
+  ...ruCommon,
+  ...ruShell,
+  ...ruChat,
+  ...ruSettings,
+} as const satisfies LocaleFor<typeof enCatalog>;
 
-const ru: Dict = {
-  common: {
-    cancel: "Отмена",
-    save: "Сохранить",
-    delete: "Удалить",
-    close: "Закрыть",
-    search: "Поиск",
-    settings: "Настройки",
-    newChat: "Новый диалог",
-  },
-  composer: {
-    placeholder: "Напишите сообщение…",
-    send: "Отправить",
-    stop: "Остановить",
-    attach: "Прикрепить контекст",
-  },
-  settings: {
-    title: "Настройки",
-    appearance: "Оформление",
-    theme: "Тема",
-    language: "Язык",
-    exportConfig: "Экспорт конфига",
-    importConfig: "Импорт конфига",
-    reset: "Сбросить",
-  },
-};
+export const CATALOG = {
+  en: enCatalog,
+  ru: ruCatalog,
+} as const;
 
-const en: Dict = {
-  common: {
-    cancel: "Cancel",
-    save: "Save",
-    delete: "Delete",
-    close: "Close",
-    search: "Search",
-    settings: "Settings",
-    newChat: "New chat",
-  },
-  composer: {
-    placeholder: "Type a message…",
-    send: "Send",
-    stop: "Stop",
-    attach: "Attach context",
-  },
-  settings: {
-    title: "Settings",
-    appearance: "Appearance",
-    theme: "Theme",
-    language: "Language",
-    exportConfig: "Export config",
-    importConfig: "Import config",
-    reset: "Reset",
-  },
-};
+export type TranslationKey = Extract<keyof typeof enCatalog, string>;
 
-export const CATALOG: Record<Lang, Dict> = { ru, en };
-export const LANGUAGES: { id: Lang; label: string }[] = [
-  { id: "ru", label: "Русский" },
+export const LANGUAGES = [
   { id: "en", label: "English" },
-];
+  { id: "ru", label: "Русский" },
+] as const satisfies readonly LanguageOption[];

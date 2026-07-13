@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
+import type { TranslationKey } from "@/i18n";
 
 export const THEMES = [
-  { id: "dark", label: "Тёмная" },
-  { id: "light", label: "Светлая" },
-  { id: "midnight", label: "Полночь" },
-  { id: "ember", label: "Ember" },
-  { id: "mono", label: "Моно" },
-  { id: "cyberpunk", label: "Cyberpunk" },
-  { id: "slate", label: "Slate" },
-] as const;
+  { id: "dark", labelKey: "settings.theme.dark" },
+  { id: "light", labelKey: "settings.theme.light" },
+  { id: "midnight", labelKey: "settings.theme.midnight" },
+  { id: "ember", labelKey: "settings.theme.ember" },
+  { id: "mono", labelKey: "settings.theme.mono" },
+  { id: "cyberpunk", labelKey: "settings.theme.cyberpunk" },
+  { id: "slate", labelKey: "settings.theme.slate" },
+] as const satisfies readonly { id: string; labelKey: TranslationKey }[];
 
 export type ThemeId = (typeof THEMES)[number]["id"];
 

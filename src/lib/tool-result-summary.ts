@@ -2,6 +2,7 @@
 // mode still gets the raw JSON section.
 
 import { capitalize, normalize } from '@/lib/text'
+import type { ChatTranslator } from '@/lib/slash-commands'
 
 const WRAPPER_KEYS = ['data', 'result', 'output', 'response', 'payload'] as const
 
@@ -60,7 +61,8 @@ const titleCase = (k: string) =>
     .map(capitalize)
     .join(' ')
 
-const pluralize = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
+const countLabel = (t: ChatTranslator, kind: 'items' | 'fields', count: number) =>
+  t(`chat.tool.result.${kind}`, { count })
 
 function clipInline(value: string, max = 180): string {
   const c = value.replace(/\s+/g, ' ').trim()
@@ -120,9 +122,9 @@ function summarizeScalar(v: unknown): string {
   return ''
 }
 
-function summarizeRecordInline(record: Json, depth: number): string {
+function summarizeRecordInline(record: Json, depth: number, t: ChatTranslator): string {
   if (depth > 3) {
-    return pluralize(Object.keys(record).length, 'field')
+    return countLabel(t, 'fields', Object.keys(record).length)
   }
 
   const title = firstString(record, ['title', 'name', 'path', 'file', 'filepath', 'url', 'href', 'link', 'id'])
@@ -151,10 +153,10 @@ function summarizeRecordInline(record: Json, depth: number): string {
     .filter(Boolean)
     .slice(0, 2)
 
-  return pairs.length ? pairs.join(' · ') : pluralize(Object.keys(record).length, 'field')
+  return pairs.length ? pairs.join(' · ') : countLabel(t, 'fields', Object.keys(record).length)
 }
 
-function summarizeListItem(item: unknown, depth: number): string {
+function summarizeListItem(item: unknown, depth: number, t: ChatTranslator): string {
   const v = norm(item)
 
   if (typeof v === 'string') {
@@ -170,17 +172,17 @@ function summarizeListItem(item: unknown, depth: number): string {
   }
 
   if (Array.isArray(v)) {
-    return pluralize(v.length, 'item')
+    return countLabel(t, 'items', v.length)
   }
 
   if (isRecord(v)) {
-    return summarizeRecordInline(v, depth + 1)
+    return summarizeRecordInline(v, depth + 1, t)
   }
 
   return clipInline(String(v))
 }
 
-function formatFieldValue(value: unknown, depth: number): string {
+function formatFieldValue(value: unknown, depth: number, t: ChatTranslator): string {
   const v = norm(value)
   const scalar = summarizeScalar(v)
 
@@ -203,13 +205,13 @@ function formatFieldValue(value: unknown, depth: number): string {
       return clipInline(scalars.join(', '))
     }
 
-    const first = summarizeListItem(v[0], depth + 1)
+    const first = summarizeListItem(v[0], depth + 1, t)
 
-    return first ? `${pluralize(v.length, 'item')} (${first})` : pluralize(v.length, 'item')
+    return first ? `${countLabel(t, 'items', v.length)} (${first})` : countLabel(t, 'items', v.length)
   }
 
   if (isRecord(v)) {
-    return summarizeRecordInline(v, depth + 1)
+    return summarizeRecordInline(v, depth + 1, t)
   }
 
   return clipInline(String(v))
@@ -217,7 +219,7 @@ function formatFieldValue(value: unknown, depth: number): string {
 
 // "Returned N items" / "0 items" / "Returned an empty object" are all
 // noise — better to render nothing and let the title carry the signal.
-function formatArraySummary(value: unknown[], depth: number): string {
+function formatArraySummary(value: unknown[], depth: number, t: ChatTranslator): string {
   if (!value.length) {
     return ''
   }
@@ -226,7 +228,7 @@ function formatArraySummary(value: unknown[], depth: number): string {
 
   const lines = value
     .slice(0, max)
-    .map(item => summarizeListItem(item, depth + 1))
+    .map(item => summarizeListItem(item, depth + 1, t))
     .filter(Boolean)
     .map(l => `- ${l}`)
 
@@ -236,13 +238,13 @@ function formatArraySummary(value: unknown[], depth: number): string {
 
   if (value.length > max) {
     const remaining = value.length - max
-    lines.push(`- … ${remaining} more ${remaining === 1 ? 'item' : 'items'}`)
+    lines.push(`- ${t('chat.tool.result.moreItems', { count: remaining })}`)
   }
 
   return lines.join('\n')
 }
 
-function formatRecordSummary(record: Json, depth: number): string {
+function formatRecordSummary(record: Json, depth: number, t: ChatTranslator): string {
   const keys = Object.keys(record)
 
   if (!keys.length) {
@@ -263,7 +265,7 @@ function formatRecordSummary(record: Json, depth: number): string {
   const lines: string[] = []
 
   for (const k of candidates) {
-    const v = formatFieldValue(record[k], depth + 1)
+    const v = formatFieldValue(record[k], depth + 1, t)
 
     if (!v) {
       continue
@@ -282,13 +284,13 @@ function formatRecordSummary(record: Json, depth: number): string {
 
   if (candidates.length > lines.length) {
     const remaining = candidates.length - lines.length
-    lines.push(`- … ${remaining} more ${remaining === 1 ? 'field' : 'fields'}`)
+    lines.push(`- ${t('chat.tool.result.moreFields', { count: remaining })}`)
   }
 
   return lines.join('\n')
 }
 
-function formatSummaryValue(value: unknown, depth: number): string {
+function formatSummaryValue(value: unknown, depth: number, t: ChatTranslator): string {
   if (depth > 4) {
     return ''
   }
@@ -308,11 +310,11 @@ function formatSummaryValue(value: unknown, depth: number): string {
   }
 
   if (Array.isArray(v)) {
-    return formatArraySummary(v, depth + 1)
+    return formatArraySummary(v, depth + 1, t)
   }
 
   if (isRecord(v)) {
-    return formatRecordSummary(v, depth + 1)
+    return formatRecordSummary(v, depth + 1, t)
   }
 
   return clipInline(String(v))
@@ -460,8 +462,8 @@ function findNestedError(value: unknown, depth: number, seen: Set<unknown>): str
   return ''
 }
 
-export function formatToolResultSummary(value: unknown): string {
-  return formatSummaryValue(unwrapPayload(value), 0) || formatSummaryValue(value, 0)
+export function formatToolResultSummary(value: unknown, t: ChatTranslator): string {
+  return formatSummaryValue(unwrapPayload(value), 0, t) || formatSummaryValue(value, 0, t)
 }
 
 export function extractToolErrorMessage(value: unknown): string {

@@ -19,7 +19,7 @@ export interface ModelParams {
   reasoning?: boolean;
 }
 
-const launchParams = new URLSearchParams(location.search);
+const launchParams = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
 
 function resolveBase(): string {
   const port = launchParams.get("port") || "8765";
@@ -29,13 +29,58 @@ function resolveBase(): string {
 const BASE = resolveBase();
 const GATEWAY_TOKEN = launchParams.get("gatewayToken") || "";
 
+export type GatewayErrorCode = "capability_unavailable" | "request_failed";
+
+export class GatewayRequestError extends Error {
+  readonly code: GatewayErrorCode;
+  readonly status?: number;
+  readonly detail?: string;
+  readonly serverCode?: string;
+  readonly serverArgs?: Readonly<Record<string, string | number | boolean>>;
+
+  constructor(code: GatewayErrorCode, options: {
+    status?: number;
+    detail?: string;
+    serverCode?: string;
+    serverArgs?: Readonly<Record<string, string | number | boolean>>;
+  } = {}) {
+    super(options.detail || code);
+    this.name = "GatewayRequestError";
+    this.code = code;
+    this.status = options.status;
+    this.detail = options.detail;
+    this.serverCode = options.serverCode;
+    this.serverArgs = options.serverArgs;
+  }
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!GATEWAY_TOKEN) throw new Error("Kyrei gateway capability is unavailable. Restart the desktop app.");
+  if (!GATEWAY_TOKEN) throw new GatewayRequestError("capability_unavailable");
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", "X-Kyrei-Gateway-Token": GATEWAY_TOKEN, ...(init?.headers || {}) },
   });
-  if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => res.statusText)}`);
+  if (!res.ok) {
+    const raw = await res.text().catch(() => res.statusText);
+    let detail = raw;
+    let serverCode: string | undefined;
+    let serverArgs: Readonly<Record<string, string | number | boolean>> | undefined;
+    try {
+      const body = JSON.parse(raw) as { code?: unknown; error?: unknown; detail?: unknown; args?: unknown };
+      serverCode = typeof body.code === "string" ? body.code : undefined;
+      detail = typeof body.detail === "string"
+        ? body.detail
+        : !serverCode && typeof body.error === "string"
+          ? body.error
+          : "";
+      serverArgs = body.args && typeof body.args === "object"
+        ? body.args as Record<string, string | number | boolean>
+        : undefined;
+    } catch {
+      // Non-JSON failures remain raw technical detail.
+    }
+    throw new GatewayRequestError("request_failed", { status: res.status, detail, serverCode, serverArgs });
+  }
   return res.json() as Promise<T>;
 }
 
@@ -105,7 +150,7 @@ export const gateway = {
 
   /** Subscribe to a session's event stream. Returns an unsubscribe function. */
   subscribe(session: string, onEvent: (event: GatewayEvent) => void): () => void {
-    if (!GATEWAY_TOKEN) throw new Error("Kyrei gateway capability is unavailable. Restart the desktop app.");
+    if (!GATEWAY_TOKEN) throw new GatewayRequestError("capability_unavailable");
     const url = new URL(`${BASE}/api/events`);
     url.searchParams.set("session", session);
     // EventSource cannot send custom headers, so its scoped stream uses the

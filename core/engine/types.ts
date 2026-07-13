@@ -43,7 +43,7 @@ export type KyreiEvent =
       payload: { approval_id: string; tool_call_id: string; name: string; args: unknown; reason: string };
     }
   | { type: "message.complete"; payload: { text: string; status: TurnStatus; usage?: Usage } }
-  | { type: "error"; payload: { message: string } };
+  | { type: "error"; payload: { code?: string; message?: string } };
 
 /** Structured message part for durable persistence (compatible with v1). */
 export type MessagePart =

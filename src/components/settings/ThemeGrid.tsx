@@ -1,6 +1,7 @@
 import { Check } from "lucide-react";
 import { applyTheme, THEMES, useThemeId, type ThemeId } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 // A tiny swatch preview per theme so cards read at a glance without applying.
 const PREVIEW: Record<ThemeId, { bg: string; fg: string; accent: string }> = {
@@ -15,16 +16,17 @@ const PREVIEW: Record<ThemeId, { bg: string; fg: string; accent: string }> = {
 
 export function ThemeGrid() {
   const current = useThemeId();
+  const { t } = useI18n();
   return (
     <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-      {THEMES.map((t) => {
-        const p = PREVIEW[t.id];
-        const active = current === t.id;
+      {THEMES.map((themeOption) => {
+        const p = PREVIEW[themeOption.id];
+        const active = current === themeOption.id;
         return (
           <button
-            key={t.id}
+            key={themeOption.id}
             type="button"
-            onClick={() => applyTheme(t.id)}
+            onClick={() => applyTheme(themeOption.id)}
             aria-pressed={active}
             className={cn(
               "group relative overflow-hidden rounded-xl border p-0 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/45",
@@ -44,7 +46,7 @@ export function ThemeGrid() {
               )}
             </div>
             <div className="flex items-center justify-between px-3 py-2">
-              <span className="text-[12px] font-medium text-foreground">{t.label}</span>
+              <span className="text-[12px] font-medium text-foreground">{t(themeOption.labelKey)}</span>
             </div>
           </button>
         );

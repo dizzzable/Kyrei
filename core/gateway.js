@@ -60,9 +60,9 @@ function readBody(req) {
 
 function providerCredentialScope(provider) {
   try {
-    return `${provider.protocol}:${new URL(provider.baseURL).origin}`;
+    return `${provider.protocol}:${new URL(provider.baseURL).origin}:${provider.requiresApiKey ? "explicit" : "none"}`;
   } catch {
-    return `${provider.protocol}:invalid`;
+    return `${provider.protocol}:invalid:${provider.requiresApiKey ? "explicit" : "none"}`;
   }
 }
 
@@ -185,14 +185,14 @@ export async function startGateway({
     if (!session) return;
 
     store.appendMessage(sessionId, { role: "user", content: text });
-    if (!session.title || session.title === "Новый диалог") {
+    if (!session.title) {
       store.upsertSession({ id: sessionId, title: text.slice(0, 48) + (text.length > 48 ? "…" : ""), updatedAt: new Date().toISOString() });
       emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
     }
 
     const activeProvider = getActiveProvider(config);
     if (!activeProvider) {
-      emitTo(sessionId, { type: "error", payload: { message: "No provider is configured." } });
+      emitTo(sessionId, { type: "error", payload: { code: "provider_not_configured" } });
       emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "error" } });
       return;
     }
@@ -204,8 +204,8 @@ export async function startGateway({
       providerId: activeProvider.id,
       providerHeaders: activeProvider.headers,
       requiresApiKey: activeProvider.requiresApiKey,
-      apiKey: secrets.providers[activeProvider.id]?.apiKey ?? "",
-      providerCredentials: secrets.providers[activeProvider.id] ?? {},
+      apiKey: activeProvider.requiresApiKey ? secrets.providers[activeProvider.id]?.apiKey ?? "" : "",
+      providerCredentials: activeProvider.requiresApiKey ? secrets.providers[activeProvider.id] ?? {} : {},
       model: config.activeModelId,
       workspace: config.workspace,
       auditLogPath: join(dataDir, "audit.jsonl"),
@@ -366,15 +366,21 @@ export async function startGateway({
         const providerId = decodeURIComponent(providerMatch[1]);
         const secretPath = Boolean(providerMatch[2]);
         const existing = config.providers.find((provider) => provider.id === providerId);
-        if (!existing) return sendJson(res, 404, { error: "provider not found" });
+        if (!existing) return sendJson(res, 404, { code: "provider_not_found", error: "provider_not_found" });
         if (secretPath) {
           if (req.method === "PUT") {
             const body = await readBody(req);
             const input = body.credentials && typeof body.credentials === "object" ? body.credentials : body;
             const credentials = normalizeProviderSecret(input);
-            if (!Object.keys(credentials).length) return sendJson(res, 400, { error: "provider credentials required" });
+            if (!Object.keys(credentials).length) {
+              return sendJson(res, 400, { code: "provider_credentials_required", error: "provider_credentials_required" });
+            }
             if (!hasStoredProviderCredentials(existing, credentials)) {
-              return sendJson(res, 400, { error: `incomplete credentials for ${existing.protocol}` });
+              return sendJson(res, 400, {
+                code: "provider_credentials_incomplete",
+                error: "provider_credentials_incomplete",
+                args: { protocol: existing.protocol },
+              });
             }
             secrets.providers[providerId] = credentials;
             await saveConfig();
@@ -401,7 +407,7 @@ export async function startGateway({
           try {
             config = removeProvider(config, providerId);
           } catch (error) {
-            return sendJson(res, 409, { error: error.message });
+            return sendJson(res, 409, { code: error.code || "provider_operation_failed", error: error.code || "provider_operation_failed" });
           }
           delete secrets.providers[providerId];
           await saveConfig();
@@ -423,7 +429,7 @@ export async function startGateway({
         if (req.method === "POST") {
           const id = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const now = new Date().toISOString();
-          store.upsertSession({ id, title: "Новый диалог", createdAt: now, updatedAt: now });
+          store.upsertSession({ id, title: "", createdAt: now, updatedAt: now });
           return sendJson(res, 200, { id });
         }
       }
@@ -583,7 +589,9 @@ export async function startGateway({
 
       sendJson(res, 404, { error: `Not found: ${req.method} ${path}` });
     } catch (error) {
-      sendJson(res, 500, { error: error.message });
+      sendJson(res, 500, error?.code
+        ? { code: error.code, error: error.code }
+        : { error: error.message });
     }
   });
 

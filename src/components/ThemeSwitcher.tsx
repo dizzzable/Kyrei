@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Palette } from "lucide-react";
 import { applyTheme, getTheme, THEMES, type ThemeId } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 export function ThemeSwitcher() {
+  const { t } = useI18n();
   const [theme, setTheme] = useState<ThemeId>(getTheme());
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -24,21 +26,21 @@ export function ThemeSwitcher() {
         className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-secondary transition-colors hover:bg-white/[0.04]"
       >
         <Palette size={16} />
-        Тема: {current?.label}
+        {t("settings.theme.switcher", { name: current ? t(current.labelKey) : "" })}
       </button>
       {open && (
         <div className="absolute bottom-full left-0 mb-1 w-full overflow-hidden rounded-lg border border-border bg-elevated py-1 shadow-lg">
-          {THEMES.map(t => (
+          {THEMES.map((themeOption) => (
             <button
-              key={t.id}
-              onClick={() => pick(t.id)}
+              key={themeOption.id}
+              onClick={() => pick(themeOption.id)}
               className={cn(
                 "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] transition-colors hover:bg-white/[0.05]",
-                t.id === theme ? "text-foreground" : "text-secondary",
+                themeOption.id === theme ? "text-foreground" : "text-secondary",
               )}
             >
-              <span className="flex-1">{t.label}</span>
-              {t.id === theme && <Check size={14} className="text-primary" />}
+              <span className="flex-1">{t(themeOption.labelKey)}</span>
+              {themeOption.id === theme && <Check size={14} className="text-primary" />}
             </button>
           ))}
         </div>

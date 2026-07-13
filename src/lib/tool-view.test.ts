@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { buildToolView } from "@/lib/tool-view";
 import type { ToolPart } from "@/lib/types";
+import { createTranslator } from "@/i18n/translate";
+import { enChat } from "@/i18n/locales/en/chat";
+import { ruChat } from "@/i18n/locales/ru/chat";
+
+const en = createTranslator(enChat, "en");
+const ru = createTranslator(ruChat, "ru");
 
 const tool = (p: Partial<ToolPart>): ToolPart => ({
   type: "tool",
@@ -12,8 +18,8 @@ const tool = (p: Partial<ToolPart>): ToolPart => ({
 
 describe("buildToolView", () => {
   it("maps a known tool to its label/icon/tone and subtitle from path arg", () => {
-    const v = buildToolView(tool({ name: "read_file", args: { path: "src/App.tsx" }, result: "..." }));
-    expect(v.title).toBe("Чтение файла");
+    const v = buildToolView(tool({ name: "read_file", args: { path: "src/App.tsx" }, result: "..." }), en);
+    expect(v.title).toBe("Read file");
     expect(v.icon).toBe("file-text");
     expect(v.tone).toBe("file");
     expect(v.subtitle).toBe("src/App.tsx");
@@ -21,12 +27,12 @@ describe("buildToolView", () => {
   });
 
   it("marks running/error status", () => {
-    expect(buildToolView(tool({ running: true })).status).toBe("running");
-    expect(buildToolView(tool({ error: "boom" })).status).toBe("error");
+    expect(buildToolView(tool({ running: true }), en).status).toBe("running");
+    expect(buildToolView(tool({ error: "boom" }), en).status).toBe("error");
   });
 
   it("surfaces the error text as detail on failure", () => {
-    const v = buildToolView(tool({ name: "run_command", args: { command: "ls" }, error: "exit 1" }));
+    const v = buildToolView(tool({ name: "run_command", args: { command: "ls" }, error: "exit 1" }), en);
     expect(v.status).toBe("error");
     expect(v.detail).toBe("exit 1");
     expect(v.subtitle).toBe("ls");
@@ -35,19 +41,39 @@ describe("buildToolView", () => {
   it("computes diff stats and flags file edits", () => {
     const v = buildToolView(
       tool({ name: "write_file", args: { path: "a.ts" }, inlineDiff: " keep\n-old\n+new\n+extra" }),
+      en,
     );
     expect(v.isFileEdit).toBe(true);
     expect(v.diffStats).toEqual({ added: 2, removed: 1 });
   });
 
   it("shows a duration label only when finished", () => {
-    expect(buildToolView(tool({ durationS: 1.53, result: "x" })).durationLabel).toBe("1.5s");
-    expect(buildToolView(tool({ durationS: 1.5, running: true })).durationLabel).toBe("");
+    expect(buildToolView(tool({ durationS: 1.53, result: "x" }), en).durationLabel).toBe("1.5s");
+    expect(buildToolView(tool({ durationS: 1.5, running: true }), en).durationLabel).toBe("");
   });
 
   it("falls back to a prettified label for unknown tools", () => {
-    const v = buildToolView(tool({ name: "custom_thing", result: "ok" }));
-    expect(v.title).toBe("Custom Thing");
+    const v = buildToolView(tool({ name: "custom_thing", result: "ok" }), ru);
+    expect(v.title).toBe("Инструмент: Custom Thing");
     expect(v.icon).toBe("wrench");
+  });
+
+  it("maps isolated web and GBrain tools without exposing a browser surface", () => {
+    expect(buildToolView(tool({ name: "web_search", args: { query: "Kyrei" } }), en)).toMatchObject({
+      title: "Web search",
+      icon: "globe-search",
+      tone: "web",
+      subtitle: "Kyrei",
+    });
+    expect(buildToolView(tool({ name: "web_fetch", args: { url: "https://example.com" } }), en)).toMatchObject({
+      title: "Fetch web page",
+      icon: "globe",
+      tone: "web",
+    });
+    expect(buildToolView(tool({ name: "brain_search", args: { query: "project" } }), en)).toMatchObject({
+      title: "Search GBrain memory",
+      icon: "brain",
+      tone: "agent",
+    });
   });
 });

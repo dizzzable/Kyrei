@@ -13,8 +13,15 @@
  *   - `unavailable` → a known command with no UI surface; shows a reason
  */
 
+import type { Translator } from "@/i18n/types";
+import type { enChat } from "@/i18n/locales/en/chat";
+
+export type ChatTranslationKey = Extract<keyof typeof enChat, string>;
+export type ChatTranslator = Translator<ChatTranslationKey>;
+
 /** Local client action a command resolves to (one handler per id). */
 export type SlashActionId = "new" | "help" | "theme" | "settings";
+export type SlashCommandId = SlashActionId | SlashPickerId;
 
 /** A command fulfilled by opening an overlay picker. */
 export type SlashPickerId = "model";
@@ -30,10 +37,13 @@ export type SlashCommandSurface =
   | { kind: "unavailable"; reason: SlashUnavailableReason };
 
 export interface SlashCommandSpec {
+  /** Stable locale-neutral id used by UI registries. */
+  id: SlashCommandId;
   /** Canonical command, leading slash included (e.g. `/new`). */
   name: string;
-  /** Popover/help label; omitted for unavailable commands (never surfaced). */
-  description?: string;
+  /** Catalog key resolved only at the rendering edge. */
+  descriptionKey: ChatTranslationKey;
+  argKey?: ChatTranslationKey;
   aliases?: string[];
   surface: SlashCommandSurface;
   /**
@@ -57,40 +67,62 @@ const picker = (id: SlashPickerId): SlashCommandSurface => ({ kind: "picker", pi
  * THE source of truth for Kyrei slash commands. Everything below — execution
  * gating, popover suggestions, descriptions, and dispatch — derives from this.
  */
-const COMMAND_SPECS: readonly SlashCommandSpec[] = [
-  { name: "/new", description: "Start a new chat", aliases: ["/clear", "/reset"], surface: action("new") },
-  { name: "/help", description: "Show slash commands", aliases: ["/commands"], surface: action("help") },
-  { name: "/model", description: "Switch the model for this session", surface: picker("model"), hidden: true },
+export const SLASH_COMMAND_REGISTRY: readonly SlashCommandSpec[] = [
+  { id: "new", name: "/new", descriptionKey: "chat.slash.new.description", aliases: ["/clear", "/reset"], surface: action("new") },
+  { id: "help", name: "/help", descriptionKey: "chat.slash.help.description", aliases: ["/commands"], surface: action("help") },
+  { id: "model", name: "/model", descriptionKey: "chat.slash.model.description", argKey: "chat.slash.model.arg", surface: picker("model"), hidden: true },
   {
+    id: "theme",
     name: "/theme",
-    description: "Switch theme or cycle to the next skin",
+    descriptionKey: "chat.slash.theme.description",
+    argKey: "chat.slash.theme.arg",
     aliases: ["/skin"],
     surface: action("theme"),
     args: true,
   },
-  { name: "/settings", description: "Open Kyrei settings", surface: action("settings") },
+  { id: "settings", name: "/settings", descriptionKey: "chat.slash.settings.description", surface: action("settings") },
 ];
 
-const SPEC_BY_NAME = new Map<string, SlashCommandSpec>(COMMAND_SPECS.map((spec) => [spec.name, spec]));
+const SPEC_BY_NAME = new Map<string, SlashCommandSpec>(SLASH_COMMAND_REGISTRY.map((spec) => [spec.name, spec]));
 
 const ALIAS_TO_CANONICAL = new Map<string, string>(
-  COMMAND_SPECS.flatMap((spec) => (spec.aliases ?? []).map((alias) => [alias, spec.name] as const)),
+  SLASH_COMMAND_REGISTRY.flatMap((spec) => (spec.aliases ?? []).map((alias) => [alias, spec.name] as const)),
 );
 
-const UNAVAILABLE_MESSAGE: Record<SlashUnavailableReason, (command: string) => string> = {
-  advanced: (command) => `${command} is not available from the slash palette.`,
-  settings: (command) => `${command} is managed from Kyrei settings.`,
-};
-
-const PICKER_UNAVAILABLE_MESSAGE: Record<SlashPickerId, (command: string) => string> = {
-  model: (command) => `${command} uses the model picker instead of a slash command.`,
-};
+export interface LocalizedSlashCommand {
+  id: SlashCommandId;
+  /** Bare command name retained for the existing App onCommand contract. */
+  name: string;
+  /** Canonical command including the leading slash. */
+  command: string;
+  desc: string;
+  arg?: string;
+}
 
 function normalizeCommand(command: string): string {
   const trimmed = command.trim();
   const base = (trimmed.startsWith("/") ? trimmed : `/${trimmed}`).split(/\s+/, 1)[0]?.toLowerCase() || "";
 
   return base;
+}
+
+/** Parse user input while retaining the legacy bare-name dispatch contract. */
+export function parseSlash(input: string): { name: string; arg: string } {
+  const match = input.replace(/^\/+/, "").match(/^(\S+)\s*([\s\S]*)$/);
+  return match ? { name: match[1].toLowerCase(), arg: match[2].trim() } : { name: "", arg: "" };
+}
+
+/** Resolve the visible slash palette from the locale-neutral source registry. */
+export function getSlashCommands(t: ChatTranslator): LocalizedSlashCommand[] {
+  return SLASH_COMMAND_REGISTRY
+    .filter((spec) => spec.surface.kind !== "unavailable" && !spec.hidden)
+    .map((spec) => ({
+      id: spec.id,
+      name: spec.name.slice(1),
+      command: spec.name,
+      desc: t(spec.descriptionKey),
+      ...(spec.argKey ? { arg: t(spec.argKey) } : {}),
+    }));
 }
 
 /** Resolve an alias to its canonical name (identity for canonical/unknown). */
@@ -175,7 +207,7 @@ export function isModelPickerCommand(command: string): boolean {
 }
 
 /** A human-readable reason a known command can't be executed inline, or null. */
-export function slashUnavailableMessage(command: string): string | null {
+export function slashUnavailableMessage(command: string, t: ChatTranslator): string | null {
   const canonical = canonicalSlashCommand(command);
   const surface = SPEC_BY_NAME.get(canonical)?.surface;
 
@@ -184,19 +216,20 @@ export function slashUnavailableMessage(command: string): string | null {
   }
 
   if (surface.kind === "unavailable") {
-    return UNAVAILABLE_MESSAGE[surface.reason](canonical);
+    return t(`chat.slash.unavailable.${surface.reason}`, { command: canonical });
   }
 
   if (surface.kind === "picker") {
-    return PICKER_UNAVAILABLE_MESSAGE[surface.picker](canonical);
+    return t("chat.slash.unavailable.model", { command: canonical });
   }
 
   return null;
 }
 
 /** Description for a command (or its alias), falling back to `fallback`. */
-export function slashDescription(command: string, fallback = ""): string {
-  return SPEC_BY_NAME.get(canonicalSlashCommand(command))?.description || fallback;
+export function slashDescription(command: string, t: ChatTranslator, fallback = ""): string {
+  const key = SPEC_BY_NAME.get(canonicalSlashCommand(command))?.descriptionKey;
+  return key ? t(key) : fallback;
 }
 
 /**

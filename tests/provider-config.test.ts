@@ -12,6 +12,14 @@ import {
 } from "../core/provider-config.js";
 
 describe("provider registry config", () => {
+  it("uses stable error codes instead of localized provider copy", () => {
+    const single = normalizeGatewayConfig({});
+    expect(() => removeProvider(single, single.providers[0].id)).toThrow("provider_final_profile");
+    const { config: multiple } = upsertProvider(single, { name: "Second", models: [{ id: "model" }] });
+    expect(() => removeProvider(multiple, "missing")).toThrow("provider_not_found");
+    expect(() => selectProviderModel(single, "missing", "model")).toThrow("provider_unavailable");
+  });
+
   it("migrates a legacy single provider and keeps its selected model", () => {
     const config = normalizeGatewayConfig({ provider: "http://127.0.0.1:11434/v1", apiKey: "legacy", model: "llama3" });
     expect(config.version).toBe(2);

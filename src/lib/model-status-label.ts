@@ -1,22 +1,26 @@
 import { normalize } from "@/lib/text";
+import type { ChatTranslator, ChatTranslationKey } from "@/lib/slash-commands";
 
-const REASONING_LABELS: Record<string, string> = {
-  none: "Off",
-  minimal: "Min",
-  low: "Low",
-  medium: "Med",
-  high: "High",
-  xhigh: "Max",
+const REASONING_LABELS: Record<string, ChatTranslationKey> = {
+  none: "chat.model.effort.off",
+  off: "chat.model.effort.off",
+  minimal: "chat.model.effort.minimal",
+  low: "chat.model.effort.low",
+  medium: "chat.model.effort.medium",
+  high: "chat.model.effort.high",
+  xhigh: "chat.model.effort.max",
+  max: "chat.model.effort.max",
 };
 
-export function reasoningEffortLabel(effort: string): string {
+export function reasoningEffortLabel(effort: string, t: ChatTranslator): string {
   const key = normalize(effort);
 
   if (!key) {
     return "";
   }
 
-  return REASONING_LABELS[key] ?? effort;
+  const labelKey = REASONING_LABELS[key];
+  return labelKey ? t(labelKey) : effort;
 }
 
 /** Which model/provider a picker should mark "current". With a live session the
@@ -46,11 +50,11 @@ export function modelBaseId(model: string): string {
 // Trailing model-id variants that should render as a grayed tag beside the
 // name (e.g. "Opus 4.8" + "Fast") rather than collapsing two distinct ids to
 // the same display name.
-const VARIANT_TAGS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/-fast$/i, "Fast"],
-  [/-thinking$/i, "Thinking"],
-  [/-preview$/i, "Preview"],
-  [/-latest$/i, "Latest"],
+const VARIANT_TAGS: ReadonlyArray<readonly [RegExp, ChatTranslationKey]> = [
+  [/-fast$/i, "chat.model.variant.fast"],
+  [/-thinking$/i, "chat.model.variant.thinking"],
+  [/-preview$/i, "chat.model.variant.preview"],
+  [/-latest$/i, "chat.model.variant.latest"],
 ];
 
 const titleCase = (text: string): string => text.replace(/\b\w/g, (char) => char.toUpperCase()).trim();
@@ -73,13 +77,13 @@ function prettifyBase(base: string): string {
 
 /** Split a model id into a clean display name plus an optional grayed variant
  *  tag, so distinct ids (e.g. `…-4.8` vs `…-4.8-fast`) don't collapse. */
-export function modelDisplayParts(model: string): { name: string; tag: string } {
+export function modelDisplayParts(model: string, t: ChatTranslator): { name: string; tag: string } {
   let base = modelBaseId(model);
   let tag = "";
 
-  for (const [pattern, label] of VARIANT_TAGS) {
+  for (const [pattern, labelKey] of VARIANT_TAGS) {
     if (pattern.test(base)) {
-      tag = label;
+      tag = t(labelKey);
       base = base.replace(pattern, "");
 
       break;
@@ -89,20 +93,21 @@ export function modelDisplayParts(model: string): { name: string; tag: string } 
   // Drop a trailing date-pin (`…-20251101`) — snapshot noise, not a name.
   base = base.replace(/-\d{8}$/, "");
 
-  return { name: prettifyBase(base) || model.trim() || "No model", tag };
+  return { name: prettifyBase(base) || model.trim() || t("chat.model.none"), tag };
 }
 
 /** Friendly one-line model name for menus and the status bar. */
-export function displayModelName(model: string): string {
-  return modelDisplayParts(model).name;
+export function displayModelName(model: string, t: ChatTranslator): string {
+  return modelDisplayParts(model, t).name;
 }
 
 /** Status bar trigger label — model name plus the live session state (effort/fast). */
 export function formatModelStatusLabel(
   model: string,
+  t: ChatTranslator,
   options?: { fastMode?: boolean; reasoningEffort?: string }
 ): string {
-  const name = displayModelName(model);
+  const name = displayModelName(model, t);
 
   if (!model.trim()) {
     return name;
@@ -113,12 +118,12 @@ export function formatModelStatusLabel(
   // Fast is shown when the speed=fast param is on (options.fastMode) OR the
   // active model is a `…-fast` variant (fast via a separate model id).
   if (options?.fastMode || /-fast$/i.test(modelBaseId(model))) {
-    parts.push("Fast");
+    parts.push(t("chat.model.fast"));
   }
 
   // Always surface the effort (empty = default of medium) so the current
   // reasoning level is visible at a glance, not just when non-default.
-  parts.push(reasoningEffortLabel(options?.reasoningEffort ?? "") || "Med");
+  parts.push(reasoningEffortLabel(options?.reasoningEffort ?? "", t) || t("chat.model.effort.medium"));
 
   return `${name} · ${parts.join(" ")}`;
 }

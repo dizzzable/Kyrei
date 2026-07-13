@@ -1,6 +1,7 @@
 import { Search, X } from "lucide-react";
 import { forwardRef } from "react";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 export const SearchField = forwardRef<
   HTMLInputElement,
@@ -12,6 +13,7 @@ export const SearchField = forwardRef<
     "aria-label"?: string;
   }
 >(function SearchField({ value, onChange, placeholder, className, ...rest }, ref) {
+  const { t } = useI18n();
   return (
     <div className={cn("relative flex items-center", className)}>
       <Search className="pointer-events-none absolute left-2.5 size-3.5 text-muted" aria-hidden />
@@ -27,7 +29,7 @@ export const SearchField = forwardRef<
       {value && (
         <button
           type="button"
-          aria-label="Очистить"
+          aria-label={t("common.clear")}
           onClick={() => onChange("")}
           className="absolute right-1.5 grid size-5 place-items-center rounded text-muted hover:bg-(--ui-row-hover) hover:text-foreground"
         >

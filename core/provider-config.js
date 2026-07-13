@@ -224,6 +224,7 @@ export function publicGatewayConfig(config, secrets) {
   const safeProviders = config.providers.map((provider) => ({
     ...provider,
     hasKey: hasStoredProviderCredentials(provider, secrets.providers?.[provider.id]),
+    hasStoredCredentials: Object.keys(normalizeProviderSecret(secrets.providers?.[provider.id])).length > 0,
   }));
   return {
     provider: active?.baseURL ?? "",
@@ -260,10 +261,18 @@ export function upsertProvider(config, input, forcedId) {
   return { config: normalizeGatewayConfig(next), provider };
 }
 
+export class ProviderConfigError extends Error {
+  constructor(code) {
+    super(code);
+    this.name = "ProviderConfigError";
+    this.code = code;
+  }
+}
+
 /** Select a provider/model; entering a new model id adds it to that provider. */
 export function selectProviderModel(config, providerId, requestedModel) {
   const provider = config.providers.find((item) => item.id === providerId && item.enabled);
-  if (!provider) throw new Error("provider is unavailable");
+  if (!provider) throw new ProviderConfigError("provider_unavailable");
   const modelId = text(requestedModel, provider.models[0]?.id ?? DEFAULT_MODEL);
   const models = provider.models.some((model) => model.id === modelId) ? provider.models : [...provider.models, { id: modelId }];
   const providers = config.providers.map((item) => item.id === provider.id ? { ...item, models } : item);
@@ -271,9 +280,9 @@ export function selectProviderModel(config, providerId, requestedModel) {
 }
 
 export function removeProvider(config, providerId) {
-  if (config.providers.length <= 1) throw new Error("the final provider cannot be removed");
+  if (config.providers.length <= 1) throw new ProviderConfigError("provider_final_profile");
   const providers = config.providers.filter((provider) => provider.id !== providerId);
-  if (providers.length === config.providers.length) throw new Error("provider was not found");
+  if (providers.length === config.providers.length) throw new ProviderConfigError("provider_not_found");
   const nextActive = config.activeProviderId === providerId ? providers.find((provider) => provider.enabled) ?? providers[0] : getActiveProvider({ ...config, providers });
   return {
     ...config,

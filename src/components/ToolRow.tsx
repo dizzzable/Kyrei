@@ -6,6 +6,7 @@ import { DisclosureRow } from "@/components/ui";
 import { ToolIcon } from "./chat/ToolIcon";
 import { DiffView } from "./chat/DiffView";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 function StatusGlyph({ status }: { status: "running" | "success" | "error" }) {
   if (status === "running") return <Loader2 size={13} className="animate-spin text-primary" />;
@@ -14,7 +15,8 @@ function StatusGlyph({ status }: { status: "running" | "success" | "error" }) {
 }
 
 export function ToolRow({ part }: { part: ToolPart }) {
-  const view = buildToolView(part);
+  const { t } = useI18n();
+  const view = buildToolView(part, t);
   const hasDiff = Boolean(view.inlineDiff);
   const expandable = hasDiff || Boolean(view.detail);
   const [open, setOpen] = useState(hasDiff);

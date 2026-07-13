@@ -6,28 +6,34 @@ import {
   reasoningEffortLabel,
   currentPickerSelection,
 } from "@/lib/model-status-label";
+import { createTranslator } from "@/i18n/translate";
+import { enChat } from "@/i18n/locales/en/chat";
+import { ruChat } from "@/i18n/locales/ru/chat";
+
+const en = createTranslator(enChat, "en");
+const ru = createTranslator(ruChat, "ru");
 
 describe("reasoningEffortLabel", () => {
   it("maps known efforts to short labels", () => {
-    expect(reasoningEffortLabel("none")).toBe("Off");
-    expect(reasoningEffortLabel("minimal")).toBe("Min");
-    expect(reasoningEffortLabel("low")).toBe("Low");
-    expect(reasoningEffortLabel("medium")).toBe("Med");
-    expect(reasoningEffortLabel("high")).toBe("High");
-    expect(reasoningEffortLabel("xhigh")).toBe("Max");
+    expect(reasoningEffortLabel("none", en)).toBe("Off");
+    expect(reasoningEffortLabel("minimal", en)).toBe("Min");
+    expect(reasoningEffortLabel("low", en)).toBe("Low");
+    expect(reasoningEffortLabel("medium", en)).toBe("Med");
+    expect(reasoningEffortLabel("high", en)).toBe("High");
+    expect(reasoningEffortLabel("xhigh", en)).toBe("Max");
   });
 
   it("is case-insensitive and trims", () => {
-    expect(reasoningEffortLabel("  HIGH  ")).toBe("High");
+    expect(reasoningEffortLabel("  HIGH  ", en)).toBe("High");
   });
 
   it("returns empty for empty input", () => {
-    expect(reasoningEffortLabel("")).toBe("");
-    expect(reasoningEffortLabel("   ")).toBe("");
+    expect(reasoningEffortLabel("", en)).toBe("");
+    expect(reasoningEffortLabel("   ", en)).toBe("");
   });
 
   it("passes through unknown efforts unchanged", () => {
-    expect(reasoningEffortLabel("turbo")).toBe("turbo");
+    expect(reasoningEffortLabel("turbo", en)).toBe("turbo");
   });
 });
 
@@ -44,71 +50,78 @@ describe("modelBaseId", () => {
 
 describe("modelDisplayParts", () => {
   it("extracts the -fast variant tag", () => {
-    expect(modelDisplayParts("anthropic/claude-opus-4.8-fast")).toEqual({
+    expect(modelDisplayParts("anthropic/claude-opus-4.8-fast", en)).toEqual({
       name: "Opus 4.8",
       tag: "Fast",
     });
   });
 
   it("extracts the -thinking variant tag", () => {
-    expect(modelDisplayParts("claude-sonnet-4-thinking")).toEqual({
+    expect(modelDisplayParts("claude-sonnet-4-thinking", en)).toEqual({
       name: "Sonnet 4",
       tag: "Thinking",
     });
   });
 
   it("prettifies gpt- prefix", () => {
-    expect(modelDisplayParts("openai/gpt-5").name).toBe("GPT-5");
+    expect(modelDisplayParts("openai/gpt-5", en).name).toBe("GPT-5");
   });
 
   it("prettifies claude- prefix", () => {
-    expect(modelDisplayParts("claude-opus-4.8").name).toBe("Opus 4.8");
+    expect(modelDisplayParts("claude-opus-4.8", en).name).toBe("Opus 4.8");
   });
 
   it("prettifies gemini- prefix", () => {
-    expect(modelDisplayParts("gemini-2.5-pro").name).toBe("Gemini 2.5 pro");
+    expect(modelDisplayParts("gemini-2.5-pro", en).name).toBe("Gemini 2.5 pro");
   });
 
   it("drops a trailing date-pin", () => {
-    expect(modelDisplayParts("claude-opus-4-20251101").name).toBe("Opus 4");
+    expect(modelDisplayParts("claude-opus-4-20251101", en).name).toBe("Opus 4");
   });
 
   it("falls back to a placeholder for empty input", () => {
-    expect(modelDisplayParts("")).toEqual({ name: "No model", tag: "" });
+    expect(modelDisplayParts("", en)).toEqual({ name: "No model", tag: "" });
+  });
+
+  it("localizes semantic model state without changing model ids", () => {
+    expect(modelDisplayParts("anthropic/claude-opus-4.8-fast", ru)).toEqual({
+      name: "Opus 4.8",
+      tag: "Быстро",
+    });
   });
 });
 
 describe("formatModelStatusLabel", () => {
   it("combines name and effort", () => {
-    expect(formatModelStatusLabel("openai/gpt-5", { reasoningEffort: "high" })).toBe(
+    expect(formatModelStatusLabel("openai/gpt-5", en, { reasoningEffort: "high" })).toBe(
       "GPT-5 · High"
     );
   });
 
   it("defaults effort to Med when unset", () => {
-    expect(formatModelStatusLabel("openai/gpt-5")).toBe("GPT-5 · Med");
+    expect(formatModelStatusLabel("openai/gpt-5", en)).toBe("GPT-5 · Med");
   });
 
   it("maps xhigh effort to Max", () => {
-    expect(formatModelStatusLabel("openai/gpt-5", { reasoningEffort: "xhigh" })).toBe(
+    expect(formatModelStatusLabel("openai/gpt-5", en, { reasoningEffort: "xhigh" })).toBe(
       "GPT-5 · Max"
     );
   });
 
   it("shows Fast when fastMode is on", () => {
-    expect(formatModelStatusLabel("openai/gpt-5", { fastMode: true })).toBe(
+    expect(formatModelStatusLabel("openai/gpt-5", en, { fastMode: true })).toBe(
       "GPT-5 · Fast Med"
     );
   });
 
   it("shows Fast for a -fast model variant", () => {
-    expect(formatModelStatusLabel("anthropic/claude-opus-4.8-fast")).toBe(
+    expect(formatModelStatusLabel("anthropic/claude-opus-4.8-fast", en)).toBe(
       "Opus 4.8 · Fast Med"
     );
   });
 
   it("returns just the name for empty model", () => {
-    expect(formatModelStatusLabel("")).toBe("No model");
+    expect(formatModelStatusLabel("", en)).toBe("No model");
   });
 });
 

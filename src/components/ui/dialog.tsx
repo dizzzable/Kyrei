@@ -2,6 +2,7 @@ import { Dialog as Primitive } from "radix-ui";
 import { X } from "lucide-react";
 import { forwardRef } from "react";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 export const Dialog = Primitive.Root;
 export const DialogTrigger = Primitive.Trigger;
@@ -11,6 +12,7 @@ export const DialogContent = forwardRef<
   React.ElementRef<typeof Primitive.Content>,
   React.ComponentPropsWithoutRef<typeof Primitive.Content> & { showClose?: boolean }
 >(function DialogContent({ className, children, showClose = true, ...props }, ref) {
+  const { t } = useI18n();
   return (
     <Primitive.Portal>
       <Primitive.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
@@ -27,7 +29,7 @@ export const DialogContent = forwardRef<
         {showClose && (
           <Primitive.Close
             className="absolute right-3 top-3 grid size-6 place-items-center rounded-md text-muted hover:bg-(--ui-row-hover) hover:text-foreground"
-            aria-label="Закрыть"
+            aria-label={t("common.close")}
           >
             <X className="size-4" />
           </Primitive.Close>

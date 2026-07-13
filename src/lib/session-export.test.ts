@@ -31,8 +31,8 @@ describe("buildSessionExport", () => {
     expect(buildSessionExport(session, messages).message_count).toBe(2);
   });
 
-  it("falls back to Untitled when the session has no title", () => {
-    expect(buildSessionExport({ id: "x" }, []).title).toBe("Untitled");
+  it("keeps an untitled session locale-neutral", () => {
+    expect(buildSessionExport({ id: "x" }, []).title).toBe("");
   });
 });
 

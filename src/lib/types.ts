@@ -79,6 +79,7 @@ export interface ProviderProfile {
   enabled: boolean;
   requiresApiKey: boolean;
   hasKey: boolean;
+  hasStoredCredentials?: boolean;
 }
 
 export interface AppConfig {
@@ -99,6 +100,7 @@ export interface AppConfig {
 export interface GatewayEvent {
   type: string;
   payload?: {
+    code?: string;
     text?: string;
     tool_call_id?: string;
     name?: string;

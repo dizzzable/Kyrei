@@ -1,10 +1,6 @@
+import { useI18n } from "@/i18n";
 import { cn } from "@/lib/utils";
 
-/**
- * Bottom status strip (Hermes-style): a 20px hairline footer with a LEFT group
- * (gateway/runtime state) and a RIGHT group (model / context / sessions /
- * version). 11px, muted, on the sidebar surface.
- */
 export function StatusBar({
   model,
   provider,
@@ -22,66 +18,56 @@ export function StatusBar({
   sessionCount: number;
   tokens?: number | null;
 }) {
+  const { t, number } = useI18n();
+  const tokenLabel = tokens == null ? "" : t("shell.status.tokens", { count: formatTokens(tokens, number) });
+
   return (
-    <footer className="statusbar flex h-5 shrink-0 items-stretch justify-between border-t border-border-soft px-1 text-[10px] text-muted">
-      {/* Left group — runtime state */}
-      <div className="flex min-w-0 items-stretch overflow-x-clip">
-        <Item title={connected ? "Шлюз подключён" : "Подключение к шлюзу…"}>
+    <footer className="statusbar flex h-5 shrink-0 items-stretch justify-between border-t border-border-soft px-1 font-mono text-[9px] text-muted">
+      <div className="flex min-w-0 items-stretch overflow-hidden">
+        <StatusItem title={connected ? t("shell.status.gatewayConnected") : t("shell.status.gatewayConnecting")}>
           <Dot className={connected ? "bg-success" : "bg-warning"} />
-          {connected ? "Готов" : "Подключение…"}
-        </Item>
+          {connected ? t("shell.status.ready") : t("shell.status.connecting")}
+        </StatusItem>
         {streaming && (
-          <Item title="Идёт генерация">
+          <StatusItem title={t("shell.status.generating")}>
             <Dot className="animate-pulse bg-primary" />
-            Работает…
-          </Item>
+            {t("shell.status.working")}
+          </StatusItem>
         )}
       </div>
 
-      {/* Right group — model / context / sessions / version */}
-      <div className="flex min-w-0 items-stretch overflow-x-clip">
-        {provider && <Item className="hidden md:inline-flex" title={provider}>{stripScheme(provider)}</Item>}
+      <div className="flex min-w-0 items-stretch overflow-hidden">
+        {provider && <StatusItem className="hidden lg:inline-flex" title={provider}>{stripScheme(provider)}</StatusItem>}
         {tokens != null && tokens > 0 && (
-          <Item title="Токенов в контексте">{formatTokens(tokens)} ток.</Item>
+          <StatusItem title={t("shell.status.contextTokens")}>{tokenLabel}</StatusItem>
         )}
-        <Item title="Активная модель">
+        <StatusItem title={t("shell.status.activeModel")}>
           <Dot className={hasKey ? "bg-success" : "bg-warning"} />
-          <span className="max-w-[16rem] truncate">{model || "нет модели"}</span>
-        </Item>
-        <Item>{sessionCount} {plural(sessionCount)}</Item>
-        <Item className="text-faint" title="Версия">v{__APP_VERSION__}</Item>
+          <span className="max-w-52 truncate">{model || t("shell.status.noModel")}</span>
+        </StatusItem>
+        <StatusItem>{t("shell.session.count", { count: sessionCount })}</StatusItem>
+        <StatusItem className="text-faint" title={t("shell.status.version")}>v{__APP_VERSION__}</StatusItem>
       </div>
     </footer>
   );
 }
 
-function Item({ children, title, className }: { children: React.ReactNode; title?: string; className?: string }) {
+function StatusItem({ children, title, className }: { children: React.ReactNode; title?: string; className?: string }) {
   return (
-    <span
-      title={title}
-      className={cn("inline-flex h-full items-center gap-1.5 px-1.5 transition-colors hover:text-foreground", className)}
-    >
+    <span title={title} className={cn("inline-flex h-full items-center gap-1.5 px-1.5 transition-colors hover:text-foreground", className)}>
       {children}
     </span>
   );
 }
 
 function Dot({ className }: { className?: string }) {
-  return <span className={cn("size-1.5 shrink-0 rounded-full", className)} />;
+  return <span className={cn("size-1 shrink-0 rounded-full", className)} aria-hidden />;
 }
 
 function stripScheme(url: string): string {
   return url.replace(/^https?:\/\//, "");
 }
 
-function formatTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}
-
-function plural(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return "диалог";
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "диалога";
-  return "диалогов";
+function formatTokens(value: number, number: (value: number, options?: Intl.NumberFormatOptions) => string): string {
+  return value >= 1000 ? number(value / 1000, { maximumFractionDigits: 1 }) + "k" : number(value);
 }

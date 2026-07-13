@@ -2,21 +2,29 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { cn } from "@/lib/utils";
 
 interface ResizeHandleProps {
-  side: "left" | "right";
-  width: number;
+  side: "left" | "right" | "top" | "bottom";
+  value?: number;
+  /** Backward-compatible alias for vertical rail widths. */
+  width?: number;
   min: number;
   max: number;
-  onChange: (width: number) => void;
+  onChange: (value: number) => void;
+  label: string;
 }
 
-export function ResizeHandle({ side, width, min, max, onChange }: ResizeHandleProps) {
-  const start = (e: ReactPointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = width;
-    const dir = side === "right" ? 1 : -1;
-    const move = (ev: PointerEvent) => {
-      const next = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir));
+export function ResizeHandle({ side, value, width, min, max, onChange, label }: ResizeHandleProps) {
+  const current = value ?? width ?? min;
+  const horizontal = side === "left" || side === "right";
+
+  const start = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startPosition = horizontal ? event.clientX : event.clientY;
+    const startValue = current;
+    const direction = side === "right" || side === "bottom" ? 1 : -1;
+
+    const move = (nextEvent: PointerEvent) => {
+      const position = horizontal ? nextEvent.clientX : nextEvent.clientY;
+      const next = Math.min(max, Math.max(min, startValue + (position - startPosition) * direction));
       onChange(next);
     };
     const up = () => {
@@ -25,9 +33,10 @@ export function ResizeHandle({ side, width, min, max, onChange }: ResizeHandlePr
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
+
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
-    document.body.style.cursor = "col-resize";
+    document.body.style.cursor = horizontal ? "col-resize" : "row-resize";
     document.body.style.userSelect = "none";
   };
 
@@ -35,11 +44,19 @@ export function ResizeHandle({ side, width, min, max, onChange }: ResizeHandlePr
     <div
       onPointerDown={start}
       className={cn(
-        "absolute inset-y-0 z-20 w-1.5 cursor-col-resize transition-colors hover:bg-primary/40",
-        side === "right" ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2",
+        "absolute z-30 transition-colors hover:bg-primary/50",
+        horizontal ? "inset-y-0 w-1.5 cursor-col-resize" : "inset-x-0 h-1.5 cursor-row-resize",
+        side === "right" && "right-0 translate-x-1/2",
+        side === "left" && "left-0 -translate-x-1/2",
+        side === "bottom" && "bottom-0 translate-y-1/2",
+        side === "top" && "top-0 -translate-y-1/2",
       )}
       role="separator"
-      aria-orientation="vertical"
+      aria-label={label}
+      aria-orientation={horizontal ? "vertical" : "horizontal"}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={Math.round(current)}
     />
   );
 }

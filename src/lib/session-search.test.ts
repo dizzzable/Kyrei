@@ -14,9 +14,10 @@ describe("sessionTitle", () => {
     expect(sessionTitle(session)).toBe("Refactor Auth Module");
   });
 
-  it("falls back to Untitled when title is missing or blank", () => {
-    expect(sessionTitle({ id: "x" })).toBe("Untitled");
-    expect(sessionTitle({ id: "x", title: "   " })).toBe("Untitled");
+  it("uses the caller-provided fallback when title is missing or blank", () => {
+    expect(sessionTitle({ id: "x" }, "Untitled")).toBe("Untitled");
+    expect(sessionTitle({ id: "x", title: "   " }, "Без названия")).toBe("Без названия");
+    expect(sessionTitle({ id: "x" })).toBe("");
   });
 });
 
@@ -45,7 +46,7 @@ describe("sessionMatchesSearch", () => {
     expect(sessionMatchesSearch(session, "database")).toBe(false);
   });
 
-  it("uses the Untitled fallback for matching", () => {
-    expect(sessionMatchesSearch({ id: "id-1" }, "untitled")).toBe(true);
+  it("does not invent localized copy while matching an untitled session", () => {
+    expect(sessionMatchesSearch({ id: "id-1" }, "untitled")).toBe(false);
   });
 });

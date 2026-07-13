@@ -6,6 +6,7 @@ import { Message } from "@/components/Message";
 import { TooltipProvider } from "@/components/ui";
 import { resetUiSettings, setUiSetting } from "@/store/settings";
 import type { ChatMessage } from "@/lib/types";
+import { I18nProvider, setLang } from "@/i18n";
 
 const assistantMessage: ChatMessage = {
   id: "a-1",
@@ -19,14 +20,16 @@ const assistantMessage: ChatMessage = {
 describe("Message reasoning visibility", () => {
   beforeEach(() => {
     resetUiSettings();
+    setLang("en");
   });
 
   it("shows reasoning blocks by default", () => {
     const html = renderToStaticMarkup(
-      createElement(TooltipProvider, null, createElement(Message, { message: assistantMessage })),
+      createElement(I18nProvider, null,
+        createElement(TooltipProvider, null, createElement(Message, { message: assistantMessage }))),
     );
 
-    expect(html).toContain("Размышление");
+    expect(html).toContain("Thinking");
     expect(html).toContain("final answer");
   });
 
@@ -34,10 +37,11 @@ describe("Message reasoning visibility", () => {
     setUiSetting("showReasoning", false);
 
     const html = renderToStaticMarkup(
-      createElement(TooltipProvider, null, createElement(Message, { message: assistantMessage })),
+      createElement(I18nProvider, null,
+        createElement(TooltipProvider, null, createElement(Message, { message: assistantMessage }))),
     );
 
-    expect(html).not.toContain("Размышление");
+    expect(html).not.toContain("Thinking");
     expect(html).toContain("final answer");
   });
 });

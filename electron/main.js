@@ -39,14 +39,14 @@ async function createWindow(port, gatewayToken) {
     ? { titleBarStyle: "hiddenInset" }
     : {
         titleBarStyle: "hidden",
-        titleBarOverlay: { color: "#0e0e0e", symbolColor: "#a4a4a4", height: 34 },
+        titleBarOverlay: { color: "#08090a", symbolColor: "#8a8f98", height: 34 },
       };
   windowRef = new BrowserWindow({
     width: 1440,
     height: 920,
-    minWidth: 980,
-    minHeight: 640,
-    backgroundColor: "#000000",
+    minWidth: 720,
+    minHeight: 520,
+    backgroundColor: "#08090a",
     title: "Kyrei",
     icon: appIcon,
     autoHideMenuBar: true,

@@ -7,12 +7,14 @@ import { useUiSettings } from "@/store/settings";
 import { Markdown } from "./Markdown";
 import { ToolRow } from "./ToolRow";
 import { ThinkingDisclosure } from "./chat/ThinkingDisclosure";
+import { useI18n } from "@/i18n";
 
 function CopyAction({ getText }: { getText: () => string }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useI18n();
   return (
     <IconButton
-      tip={copied ? "Скопировано" : "Копировать"}
+      tip={copied ? t("chat.message.copied") : t("chat.message.copy")}
       size="icon-xs"
       onClick={() => {
         navigator.clipboard.writeText(getText()).catch(() => {});

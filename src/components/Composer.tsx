@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowUp, Square, Layers3, X, Maximize2, Minimize2, Mic, Plus, FileText, Folder, Image as ImageIcon, Clipboard, MessageSquareText } from "lucide-react";
-import { parseSlash, SLASH_COMMANDS } from "@/lib/commands";
+import { ArrowUp, Square, Layers3, X, Maximize2, Minimize2, Mic, Plus, FileText, Folder, Image as ImageIcon, Clipboard, MessageSquareText, Volume2, VolumeX } from "lucide-react";
+import { getSlashCommands, parseSlash, resolveSlashCommand } from "@/lib/slash-commands";
 import { gateway } from "@/lib/gateway";
 import {
   $queuedPromptsBySession,
@@ -9,10 +9,9 @@ import {
   removeQueuedPrompt,
 } from "@/store/composer-queue";
 import { useAtom } from "@/store/atom";
-import { useUiSettings } from "@/store/settings";
+import { setUiSetting, useUiSettings } from "@/store/settings";
 import { addSnippet, useSnippets } from "@/store/snippets";
-import { IS_MAC } from "@/lib/keybinds/combo";
-import { createRecognizer, isSpeechRecognitionSupported, type Recognizer } from "@/lib/speech";
+import { createRecognizer, isSpeechRecognitionSupported, isSpeechSynthesisSupported, type Recognizer } from "@/lib/speech";
 import { ModelPill } from "./composer/ModelPill";
 import {
   DropdownMenu,
@@ -27,6 +26,7 @@ import {
   dropdownMenuRow,
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 interface ComposerProps {
   streaming: boolean;
@@ -64,13 +64,15 @@ export function Composer({
   const [sel, setSel] = useState(0);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const { sendOnEnter, voiceInput, voiceLang } = useUiSettings();
+  const { t } = useI18n();
+  const { sendOnEnter, voiceInput, voiceLang, autoSpeak } = useUiSettings();
   const [listening, setListening] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
-  const snippets = useSnippets();
+  const snippets = useSnippets(t);
   const recognizer = useRef<Recognizer | null>(null);
   const dictationBase = useRef("");
   const micSupported = isSpeechRecognitionSupported();
+  const speechSupported = isSpeechSynthesisSupported();
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const history = useRef<string[]>([]);
   const browse = useRef<number | null>(null);
@@ -79,12 +81,13 @@ export function Composer({
   const queues = useAtom($queuedPromptsBySession);
   const queued = sessionId ? queues[sessionId] ?? [] : [];
 
+  const slashCommands = useMemo(() => getSlashCommands(t), [t]);
   const suggestions = useMemo(() => {
     if (slashDismissed) return [];
     if (!value.startsWith("/") || value.includes(" ") || value.includes("\n")) return [];
     const q = value.slice(1).toLowerCase();
-    return SLASH_COMMANDS.filter((c) => c.name.startsWith(q));
-  }, [value, slashDismissed]);
+    return slashCommands.filter((c) => c.name.startsWith(q));
+  }, [value, slashDismissed, slashCommands]);
 
   useEffect(() => { setSel(0); setSlashDismissed(false); }, [value]);
   useEffect(() => {
@@ -110,8 +113,9 @@ export function Composer({
     // Slash commands dispatch locally.
     if (text.startsWith("/")) {
       const { name, arg } = parseSlash(text);
-      if (SLASH_COMMANDS.some((c) => c.name === name)) {
-        onCommand(name, arg || undefined);
+      const command = resolveSlashCommand(name);
+      if (command) {
+        onCommand(command.id, arg || undefined);
         setValue("");
         return;
       }
@@ -196,14 +200,14 @@ export function Composer({
     } catch { /* denied */ }
     try {
       const items = await navigator.clipboard.read();
-      if (items.some((it) => it.types.some((t) => t.startsWith("image/")))) insertText("[вставленное изображение]");
+      if (items.some((it) => it.types.some((type) => type.startsWith("image/")))) insertText(t("chat.composer.pastedImage"));
     } catch { /* denied */ }
   };
 
   const saveSnippet = () => {
     const text = value.trim();
     if (!text) return;
-    const title = window.prompt("Название сниппета:", text.slice(0, 32)) ?? "";
+    const title = window.prompt(t("chat.snippets.namePrompt"), text.slice(0, 32)) ?? "";
     addSnippet(title, text);
   };
 
@@ -287,26 +291,28 @@ export function Composer({
   };
 
   return (
-    <div className="composer-area px-6 pb-4 pt-3 max-sm:px-3">
-      <div className="relative mx-auto max-w-[50rem]">
+    <div className="composer-area shrink-0 px-4 pb-3 pt-2 max-sm:px-2">
+      <div className="relative mx-auto max-w-[52rem]">
         {/* Queue panel */}
         {queued.length > 0 && (
           <div className="mb-2 overflow-hidden rounded-xl border border-border-soft bg-surface/70">
             <div className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-muted">
-              <Layers3 className="size-3.5" /> В очереди: {queued.length}
+              <Layers3 className="size-3.5" /> {t("chat.queue.count", { count: queued.length })}
             </div>
-            {queued.map((q) => (
-              <div key={q.id} className="flex items-center gap-2 border-t border-border-soft px-3 py-1.5 text-[12.5px]">
-                <span className="min-w-0 flex-1 truncate text-secondary">{q.text}</span>
-                <button
-                  onClick={() => sessionId && removeQueuedPrompt(sessionId, q.id)}
-                  className="grid size-5 shrink-0 place-items-center rounded text-muted hover:bg-(--ui-row-hover) hover:text-foreground"
-                  aria-label="Убрать из очереди"
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            ))}
+            <div className="composer-queue-list max-h-[min(14rem,30vh)] overflow-y-auto">
+              {queued.map((q) => (
+                <div key={q.id} className="flex items-center gap-2 border-t border-border-soft px-3 py-1.5 text-[12.5px]">
+                  <span className="min-w-0 flex-1 truncate text-secondary">{q.text}</span>
+                  <button
+                    onClick={() => sessionId && removeQueuedPrompt(sessionId, q.id)}
+                    className="grid size-5 shrink-0 place-items-center rounded text-muted hover:bg-(--ui-row-hover) hover:text-foreground"
+                    aria-label={t("chat.queue.remove")}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -337,7 +343,7 @@ export function Composer({
                 onMouseEnter={() => setSel(i)}
                 className={cn("flex w-full items-center gap-2 px-3 py-1.5 text-left", i === sel && "bg-(--ui-row-hover)")}
               >
-                <span className="font-mono text-[13px] text-primary">/{c.name}</span>
+                <span className="font-mono text-[13px] text-primary">{c.command}</span>
                 {c.arg && <span className="font-mono text-[11px] text-muted">{c.arg}</span>}
                 <span className="ml-auto text-[11.5px] text-muted">{c.desc}</span>
               </button>
@@ -345,7 +351,10 @@ export function Composer({
           </div>
         )}
 
-        <div className="composer-card rounded-[16px] border border-border-soft px-3.5 py-2.5 transition-all focus-within:border-(--ui-composer-focus)">
+        <div className={cn(
+          "composer-card rounded-[10px] border border-border-soft px-2.5 py-2 transition-all focus-within:border-(--ui-composer-focus)",
+          (expanded || value.includes("\n")) && "is-stacked",
+        )}>
           <textarea
             ref={ref}
             rows={1}
@@ -359,45 +368,45 @@ export function Composer({
             }}
             onKeyDown={onKeyDown}
             onBlur={() => window.setTimeout(() => setMention(null), 120)}
-            placeholder={disabled ? "Подключение…" : "Сообщение для Kyrei…"}
+            placeholder={disabled ? t("chat.composer.connecting") : t("chat.composer.placeholder")}
             className={cn(
               "w-full resize-none bg-transparent py-1.5 text-[14px] leading-relaxed text-foreground outline-none placeholder:text-muted",
               expanded ? "min-h-[40vh] max-h-[55vh]" : "min-h-[24px] max-h-[220px]",
             )}
           />
-          <div className="mt-2 flex items-center gap-1">
+          <div className="composer-controls">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
                    className="composer-tool grid size-7 place-items-center rounded-md text-muted transition-colors hover:text-foreground data-[state=open]:bg-(--ui-row-active) data-[state=open]:text-foreground"
-                  title="Добавить контекст"
-                  aria-label="Добавить контекст"
+                  title={t("chat.composer.addContext")}
+                  aria-label={t("chat.composer.addContext")}
                 >
                   <Plus size={16} />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top" className="w-64">
-                <DropdownMenuLabel>Вложить</DropdownMenuLabel>
+                <DropdownMenuLabel>{t("chat.composer.attach")}</DropdownMenuLabel>
                 <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker(); }}>
-                  <FileText size={15} /> Файлы…
+                  <FileText size={15} /> {t("chat.composer.attachFiles")}
                 </DropdownMenuItem>
                 <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ dir: true }); }}>
-                  <Folder size={15} /> Папка…
+                  <Folder size={15} /> {t("chat.composer.attachFolder")}
                 </DropdownMenuItem>
                 <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ accept: "image/*" }); }}>
-                  <ImageIcon size={15} /> Изображения…
+                  <ImageIcon size={15} /> {t("chat.composer.attachImages")}
                 </DropdownMenuItem>
                 <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); void pasteFromClipboard(); }}>
-                  <Clipboard size={15} /> Вставить из буфера
+                  <Clipboard size={15} /> {t("chat.composer.pasteClipboard")}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger className={dropdownMenuRow}>
-                    <MessageSquareText size={15} /> Сниппеты промптов…
+                    <MessageSquareText size={15} /> {t("chat.snippets.menu")}
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent className="w-60">
                     {snippets.length === 0 ? (
-                      <div className="px-2 py-1.5 text-[12px] text-muted">Пока нет сниппетов</div>
+                      <div className="px-2 py-1.5 text-[12px] text-muted">{t("chat.snippets.empty")}</div>
                     ) : (
                       snippets.map((s) => (
                         <DropdownMenuItem key={s.id} className={dropdownMenuRow} onSelect={() => insertText(s.text)}>
@@ -407,14 +416,13 @@ export function Composer({
                     )}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem className={cn(dropdownMenuRow, "text-muted")} disabled={!value.trim()} onSelect={(e) => { e.preventDefault(); saveSnippet(); }}>
-                      <Plus size={14} /> Сохранить текущий текст
+                      <Plus size={14} /> {t("chat.snippets.saveCurrent")}
                     </DropdownMenuItem>
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
                 <DropdownMenuSeparator />
                 <div className="px-2 py-1 text-[11px] leading-snug text-muted">
-                  Введите <span className="font-mono text-secondary">@</span> — выбор файлов,{" "}
-                  <span className="font-mono text-secondary">/</span> — команды.
+                  {t("chat.composer.contextHint")}
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -422,8 +430,8 @@ export function Composer({
             <button
               onClick={() => setExpanded((v) => !v)}
               className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground"
-              title={expanded ? "Свернуть" : "Развернуть редактор"}
-              aria-label={expanded ? "Свернуть редактор" : "Развернуть редактор"}
+              title={expanded ? t("chat.composer.collapse") : t("chat.composer.expand")}
+              aria-label={expanded ? t("chat.composer.collapse") : t("chat.composer.expand")}
             >
               {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
             </button>
@@ -436,24 +444,58 @@ export function Composer({
                     ? "animate-pulse bg-danger/20 text-danger"
                     : "text-muted hover:bg-(--ui-row-hover) hover:text-foreground",
                 )}
-                title={listening ? "Остановить диктовку" : "Диктовать голосом"}
-                aria-label={listening ? "Остановить диктовку" : "Диктовать голосом"}
+                title={listening ? t("chat.composer.stopDictation") : t("chat.composer.startDictation")}
+                aria-label={listening ? t("chat.composer.stopDictation") : t("chat.composer.startDictation")}
                 aria-pressed={listening}
               >
                 <Mic size={14} />
               </button>
             )}
+            {speechSupported && (
+              <button
+                onClick={() => setUiSetting("autoSpeak", !autoSpeak)}
+                className={cn(
+                  "grid size-7 place-items-center rounded-md transition-colors",
+                  autoSpeak
+                    ? "bg-(--ui-row-active) text-foreground"
+                    : "text-muted hover:bg-(--ui-row-hover) hover:text-foreground",
+                )}
+                title={autoSpeak ? t("chat.composer.disableSpeech") : t("chat.composer.enableSpeech")}
+                aria-label={autoSpeak ? t("chat.composer.disableSpeech") : t("chat.composer.enableSpeech")}
+                aria-pressed={autoSpeak}
+              >
+                {autoSpeak ? <Volume2 size={14} /> : <VolumeX size={14} />}
+              </button>
+            )}
             <div className="ml-auto">
               {streaming ? (
-                <button onClick={onStop} className="grid size-8 place-items-center rounded-full bg-danger text-white transition-colors hover:brightness-110" title="Остановить">
-                  <Square size={13} fill="currentColor" />
-                </button>
+                <div className="flex items-center gap-1">
+                  {value.trim() && (
+                    <button
+                      onClick={submit}
+                      className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px"
+                      title={t("chat.composer.queue")}
+                      aria-label={t("chat.composer.queue")}
+                    >
+                      <ArrowUp size={16} />
+                    </button>
+                  )}
+                  <button
+                    onClick={onStop}
+                    className="grid size-8 place-items-center rounded-[8px] bg-danger text-white transition-colors hover:brightness-110"
+                    title={t("chat.composer.stop")}
+                    aria-label={t("chat.composer.stop")}
+                  >
+                    <Square size={13} fill="currentColor" />
+                  </button>
+                </div>
               ) : (
                 <button
                   onClick={submit}
                   disabled={!value.trim()}
-                   className="send-button grid size-8 place-items-center rounded-[10px] bg-foreground text-bg transition-all hover:-translate-y-px disabled:translate-y-0 disabled:opacity-30"
-                  title="Отправить"
+                   className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px disabled:translate-y-0 disabled:opacity-30"
+                  title={t("chat.composer.send")}
+                  aria-label={t("chat.composer.send")}
                 >
                   <ArrowUp size={16} />
                 </button>
@@ -461,11 +503,6 @@ export function Composer({
             </div>
           </div>
         </div>
-      </div>
-      <div className="mx-auto mt-2 max-w-[50rem] px-1 text-center text-[10px] text-muted">
-        {sendOnEnter
-          ? <>Enter — отправить · Shift+Enter — новая строка{streaming ? " · Enter добавит в очередь" : ""}</>
-          : <>{IS_MAC ? "⌘" : "Ctrl"}+Enter — отправить · Enter — новая строка{streaming ? " · добавит в очередь" : ""}</>}
       </div>
     </div>
   );

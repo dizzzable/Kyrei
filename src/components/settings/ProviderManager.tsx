@@ -1,37 +1,74 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, KeyRound, Plus, Server, Trash2 } from "lucide-react";
-import { gateway } from "@/lib/gateway";
+import { GatewayRequestError, gateway } from "@/lib/gateway";
 import type { AppConfig, ProviderCredentialsInput, ProviderProfile, ProviderProtocol } from "@/lib/types";
 import { Button, Input } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { useI18n, type TranslationKey, type TranslationParams } from "@/i18n";
+import {
+  validateProviderCredentials,
+  validateProviderDraft,
+} from "./provider-validation";
 
 interface ProviderManagerProps {
   config: AppConfig;
   onSaved: (config: AppConfig) => void;
 }
 
+interface ProviderError {
+  key: TranslationKey;
+  params?: TranslationParams;
+}
+
 function modelText(provider: ProviderProfile | undefined): string {
   return provider?.models.map((model) => model.id).join("\n") ?? "";
 }
 
-function parseModels(value: string): Array<{ id: string }> {
-  return [...new Set(value.split(/[\n,]/).map((model) => model.trim()).filter(Boolean))].map((id) => ({ id }));
+const PROTOCOL_OPTIONS = [
+  { value: "openai-chat", labelKey: "settings.providers.protocol.openaiChat", defaultBaseURL: "https://api.openai.com/v1" },
+  { value: "openai-responses", labelKey: "settings.providers.protocol.openaiResponses", defaultBaseURL: "https://api.openai.com/v1" },
+  { value: "anthropic-messages", labelKey: "settings.providers.protocol.anthropic", defaultBaseURL: "https://api.anthropic.com/v1" },
+  { value: "google-generative-ai", labelKey: "settings.providers.protocol.google", defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta" },
+  { value: "amazon-bedrock", labelKey: "settings.providers.protocol.bedrock", defaultBaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com" },
+  { value: "google-vertex", labelKey: "settings.providers.protocol.vertex", defaultBaseURL: "https://aiplatform.googleapis.com" },
+] as const satisfies readonly {
+  value: ProviderProtocol;
+  labelKey: TranslationKey;
+  defaultBaseURL: string;
+}[];
+
+const PROVIDER_SERVER_ERRORS: Readonly<Record<string, TranslationKey>> = {
+  provider_not_found: "settings.providers.error.notFound",
+  provider_unavailable: "settings.providers.error.unavailable",
+  provider_final_profile: "settings.providers.error.finalProfile",
+  provider_credentials_required: "settings.providers.error.credentialsRequired",
+  provider_credentials_incomplete: "settings.providers.error.credentialsIncomplete",
+  provider_operation_failed: "settings.providers.error.operationFailed",
+};
+
+function requestError(cause: unknown): ProviderError {
+  if (cause instanceof GatewayRequestError && cause.code === "capability_unavailable") {
+    return { key: "settings.providers.gatewayUnavailable" };
+  }
+  if (cause instanceof GatewayRequestError && cause.serverCode) {
+    const key = PROVIDER_SERVER_ERRORS[cause.serverCode];
+    if (key) return { key, params: cause.serverArgs };
+  }
+  const detail = cause instanceof GatewayRequestError
+    ? [cause.status, cause.detail].filter(Boolean).join(": ")
+    : cause instanceof Error
+      ? cause.message
+      : String(cause);
+  return { key: "settings.providers.requestFailed", params: { detail } };
 }
 
-const PROTOCOL_OPTIONS: Array<{ value: ProviderProtocol; label: string; defaultBaseURL: string }> = [
-  { value: "openai-chat", label: "OpenAI-compatible / Chat", defaultBaseURL: "https://api.openai.com/v1" },
-  { value: "openai-responses", label: "OpenAI / Responses", defaultBaseURL: "https://api.openai.com/v1" },
-  { value: "anthropic-messages", label: "Anthropic / Messages", defaultBaseURL: "https://api.anthropic.com/v1" },
-  { value: "google-generative-ai", label: "Google Gemini / Generative AI", defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta" },
-  { value: "amazon-bedrock", label: "AWS Bedrock / Converse", defaultBaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com" },
-  { value: "google-vertex", label: "Google Vertex AI", defaultBaseURL: "https://aiplatform.googleapis.com" },
-];
-
-/** Compact editor for Kyrei's built-in provider transports. */
+/** Compact editor for Kyrei's built-in and unlimited custom provider transports. */
 export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
+  const { t } = useI18n();
   const [selectedId, setSelectedId] = useState(config.activeProviderId);
   const selected = useMemo(
-    () => config.providers.find((provider) => provider.id === selectedId) ?? config.providers.find((provider) => provider.id === config.activeProviderId),
+    () => config.providers.find((provider) => provider.id === selectedId)
+      ?? config.providers.find((provider) => provider.id === config.activeProviderId),
     [config.providers, config.activeProviderId, selectedId],
   );
   const [name, setName] = useState("");
@@ -49,7 +86,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
   const [clientEmail, setClientEmail] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ProviderError | null>(null);
 
   useEffect(() => {
     const next = config.providers.find((provider) => provider.id === selectedId)
@@ -62,12 +99,12 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     setModels(modelText(next));
     setRequiresApiKey(next.requiresApiKey);
     setApiKey("");
-    setRegion(next.protocol === "amazon-bedrock" && next.hasKey ? "" : "us-east-1");
+    setRegion(next.protocol === "amazon-bedrock" && next.hasStoredCredentials ? "" : "us-east-1");
     setAccessKeyId("");
     setSecretAccessKey("");
     setSessionToken("");
     setProject("");
-    setLocation(next.protocol === "google-vertex" && next.hasKey ? "" : "us-central1");
+    setLocation(next.protocol === "google-vertex" && next.hasStoredCredentials ? "" : "us-central1");
     setClientEmail("");
     setPrivateKey("");
   }, [config.providers, config.activeProviderId, selectedId]);
@@ -81,7 +118,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     setBusy(true);
     try {
       const next = await gateway.createProvider({
-        name: "Новый провайдер",
+        name: t("settings.providers.newName"),
         protocol: "openai-chat",
         baseURL: "https://api.openai.com/v1",
         models: [{ id: "gpt-4o-mini" }],
@@ -91,7 +128,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
       receive(next);
       setSelectedId(next.activeProviderId);
     } catch (cause) {
-      setError((cause as Error).message);
+      setError(requestError(cause));
     } finally {
       setBusy(false);
     }
@@ -99,24 +136,23 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
 
   const save = async () => {
     if (!selected) return;
-    const nextModels = parseModels(models);
-    if (!name.trim() || !baseURL.trim() || !nextModels.length) {
-      setError("Укажите название, Base URL и хотя бы одну модель.");
+    const validation = validateProviderDraft({ name, baseURL, models });
+    if (!validation.ok) {
+      setError({ key: validation.code });
       return;
     }
     setBusy(true);
     try {
-      const next = await gateway.updateProvider(selected.id, {
+      receive(await gateway.updateProvider(selected.id, {
         name: name.trim(),
         protocol,
         baseURL: baseURL.trim(),
-        models: nextModels,
+        models: validation.models,
         requiresApiKey,
         enabled: true,
-      });
-      receive(next);
+      }));
     } catch (cause) {
-      setError((cause as Error).message);
+      setError(requestError(cause));
     } finally {
       setBusy(false);
     }
@@ -128,7 +164,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
       receive(await gateway.setConfig({ activeProviderId: provider.id, model: provider.models[0]?.id ?? "" }));
       setSelectedId(provider.id);
     } catch (cause) {
-      setError((cause as Error).message);
+      setError(requestError(cause));
     } finally {
       setBusy(false);
     }
@@ -137,9 +173,10 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
   const saveSecret = async () => {
     if (!selected) return;
     if (protocol !== selected.protocol) {
-      setError("Сначала сохраните выбранный транспорт провайдера, затем добавьте учётные данные.");
+      setError({ key: "settings.providers.transportChanged" });
       return;
     }
+
     let credentials: ProviderCredentialsInput;
     if (protocol === "amazon-bedrock") {
       credentials = {
@@ -149,10 +186,6 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
         ...(secretAccessKey.trim() ? { secretAccessKey: secretAccessKey.trim() } : {}),
         ...(sessionToken.trim() ? { sessionToken: sessionToken.trim() } : {}),
       };
-      if (!credentials.region || (!credentials.apiKey && (!credentials.accessKeyId || !credentials.secretAccessKey))) {
-        setError("Для Bedrock укажите регион и либо bearer API key, либо пару AWS Access Key / Secret Key.");
-        return;
-      }
     } else if (protocol === "google-vertex") {
       credentials = {
         project: project.trim(),
@@ -160,14 +193,16 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
         clientEmail: clientEmail.trim(),
         privateKey: privateKey.trim(),
       };
-      if (!credentials.project || !credentials.location || !credentials.clientEmail || !credentials.privateKey) {
-        setError("Для Vertex укажите project, location, client email и private key сервисного аккаунта.");
-        return;
-      }
     } else {
-      if (!apiKey.trim()) return;
       credentials = { apiKey: apiKey.trim() };
     }
+
+    const validation = validateProviderCredentials(protocol, credentials);
+    if (!validation.ok) {
+      setError({ key: validation.code });
+      return;
+    }
+
     setBusy(true);
     try {
       receive(await gateway.setProviderSecret(selected.id, credentials));
@@ -178,7 +213,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
       setClientEmail("");
       setPrivateKey("");
     } catch (cause) {
-      setError((cause as Error).message);
+      setError(requestError(cause));
     } finally {
       setBusy(false);
     }
@@ -190,7 +225,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     try {
       receive(await gateway.clearProviderSecret(selected.id));
     } catch (cause) {
-      setError((cause as Error).message);
+      setError(requestError(cause));
     } finally {
       setBusy(false);
     }
@@ -202,21 +237,21 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
     try {
       receive(await gateway.deleteProvider(selected.id));
     } catch (cause) {
-      setError((cause as Error).message);
+      setError(requestError(cause));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="rounded-xl border border-border-soft bg-bg/20 p-3 @container">
-      <div className="mb-3 flex items-center justify-between gap-3">
+    <div className="border-t border-border-soft py-3 @container">
+      <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <div className="text-[12px] font-medium text-foreground">Провайдеры</div>
-          <p className="mt-0.5 text-[11px] leading-4 text-muted">Нативные транспорты OpenAI, Anthropic, Gemini, Bedrock и Vertex плюс неограниченные OpenAI-compatible профили. Учётные данные хранятся отдельно и не попадают в экспорт настроек.</p>
+          <div className="text-[12px] font-medium text-foreground">{t("settings.providers.title")}</div>
+          <p className="mt-0.5 max-w-3xl text-[11px] leading-4 text-muted">{t("settings.providers.description")}</p>
         </div>
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void create()}>
-          <Plus size={14} /> Добавить
+          <Plus size={14} /> {t("settings.providers.add")}
         </Button>
       </div>
 
@@ -230,7 +265,9 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
               onClick={() => void select(provider)}
               className={cn(
                 "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors",
-                provider.id === config.activeProviderId ? "bg-elevated text-foreground" : "text-secondary hover:bg-(--ui-row-hover)",
+                provider.id === config.activeProviderId
+                  ? "bg-elevated text-foreground"
+                  : "text-secondary hover:bg-(--ui-row-hover)",
               )}
             >
               <Server size={13} className="shrink-0 text-muted" />
@@ -238,7 +275,7 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
               <span className="rounded bg-bg px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted">
                 {provider.protocol.replace(/-/g, " ")}
               </span>
-              {provider.hasKey ? <KeyRound size={12} className="text-success" /> : null}
+              {provider.hasStoredCredentials ? <KeyRound size={12} className="text-success" /> : null}
               {provider.id === config.activeProviderId ? <Check size={12} className="text-primary" /> : null}
             </button>
           ))}
@@ -248,11 +285,11 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
           <div className="space-y-2 border-t border-border-soft pt-3 @[42rem]:border-l @[42rem]:border-t-0 @[42rem]:pl-3 @[42rem]:pt-0">
             <div className="grid gap-2 @[28rem]:grid-cols-2">
               <label className="space-y-1 text-[11px] text-muted">
-                <span>Название</span>
-                <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Мой провайдер" />
+                <span>{t("settings.providers.name")}</span>
+                <Input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("settings.providers.namePlaceholder")} />
               </label>
               <label className="space-y-1 text-[11px] text-muted">
-                <span>Транспорт</span>
+                <span>{t("settings.providers.transport")}</span>
                 <select
                   value={protocol}
                   onChange={(event) => {
@@ -264,19 +301,17 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
                   className="h-9 w-full rounded-md border border-border bg-surface px-2.5 text-[12px] text-foreground outline-none transition-colors focus:border-primary"
                 >
                   {PROTOCOL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
+                    <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
                   ))}
                 </select>
               </label>
             </div>
-            <div className="grid gap-2 @[28rem]:grid-cols-2">
-              <label className="space-y-1 text-[11px] text-muted">
-                <span>Base URL</span>
-                <Input value={baseURL} onChange={(event) => setBaseURL(event.target.value)} placeholder="https://api.example.com/v1" />
-              </label>
-            </div>
             <label className="block space-y-1 text-[11px] text-muted">
-              <span>Модели — по одной на строку или через запятую</span>
+              <span>{t("settings.providers.baseUrl")}</span>
+              <Input value={baseURL} onChange={(event) => setBaseURL(event.target.value)} placeholder="https://api.example.com/v1" />
+            </label>
+            <label className="block space-y-1 text-[11px] text-muted">
+              <span>{t("settings.providers.models")}</span>
               <textarea
                 value={models}
                 onChange={(event) => setModels(event.target.value)}
@@ -287,79 +322,97 @@ export function ProviderManager({ config, onSaved }: ProviderManagerProps) {
             </label>
             <label className="flex items-center gap-2 text-[11px] text-secondary">
               <input type="checkbox" checked={requiresApiKey} onChange={(event) => setRequiresApiKey(event.target.checked)} />
-              Учётные данные обязательны (выключите для локального Ollama/LM Studio или переменных окружения)
+              {t("settings.providers.requiresCredentials")}
             </label>
-            {protocol === "amazon-bedrock" ? (
+
+            {requiresApiKey && protocol === "amazon-bedrock" ? (
               <div className="grid gap-2 rounded-md border border-border-soft bg-bg/30 p-2 @[28rem]:grid-cols-2">
                 <label className="space-y-1 text-[11px] text-muted">
-                  <span>AWS Region</span>
-                  <Input value={region} onChange={(event) => setRegion(event.target.value)} placeholder={selected.hasKey ? "Enter stored region to replace access" : "us-east-1"} />
+                  <span>{t("settings.providers.region")}</span>
+                  <Input value={region} onChange={(event) => setRegion(event.target.value)} placeholder={selected.hasStoredCredentials ? t("settings.providers.replaceRegion") : "us-east-1"} />
                 </label>
                 <label className="space-y-1 text-[11px] text-muted">
-                  <span>AWS Access Key ID</span>
-                  <Input value={accessKeyId} onChange={(event) => setAccessKeyId(event.target.value)} placeholder={selected.hasKey ? "Saved" : "AKIA…"} />
+                  <span>{t("settings.providers.accessKeyId")}</span>
+                  <Input value={accessKeyId} onChange={(event) => setAccessKeyId(event.target.value)} placeholder={selected.hasStoredCredentials ? t("settings.providers.saved") : "AKIA…"} />
                 </label>
                 <label className="space-y-1 text-[11px] text-muted">
-                  <span>AWS Secret Access Key</span>
-                  <Input type="password" value={secretAccessKey} onChange={(event) => setSecretAccessKey(event.target.value)} placeholder={selected.hasKey ? "••••••••" : "Secret key"} />
+                  <span>{t("settings.providers.secretAccessKey")}</span>
+                  <Input type="password" value={secretAccessKey} onChange={(event) => setSecretAccessKey(event.target.value)} placeholder={selected.hasStoredCredentials ? "••••••••" : t("settings.providers.secretPlaceholder")} />
                 </label>
                 <label className="space-y-1 text-[11px] text-muted">
-                  <span>Session token (optional)</span>
-                  <Input type="password" value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} placeholder="Temporary session token" />
+                  <span>{t("settings.providers.sessionToken")}</span>
+                  <Input type="password" value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} placeholder={t("settings.providers.sessionTokenPlaceholder")} />
                 </label>
               </div>
             ) : null}
-            {protocol === "google-vertex" ? (
+
+            {requiresApiKey && protocol === "google-vertex" ? (
               <div className="grid gap-2 rounded-md border border-border-soft bg-bg/30 p-2 @[28rem]:grid-cols-2">
                 <label className="space-y-1 text-[11px] text-muted">
-                  <span>Google Cloud project</span>
+                  <span>{t("settings.providers.project")}</span>
                   <Input value={project} onChange={(event) => setProject(event.target.value)} placeholder="my-project" />
                 </label>
                 <label className="space-y-1 text-[11px] text-muted">
-                  <span>Location</span>
-                  <Input value={location} onChange={(event) => setLocation(event.target.value)} placeholder={selected.hasKey ? "Enter stored location to replace access" : "us-central1"} />
+                  <span>{t("settings.providers.location")}</span>
+                  <Input value={location} onChange={(event) => setLocation(event.target.value)} placeholder={selected.hasStoredCredentials ? t("settings.providers.replaceLocation") : "us-central1"} />
                 </label>
                 <label className="space-y-1 text-[11px] text-muted @[28rem]:col-span-2">
-                  <span>Service account client email</span>
+                  <span>{t("settings.providers.clientEmail")}</span>
                   <Input value={clientEmail} onChange={(event) => setClientEmail(event.target.value)} placeholder="kyrei@project.iam.gserviceaccount.com" />
                 </label>
                 <label className="space-y-1 text-[11px] text-muted @[28rem]:col-span-2">
-                  <span>Service account private key</span>
+                  <span>{t("settings.providers.privateKey")}</span>
                   <textarea
                     value={privateKey}
                     onChange={(event) => setPrivateKey(event.target.value)}
                     rows={3}
-                    placeholder={selected.hasKey ? "Credentials saved; paste a key only to replace them" : "-----BEGIN PRIVATE KEY-----"}
+                    placeholder={selected.hasStoredCredentials ? t("settings.providers.replacePrivateKey") : "-----BEGIN PRIVATE KEY-----"}
                     className="w-full resize-y rounded-md border border-border bg-surface px-2.5 py-2 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted focus:border-primary"
                   />
                 </label>
               </div>
             ) : null}
+
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="secondary" size="sm" disabled={busy} onClick={() => void save()}>Сохранить провайдер</Button>
-              <div className="ml-auto flex items-center gap-1.5">
+              <Button variant="secondary" size="sm" disabled={busy} onClick={() => void save()}>{t("settings.providers.save")}</Button>
+              {requiresApiKey ? <div className="ml-auto flex items-center gap-1.5">
                 {protocol !== "google-vertex" ? (
                   <Input
                     type="password"
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={selected.hasKey ? "••••••••" : protocol === "amazon-bedrock" ? "Bearer key (optional)" : "API key"}
+                    placeholder={selected.hasStoredCredentials ? "••••••••" : protocol === "amazon-bedrock" ? t("settings.providers.bearerOptional") : t("settings.providers.apiKey")}
                     className="h-7 w-36 text-[11px]"
                   />
                 ) : null}
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={busy || (!["amazon-bedrock", "google-vertex"].includes(protocol) && !apiKey.trim())}
+                  disabled={busy || (!(["amazon-bedrock", "google-vertex"] as ProviderProtocol[]).includes(protocol) && !apiKey.trim())}
                   onClick={() => void saveSecret()}
                 >
-                  {["amazon-bedrock", "google-vertex"].includes(protocol) ? "Доступ" : "Ключ"}
+                  {(["amazon-bedrock", "google-vertex"] as ProviderProtocol[]).includes(protocol)
+                    ? t("settings.providers.access")
+                    : t("settings.providers.key")}
                 </Button>
-                {selected.hasKey && selected.requiresApiKey ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => void clearSecret()}>Удалить доступ</Button> : null}
-                {config.providers.length > 1 ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => void remove()} className="text-danger hover:text-danger"><Trash2 size={13} /></Button> : null}
-              </div>
+                {selected.hasStoredCredentials ? (
+                  <Button variant="ghost" size="sm" disabled={busy} onClick={() => void clearSecret()}>{t("settings.providers.removeAccess")}</Button>
+                ) : null}
+                {config.providers.length > 1 ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void remove()}
+                    className="text-danger hover:text-danger"
+                    aria-label={t("settings.providers.delete")}
+                  >
+                    <Trash2 size={13} />
+                  </Button>
+                ) : null}
+              </div> : null}
             </div>
-            {error ? <p className="text-[11px] text-danger">{error}</p> : null}
+            {error ? <p className="text-[11px] text-danger">{t(error.key, error.params)}</p> : null}
           </div>
         ) : null}
       </div>

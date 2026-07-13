@@ -1,9 +1,13 @@
 import {
   Archive,
+  Brain,
   FilePen,
   FileText,
   FolderTree,
+  Globe,
+  Globe2,
   Layers,
+  Network,
   Search,
   Stethoscope,
   Terminal,
@@ -20,6 +24,10 @@ const MAP: Record<string, LucideIcon> = {
   stethoscope: Stethoscope,
   layers: Layers,
   archive: Archive,
+  brain: Brain,
+  globe: Globe,
+  "globe-search": Globe2,
+  network: Network,
   wrench: Wrench,
 };
 
