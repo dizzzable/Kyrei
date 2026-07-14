@@ -64,14 +64,20 @@ timestamps and token/credit counters — never token values. Operators can:
 
 ## Kiro integration stages
 
-The current official Kiro CLI connector intentionally exposes one global CLI
-identity for authentication status and model discovery. A separate broker mode
-can add multiple organisation-controlled Kiro accounts through explicit
-Builder ID / IAM Identity Center / supported credential import flows. That mode
-must use the lifecycle above and remain distinct from the user's global CLI
-session.
+The official Kiro CLI connector intentionally exposes one global CLI identity
+for browser/device authentication status and model discovery. Kyrei now also
+has a separate first-stage broker for organisation-owned Kiro API keys. It
+stores those keys through the OS-backed secret codec, derives one isolated
+`KIRO_HOME` per account, enforces one concurrent operation per profile, and
+supports verification, model discovery, model/project policies, affinity and
+immediate lease revocation. It remains distinct from the user's global CLI
+session and does not import browser state.
 
-Kiro-Go demonstrates the useful routing mechanics: multiple authentication
+Task execution transport and account-scoped browser/device sign-in are later
+protected stages. Until they are implemented, the organization broker must not
+be advertised as a Kyrei chat execution provider.
+
+Kiro-Go demonstrates useful routing mechanics: multiple authentication
 methods, token refresh, account disablement, weighted selection, quota checks
-and cooldown. Kyrei should reuse those ideas while strengthening desktop secret
-storage and keeping all tokens behind the core boundary.
+and cooldown. Kyrei reuses the policy concepts, but deliberately excludes its
+private token endpoints, raw credential export and plaintext secret storage.

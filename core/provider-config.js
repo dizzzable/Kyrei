@@ -14,6 +14,11 @@ import {
   normalizeProviderAccountMember,
   normalizeProviderAccountPool as normalizeAccountPoolMetadata,
 } from "./provider-account-pool.js";
+import {
+  normalizeKiroOrganizationConfig,
+  normalizeKiroOrganizationSecrets,
+  serializeKiroOrganizationSecrets,
+} from "./kiro-organization-config.js";
 
 export { PROVIDER_ACCOUNT_POOL_STRATEGIES };
 
@@ -428,6 +433,7 @@ export function normalizeGatewayConfig(value) {
     modelAssignments: { ...(worker ? { worker } : {}), fallbacks },
     orchestration,
     pipelines: normalizePipelines(source.pipelines, orchestration.profiles),
+    kiroOrganization: normalizeKiroOrganizationConfig(source.kiroOrganization ?? {}),
     workspace: typeof source.workspace === "string" ? source.workspace : "",
     engine: object(source.engine),
   };
@@ -482,7 +488,14 @@ export function normalizeProviderSecrets(value) {
     }
     if (Object.keys(providerAccounts).length) accounts[providerId] = providerAccounts;
   }
-  return { version: 2, providers, accounts };
+  return {
+    version: 3,
+    providers,
+    accounts,
+    kiroOrganization: serializeKiroOrganizationSecrets(
+      normalizeKiroOrganizationSecrets(source.kiroOrganization),
+    ),
+  };
 }
 
 export function getProviderAccountCredentials(secretState, providerId, accountId = "primary") {
@@ -539,6 +552,9 @@ export function collectProviderCredentialValues(secretState, providers = []) {
         values.push(value);
       }
     }
+  }
+  for (const secret of normalizeKiroOrganizationSecrets(object(secretState).kiroOrganization).values()) {
+    if (typeof secret.apiKey === "string" && secret.apiKey.length > 0) values.push(secret.apiKey);
   }
   return values;
 }

@@ -85,6 +85,16 @@ describe("settings localized rendering", () => {
     expect(await renderSettings("ru", "appearance")).toContain("Тёмная");
   });
 
+  it("keeps the official Kiro identity separate from the organization control plane", async () => {
+    const english = await renderSettings("en", "providers");
+    const russian = await renderSettings("ru", "providers");
+
+    expect(english).toContain("Kiro CLI · official connector");
+    expect(english).toContain("Kiro Organization · protected account pool");
+    expect(russian).toContain("Kiro CLI · официальный коннектор");
+    expect(russian).toContain("Kiro Organization · защищённый пул аккаунтов");
+  });
+
   it("contains no Russian hardcode in any English settings section", async () => {
     const sections = ["model", "providers", "workspace", "skills", "chat", "memory", "appearance", "notifications", "keybinds", "advanced", "about"] as const;
     for (const section of sections) {

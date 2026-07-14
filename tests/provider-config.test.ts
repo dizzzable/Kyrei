@@ -65,7 +65,7 @@ describe("provider registry config", () => {
       accounts: { pooled: { backup: { apiKey: "backup-secret" }, primary: { apiKey: "ignored" } } },
     });
 
-    expect(secrets.version).toBe(2);
+    expect(secrets.version).toBe(3);
     expect(getProviderAccountCredentials(secrets, "pooled", "primary").apiKey).toBe("primary-secret");
     expect(getProviderAccountCredentials(secrets, "pooled", "backup").apiKey).toBe("backup-secret");
     expect(readyProviderAccounts(config.providers[0], secrets).map((account) => account.id)).toEqual(["primary", "backup"]);
@@ -79,6 +79,40 @@ describe("provider registry config", () => {
     expect(getProviderAccountCredentials(secrets, "pooled", "third").apiKey).toBe("third-secret");
     secrets = deleteProviderAccountCredentials(secrets, "pooled", "third");
     expect(getProviderAccountCredentials(secrets, "pooled", "third")).toEqual({});
+  });
+
+  it("persists Kiro organization policy separately and treats its keys as runtime secrets", () => {
+    const marker = "kiro-organization-test-secret";
+    const config = normalizeGatewayConfig({
+      kiroOrganization: {
+        enabled: true,
+        accounts: [{
+          id: "build-team",
+          name: "Build team",
+          modelIds: ["auto"],
+          projectIds: ["kyrei"],
+        }],
+      },
+    });
+    const secrets = normalizeProviderSecrets({
+      kiroOrganization: {
+        version: 1,
+        accounts: {
+          "build-team": { kind: "api-key", apiKey: marker },
+        },
+      },
+    });
+
+    expect(config.kiroOrganization).toMatchObject({
+      version: 1,
+      enabled: true,
+      accounts: [{ id: "build-team", maxConcurrency: 1 }],
+    });
+    expect(secrets.kiroOrganization.accounts["build-team"]).toEqual({ kind: "api-key", apiKey: marker });
+    expect(collectProviderCredentialValues(secrets, config.providers)).toContain(marker);
+    expect(JSON.stringify(publicGatewayConfig(config, secrets))).not.toContain(marker);
+    expect(redactSensitiveText(`failure ${marker}`, collectProviderCredentialValues(secrets, config.providers)))
+      .toBe("failure [REDACTED]");
   });
 
   it("keeps account model-rule intent, intersects stale IDs, and strictly validates mutations", () => {
