@@ -1,4 +1,4 @@
-import { LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
+import { LoaderCircle, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import {
@@ -122,6 +122,7 @@ export function ProviderSetupDialog({
   const editing = Boolean(draft.editingId);
   const benchmarkNetworkAvailable = canUseBenchmarkNetwork(draft);
   const discoverySupported = providerSupportsModelDiscovery(draft.protocol);
+  const storageUnavailable = errorKey === "settings.providers.error.secretStorageUnavailable";
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !unavailable) onCancel(); }}>
@@ -226,6 +227,22 @@ export function ProviderSetupDialog({
                   />
                 )}
                 <p className="text-[9.5px] leading-4 text-muted">{draft.hasStoredCredentials ? t("settings.providers.keyStoredHint") : t("settings.providers.keyPrivacyHint")}</p>
+                {storageUnavailable ? (
+                  <div className="rounded-md border border-danger/35 bg-danger/8 px-3 py-3" role="alert" aria-live="assertive">
+                    <div className="flex items-start gap-2.5">
+                      <ShieldAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-semibold text-danger">{t("settings.providers.error.secretStorageTitle")}</p>
+                        <p className="mt-1 text-[10px] leading-4 text-secondary">{t("settings.providers.error.secretStorageExplanation")}</p>
+                        <ol className="mt-2 list-decimal space-y-1 pl-4 text-[10px] leading-4 text-secondary">
+                          <li>{t("settings.providers.error.secretStorageStep1")}</li>
+                          <li>{t("settings.providers.error.secretStorageStep2")}</li>
+                        </ol>
+                        <p className="mt-2 text-[9.5px] leading-4 text-muted">{t("settings.providers.error.secretStorageNotSaved")}</p>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 {editing && draft.hasStoredCredentials && onClearCredentials ? (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border-soft bg-bg/25 px-3 py-2">
                     <span className="max-w-md text-[9.5px] leading-4 text-muted">{t("settings.providers.clearCredentialsHint")}</span>
@@ -273,7 +290,9 @@ export function ProviderSetupDialog({
               <Switch checked={draft.useAsDefault} disabled={unavailable} onCheckedChange={(useAsDefault) => update({ useAsDefault })} aria-label={t("settings.providers.useAsDefault")} />
             </label>
 
-            <div className="min-h-4 text-[10.5px] text-danger" role="alert">{errorKey ? t(errorKey) : null}</div>
+            <div className="min-h-4 text-[10.5px] text-danger" role="alert">
+              {errorKey && !storageUnavailable ? t(errorKey) : null}
+            </div>
           </div>
         </form>
 

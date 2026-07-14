@@ -25,6 +25,7 @@ import { ModelSettings } from "@/components/settings/models/ModelSettings";
 import { ProvidersSettings } from "@/components/settings/providers/ProvidersSettings";
 import { SkillsSettings } from "@/components/settings/SkillsSettings";
 import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
+import { KyreiMark } from "@/components/brand/KyreiMark";
 import {
   SETTINGS_SECTIONS,
   resolveSettingsSection,
@@ -762,7 +763,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
               {visibleSection === "about" && (
                 <div className="space-y-3 py-2">
                   <div className="flex items-center gap-3">
-                    <div className="grid size-12 place-items-center rounded-lg border border-border-soft bg-accent text-[22px] font-semibold text-foreground">K</div>
+                    <KyreiMark size="xl" />
                     <div>
                       <div className="text-[16px] font-bold">Kyrei</div>
                       <div className="text-[12px] text-muted">{t("settings.about.tagline")}</div>
