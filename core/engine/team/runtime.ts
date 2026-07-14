@@ -6,6 +6,7 @@ import type {
   KyreiEvent,
   ProviderAttemptLifecycle,
   RuntimeSkill,
+  RuntimeSkillDocumentContent,
   RuntimeTeamRole,
   RuntimeTeamSpec,
 } from "../types.js";
@@ -31,6 +32,12 @@ const READ_ONLY_TEAM_CAPABILITIES = new Set<AgentCapability>([
   "delegate",
 ]);
 
+function runtimeModelLimit(value: unknown, fallback: number | undefined, min: number, max: number): number | undefined {
+  return Number.isSafeInteger(value) && (value as number) >= min && (value as number) <= max
+    ? value as number
+    : fallback;
+}
+
 export interface CreateTeamRoleExecutorsOptions {
   readonly spec: RuntimeTeamSpec;
   readonly config: EngineConfig;
@@ -43,6 +50,7 @@ export interface CreateTeamRoleExecutorsOptions {
   readonly sensitiveValues?: readonly string[];
   readonly emit: (event: KyreiEvent) => void;
   readonly onSkillUsed?: (id: string) => void | Promise<void>;
+  readonly readSkillDocument?: (skillId: string, documentId: string) => Promise<RuntimeSkillDocumentContent | null>;
   readonly providerAttemptLifecycle?: ProviderAttemptLifecycle;
   /** Pipeline departments force the same Team runtime into a read-only mode. */
   readonly readOnly?: boolean;
@@ -97,6 +105,7 @@ export async function createTeamRoleExecutors(
       baseURL: target.baseURL,
       id: target.model,
       provider: target.providerId,
+      protocol: target.protocol,
     });
     const model = buildModel({
       protocol: target.protocol,
@@ -110,6 +119,7 @@ export async function createTeamRoleExecutors(
     const assignedSkillTools = buildSkillTools(assignedSkills, {
       maxOutputChars: options.config.maxToolOutput,
       onUsed: options.onSkillUsed,
+      ...(options.readSkillDocument ? { readDocument: options.readSkillDocument } : {}),
     });
     const canReadWorkspace = role.capabilities.includes("workspace.read");
     const roleTools = (signal: AbortSignal): ToolSet => {
@@ -147,6 +157,13 @@ export async function createTeamRoleExecutors(
     };
     const resolvedRole: RuntimeTeamRole = {
       ...role,
+      ...(role.promptProfileId
+        ? {
+            systemPrompt: options.config.promptProfiles.find(
+              (profile) => profile.id === role.promptProfileId,
+            )?.systemPrompt,
+          }
+        : {}),
       target: { ...target, model: entry.id },
     };
     return {
@@ -162,7 +179,18 @@ export async function createTeamRoleExecutors(
         maxDepth: options.spec.limits.maxDepth,
         maxSteps: options.spec.limits.maxStepsPerAgent,
         maxRetries: options.config.apiMaxRetries,
-        contextWindow: entry.limits.contextWindow,
+        contextWindow: runtimeModelLimit(
+          target.limits?.contextWindow,
+          entry.limits.contextWindow,
+          256,
+          100_000_000,
+        ),
+        maxOutputTokens: runtimeModelLimit(
+          target.limits?.maxOutput,
+          entry.limits.maxOutput,
+          1,
+          10_000_000,
+        ),
         cost: entry.cost,
         providerOptions: buildProviderOptions(target.protocol, undefined),
         emit: options.emit,

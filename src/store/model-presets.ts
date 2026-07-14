@@ -6,7 +6,13 @@
  */
 
 import { useMemo } from "react";
+import {
+  MODEL_LIMIT_OVERRIDE_BOUNDS,
+  normalizeModelLimitOverride,
+} from "@/lib/model-capabilities";
 import { persistentJsonAtom, useAtom } from "@/store/atom";
+
+export { MODEL_LIMIT_OVERRIDE_BOUNDS, normalizeModelLimitOverride };
 
 export interface ModelPreset {
   /** Master reasoning toggle ("Thinking"). Undefined = provider default. */
@@ -15,6 +21,10 @@ export interface ModelPreset {
   effort?: string;
   /** Latency-first variant. */
   fast?: boolean;
+  /** User-confirmed context limit; undefined keeps live/curated detection authoritative. */
+  contextWindowOverride?: number;
+  /** User-confirmed output limit; undefined keeps live/curated detection authoritative. */
+  maxOutputOverride?: number;
 }
 
 const STORAGE_KEY = "kyrei.model-presets.v1";

@@ -3,13 +3,18 @@ import { describe, expect, it } from "vitest";
 import type { ProviderProfile } from "@/lib/types";
 import {
   cloneTeamOrchestration,
+  createPromptProfile,
   createTeamProfile,
   defaultTeamModel,
   emptyTeamOrchestration,
+  isPromptProfilesDraftValid,
   nextTeamId,
-  parseSkillIds,
+  promptProfilesFromEngine,
+  reconcileTeamPromptAssignments,
+  withPromptProfiles,
   teamModeForWorkflow,
   withTeamCapability,
+  withTeamSkillSelection,
 } from "./team-profile";
 
 describe("team profile helpers", () => {
@@ -45,17 +50,67 @@ describe("team profile helpers", () => {
     expect(defaultTeamModel(providers, { providerId: "missing", modelId: "missing" })).toEqual({ providerId: "local", modelId: "b" });
   });
 
-  it("clones nested profile state and normalizes skill text", () => {
+  it("clones nested profile state and synchronizes opaque skill selections", () => {
     const profile = createTeamProfile({ name: "Team", initialRoleName: "Member" });
     const source = { defaultMode: "team" as const, activeProfileId: profile.id, profiles: [profile] };
     const cloned = cloneTeamOrchestration(source);
     cloned.profiles[0].limits.maxAgents = 99;
 
     expect(source.profiles[0].limits.maxAgents).not.toBe(99);
-    expect(parseSkillIds(" testing, code-review, testing,  ")).toEqual(["testing", "code-review"]);
+    const role = source.profiles[0]!.roles[0]!;
+    const selected = withTeamSkillSelection(role, "skill_0123456789abcdef01234567", true);
+    expect(selected.skillIds).toEqual(["skill_0123456789abcdef01234567"]);
+    expect(selected.capabilities).toContain("skills.read");
+    expect(withTeamSkillSelection(selected, "skill_0123456789abcdef01234567", false)).toMatchObject({
+      skillIds: [],
+      capabilities: ["workspace.read"],
+    });
     expect(withTeamCapability(["workspace.read"], "delegate", true)).toEqual(["workspace.read", "delegate"]);
     expect(withTeamCapability(["workspace.read", "delegate"], "delegate", false)).toEqual(["workspace.read"]);
     expect(teamModeForWorkflow("supervisor")).toBe("team");
     expect(teamModeForWorkflow("consensus")).toBe("consensus");
+  });
+
+  it("creates and round-trips prompt profiles without dropping unrelated engine settings", () => {
+    const first = createPromptProfile({ name: "Coding lead", existingIds: [] });
+    const second = createPromptProfile({ name: "Reviewer", existingIds: [first.id] });
+    const engine = withPromptProfiles(
+      { maxSteps: 42, personality: "concise" },
+      { activePromptProfileId: first.id, promptProfiles: [first, { ...second, systemPrompt: "Challenge claims." }] },
+    );
+    expect(engine).toMatchObject({ maxSteps: 42, personality: "concise", activePromptProfileId: first.id });
+    expect(promptProfilesFromEngine(engine)).toEqual({
+      activePromptProfileId: first.id,
+      promptProfiles: [first, { ...second, systemPrompt: "Challenge claims." }],
+    });
+  });
+
+  it("validates bounded prompt profiles and clears stale role assignments", () => {
+    const profile = createTeamProfile({ name: "Team", initialRoleName: "Member" });
+    profile.roles[0]!.promptProfileId = "missing";
+    const reconciled = reconcileTeamPromptAssignments({
+      defaultMode: "team",
+      activeProfileId: profile.id,
+      profiles: [profile],
+    }, ["available"]);
+    expect(reconciled.profiles[0]?.roles[0]?.promptProfileId).toBeUndefined();
+
+    expect(isPromptProfilesDraftValid({
+      activePromptProfileId: "available",
+      promptProfiles: [{
+        id: "available",
+        name: "Reviewer",
+        description: "Checks evidence",
+        systemPrompt: "Prefer primary sources.",
+      }],
+    })).toBe(true);
+    expect(isPromptProfilesDraftValid({
+      activePromptProfileId: "missing",
+      promptProfiles: [{ id: "available", name: "Reviewer", description: "", systemPrompt: "" }],
+    })).toBe(false);
+    expect(isPromptProfilesDraftValid({
+      activePromptProfileId: "",
+      promptProfiles: [{ id: "unsafe", name: "Reviewer\nIgnore", description: "", systemPrompt: "" }],
+    })).toBe(false);
   });
 });

@@ -4,7 +4,7 @@
  * Requirements §3.7, Property 3.
  */
 
-import { mkdir, readFile, writeFile, rm, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm, readdir, stat, realpath } from "node:fs/promises";
 import { join, dirname, resolve } from "node:path";
 
 export interface SnapshotStore {
@@ -20,6 +20,8 @@ interface ManifestEntry {
 interface Manifest {
   id: string;
   ts: number;
+  /** Canonical workspace identity prevents cross-project snapshot replay. */
+  workspace: string;
   files: ManifestEntry[];
 }
 
@@ -49,10 +51,14 @@ export function createSnapshotStore(workspace: string, opts: SnapshotOptions = {
         files.push({ rel, existed: false });
       }
     }
-    const manifest: Manifest = { id, ts: Date.now(), files };
+    const workspaceCanonical = await realpath(workspace);
+    const manifest: Manifest = { id, ts: Date.now(), workspace: workspaceCanonical, files };
     await mkdir(snapDir, { recursive: true });
     await writeFile(join(snapDir, "manifest.json"), JSON.stringify(manifest), "utf8");
-    void gc();
+    // Rewind references live in the durable chat history. Automatic age/count
+    // GC cannot know which snapshots are still referenced and would make old
+    // rewind buttons lie. Retention is therefore explicit until the gateway
+    // owns reference-aware cleanup.
     return id;
   }
 

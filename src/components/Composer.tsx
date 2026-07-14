@@ -94,6 +94,24 @@ export function Composer({
 
   useEffect(() => { setSel(0); setSlashDismissed(false); }, [value]);
   useEffect(() => {
+    const restoreDraft = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: unknown; focus?: boolean }>).detail;
+      const text = typeof detail?.text === "string" ? detail.text : "";
+      setValue(text);
+      setExpanded(text.includes("\n"));
+      browse.current = null;
+      window.requestAnimationFrame(() => {
+        const input = ref.current;
+        if (!input) return;
+        const end = text.length;
+        input.setSelectionRange(end, end);
+        if (detail?.focus !== false) input.focus();
+      });
+    };
+    window.addEventListener("kyrei:set-composer-draft", restoreDraft);
+    return () => window.removeEventListener("kyrei:set-composer-draft", restoreDraft);
+  }, []);
+  useEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";

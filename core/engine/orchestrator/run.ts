@@ -15,6 +15,7 @@ import type {
   MessagePart,
   ProviderAttemptOutcome,
   ProviderAttemptTarget,
+  RuntimeModelLimits,
   RuntimeProviderTarget,
 } from "../types.js";
 import { buildModel, buildProviderOptions, hasProviderCredentials } from "../provider/build.js";
@@ -48,6 +49,34 @@ import { bridgeStream } from "../stream-bridge/bridge.js";
 import { toParts } from "./persist.js";
 import { createAuditLog } from "../security/audit.js";
 import { redact } from "../security/secrets.js";
+
+const MODEL_OVERRIDE_BOUNDS = Object.freeze({
+  contextWindow: { min: 256, max: 100_000_000 },
+  maxOutput: { min: 1, max: 10_000_000 },
+});
+
+function boundedModelOverride(
+  value: unknown,
+  kind: keyof typeof MODEL_OVERRIDE_BOUNDS,
+): number | undefined {
+  const bounds = MODEL_OVERRIDE_BOUNDS[kind];
+  return Number.isSafeInteger(value)
+    && (value as number) >= bounds.min
+    && (value as number) <= bounds.max
+    ? value as number
+    : undefined;
+}
+
+function sanitizeRuntimeModelLimits(value: RuntimeModelLimits | undefined): RuntimeModelLimits | undefined {
+  const contextWindow = boundedModelOverride(value?.contextWindow, "contextWindow");
+  const maxOutput = boundedModelOverride(value?.maxOutput, "maxOutput");
+  return contextWindow !== undefined || maxOutput !== undefined
+    ? {
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        ...(maxOutput !== undefined ? { maxOutput } : {}),
+      }
+    : undefined;
+}
 
 function throwWithProviderAttempts(error: unknown, attempts: ProviderAttemptOutcome[]): never {
   let target: Error;
@@ -118,6 +147,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         abortSignal: opts.abortSignal,
         audit,
         sessionId: opts.sessionId,
+        actorId: "main",
+        commandRunner: opts.commandRunner,
         sensitiveValues,
       })
     : undefined;
@@ -135,11 +166,13 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const skillTools = buildSkillTools(opts.skills ?? [], {
     maxOutputChars: cfg.maxToolOutput,
     onUsed: opts.onSkillUsed,
+    ...(opts.readSkillDocument ? { readDocument: opts.readSkillDocument } : {}),
   });
   // Delegates receive a separately constructed reader without the parent's
   // usage callback. Loading instructions must remain a read-only child action.
   const childSkillTools = buildSkillTools(opts.skills ?? [], {
     maxOutputChars: cfg.maxToolOutput,
+    ...(opts.readSkillDocument ? { readDocument: opts.readSkillDocument } : {}),
   });
   const baseToolSet: ToolSet = {
     ...(workspaceTools ?? {}),
@@ -183,6 +216,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         sensitiveValues,
         emit: opts.emit,
         onSkillUsed: opts.onSkillUsed,
+        ...(opts.readSkillDocument ? { readSkillDocument: opts.readSkillDocument } : {}),
         providerAttemptLifecycle: opts.providerAttemptLifecycle,
       })
     : [];
@@ -199,6 +233,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     workspace: opts.workspace,
     hasTools,
     personality: cfg.personality,
+    promptProfile: cfg.promptProfiles.find((profile) => profile.id === cfg.activePromptProfileId)?.systemPrompt,
     projectContext,
     hasBrainTools: Object.keys(brainTools).length > 0,
     hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
@@ -222,7 +257,13 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   // legacy provider-local model list. Each qualified target carries its own
   // protocol, endpoint, headers, and credentials so secrets never cross an
   // endpoint boundary. Bare legacy model names deliberately stay local.
-  const primary = resolveModel(opts.model, { baseURL: opts.providerBase, id: opts.model, provider: opts.providerId });
+  const primary = resolveModel(opts.model, {
+    baseURL: opts.providerBase,
+    id: opts.model,
+    provider: opts.providerId,
+    protocol: opts.providerProtocol,
+  });
+  const primaryLimits = sanitizeRuntimeModelLimits(opts.modelLimits);
   const primaryTarget: RuntimeProviderTarget = {
     providerId: opts.providerId ?? primary.provider,
     ...(opts.providerAccountId ? { accountId: opts.providerAccountId } : {}),
@@ -233,22 +274,25 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     credentials: providerCredentials,
     ...(opts.providerHeaders ? { headers: opts.providerHeaders } : {}),
     requiresApiKey: opts.requiresApiKey,
+    ...(primaryLimits ? { limits: primaryLimits } : {}),
   };
-  const legacyTargets: RuntimeProviderTarget[] = cfg.fallbackChain.map((model) => ({
-    ...primaryTarget,
-    model,
-  }));
+  const legacyTargets: RuntimeProviderTarget[] = cfg.fallbackChain.map((model) => {
+    const { limits: _primaryModelLimits, ...providerTarget } = primaryTarget;
+    return { ...providerTarget, model };
+  });
   const seenTargets = new Set<string>();
-  const targets = [primaryTarget, ...(opts.fallbackProviders ?? []), ...legacyTargets].filter((target) => {
+  const targets = [primaryTarget, ...(opts.fallbackProviders ?? []), ...legacyTargets].flatMap((target) => {
     const credentials = {
       ...(target.credentials ?? {}),
       ...(!target.credentials?.apiKey && target.apiKey ? { apiKey: target.apiKey } : {}),
     };
-    if (target.requiresApiKey !== false && !hasProviderCredentials(target.protocol, credentials)) return false;
+    if (target.requiresApiKey !== false && !hasProviderCredentials(target.protocol, credentials)) return [];
     const key = `${target.providerId}\0${target.accountId ?? "primary"}\0${target.model}`;
-    if (seenTargets.has(key)) return false;
+    if (seenTargets.has(key)) return [];
     seenTargets.add(key);
-    return true;
+    const { limits: _untrustedLimits, ...withoutLimits } = target;
+    const limits = sanitizeRuntimeModelLimits(target.limits);
+    return [{ ...withoutLimits, ...(limits ? { limits } : {}) }];
   });
   const candidates = targets.map((target, index) => ({
     target,
@@ -262,6 +306,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           baseURL: target.baseURL,
           id: target.model,
           provider: target.providerId,
+          protocol: target.protocol,
         }),
   }));
   const attemptTarget = (candidateIndex: number): ProviderAttemptTarget => {
@@ -298,6 +343,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         baseURL: explicitWorker.baseURL,
         id: explicitWorker.model,
         provider: explicitWorker.providerId,
+        protocol: explicitWorker.protocol,
       })
     : undefined;
   const workerCredentials = explicitWorker
@@ -311,12 +357,33 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const explicitWorkerProviderOptions = explicitWorker
     ? buildProviderOptions(explicitWorker.protocol, undefined)
     : undefined;
+  const primaryContextWindowOverride = boundedModelOverride(
+    opts.modelParams?.contextWindowOverride,
+    "contextWindow",
+  );
+  const primaryMaxOutputOverride = boundedModelOverride(
+    opts.modelParams?.maxOutputOverride,
+    "maxOutput",
+  );
 
   const start = (ci: number, useTools: boolean): StreamLike => {
     const candidate = candidates[ci] ?? candidates[0]!;
     const { entry, target, credentials } = candidate;
     const providerOptions = buildProviderOptions(target.protocol, opts.modelParams);
-    const prepareStep = ccr ? makePrepareStep(cfg, entry.id, entry.limits.contextWindow, ccr) : undefined;
+    // Manual limits are scoped to the selected primary model. A fallback can
+    // have a different context/output contract and must use its own registry
+    // metadata instead of inheriting an unrelated override.
+    const contextWindow = ci === 0
+      ? primaryContextWindowOverride ?? target.limits?.contextWindow ?? entry.limits.contextWindow
+      : target.limits?.contextWindow ?? entry.limits.contextWindow;
+    const maxOutputTokens = ci === 0
+      ? primaryMaxOutputOverride ?? target.limits?.maxOutput ?? entry.limits.maxOutput
+      : target.limits?.maxOutput ?? entry.limits.maxOutput;
+    // Unknown is a real state: without a verified context window Kyrei avoids
+    // pretending that a generic 32k budget describes this endpoint.
+    const prepareStep = ccr && contextWindow !== undefined
+      ? makePrepareStep(cfg, entry.id, contextWindow, ccr)
+      : undefined;
     const model = buildModel({
       protocol: target.protocol,
       baseURL: target.baseURL,
@@ -380,6 +447,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       ...(callTools ? { tools: callTools, stopWhen: buildStopWhen(cfg) } : {}),
       ...(callTools && prepareStep ? { prepareStep } : {}),
       ...(providerOptions ? { providerOptions } : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
       maxRetries: cfg.apiMaxRetries,
       onError: ({ error }: { error: unknown }) => {

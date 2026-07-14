@@ -43,4 +43,29 @@ describe("executableModelParams", () => {
     expect(executableModelParams("openai-chat", { effort: "high" })).toEqual({ effort: "high" });
     expect(executableModelParams("openai-chat", { thinking: true })).toEqual({ effort: "medium" });
   });
+
+  it("forwards bounded manual limits independently of protocol tuning support", () => {
+    expect(executableModelParams("anthropic-messages", {
+      effort: "high",
+      contextWindowOverride: 200_000,
+      maxOutputOverride: 64_000,
+    })).toEqual({ contextWindowOverride: 200_000, maxOutputOverride: 64_000 });
+    expect(executableModelParams("openai-responses", {
+      effort: "high",
+      contextWindowOverride: 1_050_000,
+      maxOutputOverride: 128_000,
+    })).toEqual({ effort: "high", contextWindowOverride: 1_050_000, maxOutputOverride: 128_000 });
+  });
+
+  it("drops malformed or out-of-range manual limits before the gateway request", () => {
+    expect(executableModelParams("google-generative-ai", {
+      contextWindowOverride: 255,
+      maxOutputOverride: 1.5,
+    })).toBeUndefined();
+    expect(executableModelParams("openai-chat", {
+      effort: "low",
+      contextWindowOverride: Number.NaN,
+      maxOutputOverride: 10_000_001,
+    })).toEqual({ effort: "low" });
+  });
 });

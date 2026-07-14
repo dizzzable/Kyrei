@@ -15,7 +15,7 @@ describe("session store localization migration", () => {
       messages: { used: [{ role: "user", content: "Keep the explicit title" }] },
     });
 
-    expect(migrated.schemaVersion).toBe(4);
+    expect(migrated.schemaVersion).toBe(5);
     expect(migrated.sessions).toEqual([
       { id: "empty-ru", title: "" },
       { id: "empty-en", title: "" },
@@ -54,5 +54,58 @@ describe("session store localization migration", () => {
       providerId: "provider",
       modelId: "model",
     });
+  });
+
+  it("assigns stable ids to legacy messages and preserves explicit client ids", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    const migrated = store.migrate({
+      schemaVersion: 4,
+      sessions: [{ id: "session", title: "Chat" }],
+      messages: {
+        session: [
+          { role: "user", content: "legacy" },
+          { id: "msg-client-12345678", role: "assistant", content: "kept" },
+        ],
+      },
+    });
+
+    expect(migrated.messages.session[0].id).toBe("msg-legacy-session-0");
+    expect(migrated.messages.session[1].id).toBe("msg-client-12345678");
+  });
+
+  it("plans and commits a rewind at a user message with ordered snapshot ids", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    store.upsertSession({ id: "session", title: "Chat" });
+    store.appendMessage("session", { id: "msg-user-00000001", role: "user", content: "first" });
+    store.appendMessage("session", {
+      id: "msg-assistant-0001",
+      role: "assistant",
+      content: "changed",
+      parts: [{ type: "tool", name: "edit_file", toolCallId: "call", running: false, snapshotId: "snap-old" }],
+    });
+    store.appendMessage("session", { id: "msg-user-00000002", role: "user", content: "retry this", workspace: "C:/workspace" });
+    store.appendMessage("session", {
+      id: "msg-assistant-0002",
+      role: "assistant",
+      content: "changed again",
+      parts: [{ type: "tool", name: "write_file", toolCallId: "call-2", running: false, snapshotId: "snap-new" }],
+    });
+
+    const plan = store.planRewind("session", "msg-user-00000002");
+    expect(plan).toMatchObject({ draft: "retry this", workspace: "C:/workspace", index: 2, snapshotIds: ["snap-new"] });
+    expect(store.commitRewind(plan)).toBe(true);
+    expect(store.getMessages("session").map(message => message.id)).toEqual([
+      "msg-user-00000001",
+      "msg-assistant-0001",
+    ]);
+    expect(store.commitRewind(plan)).toBe(false);
+    expect(store.rollbackRewind(plan)).toBe(true);
+    expect(store.getMessages("session").map(message => message.id)).toEqual([
+      "msg-user-00000001",
+      "msg-assistant-0001",
+      "msg-user-00000002",
+      "msg-assistant-0002",
+    ]);
+    expect(store.rollbackRewind(plan)).toBe(false);
   });
 });

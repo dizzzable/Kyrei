@@ -67,6 +67,8 @@ export const ruChat = {
   "chat.model.none": "Модель не выбрана",
   "chat.message.copy": "Копировать",
   "chat.message.copied": "Скопировано",
+  "chat.message.rewind": "Изменить с этого места",
+  "chat.message.rewindConfirm": "Восстановить код до этого момента и вернуть запрос в поле ввода? Более поздние сообщения будут удалены.",
   "chat.code.language": "код",
   "chat.code.copy": "Копировать",
   "chat.code.copied": "Скопировано",

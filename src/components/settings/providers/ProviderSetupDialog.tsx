@@ -18,7 +18,13 @@ import type { ProviderModel, ProviderProtocol } from "@/lib/types";
 import { useI18n, type TranslationKey } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { ModelDiscovery } from "./ModelDiscovery";
-import { mergeDiscoveredModels, providerSupportsModelDiscovery, type ProviderDraft } from "./provider-draft";
+import {
+  consumeBenchmarkNetworkPermission,
+  mergeDiscoveredModels,
+  providerSupportsModelDiscovery,
+  updateProviderDraftEndpoint,
+  type ProviderDraft,
+} from "./provider-draft";
 
 const PROTOCOLS: readonly { value: ProviderProtocol; label: TranslationKey }[] = [
   { value: "openai-chat", label: "settings.providers.protocol.openaiChat" },
@@ -102,9 +108,10 @@ export function ProviderSetupDialog({
     setDiscoveryStatus({ kind: "idle" });
     try {
       const models = await onDiscover(draft);
-      onDraftChange(mergeDiscoveredModels(draft, models));
+      onDraftChange(consumeBenchmarkNetworkPermission(mergeDiscoveredModels(draft, models)));
       setDiscoveryStatus({ kind: "success", count: models.length });
     } catch (reason) {
+      onDraftChange(consumeBenchmarkNetworkPermission(draft));
       setDiscoveryStatus({ kind: "error", errorKey: discoveryErrorKey(reason) });
     } finally {
       setDiscovering(false);
@@ -154,7 +161,10 @@ export function ProviderSetupDialog({
                     disabled={unavailable}
                     onChange={(event) => {
                       const protocol = event.target.value as ProviderProtocol;
-                      update({ protocol, allowBenchmarkNetwork: false, ...(protocol !== draft.protocol ? { hasStoredCredentials: false } : {}) });
+                      onDraftChange(updateProviderDraftEndpoint(draft, {
+                        protocol,
+                        ...(protocol !== draft.protocol ? { hasStoredCredentials: false } : {}),
+                      }));
                     }}
                     className="h-8 w-full rounded-md border border-border bg-surface px-2.5 text-[12px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/25"
                   >
@@ -163,7 +173,7 @@ export function ProviderSetupDialog({
                 </label>
                 <label className="space-y-1">
                   <span className="text-[11px] text-secondary">{t("settings.providers.baseUrl")}</span>
-                  <Input value={draft.baseURL} disabled={unavailable} onChange={(event) => update({ baseURL: event.target.value, allowBenchmarkNetwork: false })} placeholder={t("settings.providers.baseUrlPlaceholder")} spellCheck={false} />
+                  <Input value={draft.baseURL} disabled={unavailable} onChange={(event) => onDraftChange(updateProviderDraftEndpoint(draft, { baseURL: event.target.value }))} placeholder={t("settings.providers.baseUrlPlaceholder")} spellCheck={false} />
                 </label>
               </div>
               <label className="flex items-center justify-between gap-4 rounded-md border border-border-soft bg-bg/25 px-3 py-2">

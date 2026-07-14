@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, RotateCcw } from "lucide-react";
 import type { ChatMessage } from "@/lib/types";
 import { messageText } from "@/lib/chat-messages";
 import { IconButton } from "@/components/ui";
@@ -27,15 +27,26 @@ function CopyAction({ getText }: { getText: () => string }) {
   );
 }
 
-export const Message = memo(function Message({ message }: { message: ChatMessage }) {
+export const Message = memo(function Message({ message, onRewind }: { message: ChatMessage; onRewind?: (messageId: string) => void }) {
   const { showReasoning } = useUiSettings();
+  const { t } = useI18n();
 
   if (message.role === "user") {
     const text = message.parts.map((p) => (p.type === "text" ? p.text : "")).join("");
     return (
-      <div className="flex justify-end">
-        <div className="user-message max-w-[82%] whitespace-pre-wrap rounded-[14px] border border-border-soft px-4 py-2.5 text-[13px] leading-relaxed text-foreground">
-          {text}
+      <div className="group flex justify-end">
+        <div className="flex max-w-[82%] flex-col items-end">
+          <div className="user-message w-fit whitespace-pre-wrap rounded-[14px] border border-border-soft px-4 py-2.5 text-[13px] leading-relaxed text-foreground">
+            {text}
+          </div>
+          <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+            <CopyAction getText={() => text} />
+            {onRewind && (
+              <IconButton tip={t("chat.message.rewind")} size="icon-xs" onClick={() => onRewind(message.id)}>
+                <RotateCcw className="size-3.5" />
+              </IconButton>
+            )}
+          </div>
         </div>
       </div>
     );

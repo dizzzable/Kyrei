@@ -34,6 +34,7 @@ export function toParts(messages: ModelMessage[], bridged: BridgeResult): Messag
           args: c["input"] ?? c["args"],
           result: enriched?.result,
           inlineDiff: enriched?.inlineDiff,
+          snapshotId: enriched?.snapshotId,
           error: enriched?.error,
           running: false,
           durationS: enriched?.durationS,

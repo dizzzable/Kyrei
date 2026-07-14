@@ -3,6 +3,11 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 
+import {
+  extractLiveModelCapabilities,
+  resolveModelCapabilities,
+} from "./model-capabilities.js";
+
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_BYTES = 1_048_576;
 const DEFAULT_MAX_MODELS = 2_000;
@@ -142,7 +147,7 @@ async function defaultResolveHost(hostname) {
     .map((entry) => ({ address: entry.address, family: entry.family }));
 }
 
-function parseEndpoint(baseURL) {
+function parseEndpoint(baseURL, protocol) {
   let url;
   try {
     url = new URL(String(baseURL ?? "").trim());
@@ -156,7 +161,10 @@ function parseEndpoint(baseURL) {
     url.search ||
     url.hash
   ) throw discoveryError("provider_base_url_invalid");
-  return new URL(`${url.href.replace(/\/+$/, "")}/models`);
+  const endpoint = new URL(`${url.href.replace(/\/+$/, "")}/models`);
+  if (protocol === "anthropic-messages") endpoint.searchParams.set("limit", "1000");
+  if (protocol === "google-generative-ai") endpoint.searchParams.set("pageSize", "1000");
+  return endpoint;
 }
 
 function isHttpsFqdn(url) {
@@ -303,27 +311,52 @@ function containsCredential(value, needles) {
   return needles.exact.has(value) || needles.substrings.some((secret) => value.includes(secret));
 }
 
-function sanitizeModels(payload, maxModels, credentials) {
-  if (!payload || typeof payload !== "object" || !Array.isArray(payload.data)) {
+function sanitizeModels(payload, maxModels, credentials, capabilityContext = {}) {
+  const rows = capabilityContext.protocol === "google-generative-ai" && Array.isArray(payload?.models)
+    ? payload.models
+    : payload?.data;
+  if (!payload || typeof payload !== "object" || !Array.isArray(rows)) {
     throw discoveryError("provider_discovery_invalid_response");
   }
   const needles = credentialNeedles(credentials);
   const models = [];
   const seen = new Set();
-  for (const row of payload.data) {
+  for (const row of rows) {
     if (models.length >= maxModels) break;
     if (!row || typeof row !== "object") continue;
-    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const rawId = typeof row.id === "string"
+      ? row.id.trim()
+      : capabilityContext.protocol === "google-generative-ai" && typeof row.name === "string"
+        ? row.name.trim().replace(/^models\//, "")
+        : "";
+    const id = rawId;
     if (!id || id.length > MAX_MODEL_ID || seen.has(id) || containsCredential(id, needles)) continue;
     seen.add(id);
-    const rawName = typeof row.name === "string" ? row.name.trim() : "";
+    const rawName = typeof row.display_name === "string"
+      ? row.display_name.trim()
+      : typeof row.displayName === "string"
+        ? row.displayName.trim()
+        : capabilityContext.protocol !== "google-generative-ai" && typeof row.name === "string"
+          ? row.name.trim()
+          : "";
     const name = rawName && !containsCredential(rawName, needles) ? rawName.slice(0, MAX_MODEL_NAME) : "";
-    models.push({ id, ...(name ? { name } : {}) });
+    const live = extractLiveModelCapabilities(row, { retrievedAt: capabilityContext.retrievedAt });
+    const capabilities = resolveModelCapabilities({
+      providerId: capabilityContext.providerId,
+      baseURL: capabilityContext.baseURL,
+      modelId: id,
+      live,
+    });
+    models.push({
+      id,
+      ...(name ? { name } : {}),
+      ...(capabilities.provenance.source !== "unknown" ? { capabilities } : {}),
+    });
   }
   return models;
 }
 
-function safeHeaders(value, apiKey) {
+function safeHeaders(value, apiKey, protocol) {
   const headers = { Accept: "application/json", "User-Agent": USER_AGENT };
   if (value && typeof value === "object") {
     for (const [key, raw] of Object.entries(value)) {
@@ -336,12 +369,19 @@ function safeHeaders(value, apiKey) {
       headers[key] = raw;
     }
   }
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (apiKey && protocol === "anthropic-messages") {
+    headers["X-Api-Key"] = apiKey;
+    headers["Anthropic-Version"] = "2023-06-01";
+  } else if (apiKey && protocol === "google-generative-ai") {
+    headers["X-Goog-Api-Key"] = apiKey;
+  } else if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
   return headers;
 }
 
 async function performDiscovery(options, signal) {
-  const endpoint = parseEndpoint(options.baseURL);
+  const endpoint = parseEndpoint(options.baseURL, options.protocol);
   if (options.allowBenchmarkNetwork === true && !isHttpsFqdn(endpoint)) {
     throw discoveryError("provider_discovery_target_blocked");
   }
@@ -355,7 +395,7 @@ async function performDiscovery(options, signal) {
   let response;
   try {
     response = await (options.request ?? defaultRequest)(endpoint, {
-      headers: safeHeaders(options.headers, options.credentials?.apiKey),
+      headers: safeHeaders(options.headers, options.credentials?.apiKey, options.protocol),
       signal,
       pinnedAddress,
       redirect: "manual",
@@ -390,12 +430,18 @@ async function performDiscovery(options, signal) {
   }
   const requestedMax = Number(options.maxModels ?? DEFAULT_MAX_MODELS);
   const maxModels = Math.min(DEFAULT_MAX_MODELS, Math.max(1, Number.isFinite(requestedMax) ? Math.floor(requestedMax) : DEFAULT_MAX_MODELS));
-  return sanitizeModels(payload, maxModels, options.credentials);
+  const retrievedAt = typeof options.now === "function" ? options.now() : Date.now();
+  return sanitizeModels(payload, maxModels, options.credentials, {
+    providerId: options.providerId,
+    baseURL: options.baseURL,
+    protocol: options.protocol,
+    retrievedAt,
+  });
 }
 
-/** Discover models from the OpenAI-compatible GET /models contract. */
+/** Discover models from bounded official/OpenAI-compatible read-only model catalogs. */
 export async function discoverProviderModels(options) {
-  if (options?.protocol !== "openai-chat" && options?.protocol !== "openai-responses") {
+  if (!["openai-chat", "openai-responses", "anthropic-messages", "google-generative-ai"].includes(options?.protocol)) {
     throw discoveryError("provider_discovery_unsupported");
   }
   if (options.signal?.aborted) throw discoveryError("provider_discovery_unavailable");

@@ -47,7 +47,7 @@ describe("toolStart / toolComplete matching", () => {
   it("updates the same part on complete for a matching id (no duplicate)", () => {
     let parts: MessagePart[] = [];
     parts = toolStart(parts, { toolCallId: "call-1", name: "read", args: { path: "a.ts" } });
-    parts = toolComplete(parts, { toolCallId: "call-1", result: "done", durationS: 1.5 });
+    parts = toolComplete(parts, { toolCallId: "call-1", result: "done", durationS: 1.5, snapshotId: "snapshot-1" });
 
     expect(tools(parts)).toHaveLength(1);
     const [tool] = tools(parts);
@@ -55,6 +55,7 @@ describe("toolStart / toolComplete matching", () => {
     expect(tool.running).toBe(false);
     expect(tool.result).toBe("done");
     expect(tool.durationS).toBe(1.5);
+    expect(tool.snapshotId).toBe("snapshot-1");
     expect(tool.args).toEqual({ path: "a.ts" });
   });
 

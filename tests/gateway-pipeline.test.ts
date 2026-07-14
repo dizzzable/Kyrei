@@ -449,6 +449,9 @@ describe("gateway Pipeline v1 control plane", () => {
       error: { code: "action_executor_unavailable" },
     });
     expect(calls.map((call) => String(call.stageId))).toEqual(["research", "planning", "implementation"]);
+    for (const call of calls) {
+      expect(call.readSkillDocument).toEqual(expect.any(Function));
+    }
   });
 
   it("fails closed when a direct Team adapter returns a malformed artifact", async () => {
@@ -830,6 +833,48 @@ describe("gateway Pipeline v1 control plane", () => {
     expect(await start.json()).toMatchObject({ code: "pipeline_runtime_changed" });
   });
 
+  it("pins linked skill document contents in the mission runtime fingerprint", async () => {
+    await configureOrganization();
+    const createdSkill = await request<{ skill: { id: string } }>("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "runtime-linked",
+        description: "Pinned local reference",
+        content: "# Runtime linked\n\n[Reference](reference.md)",
+      }),
+    });
+    const linkedDocument = join(dataDir, "skills", "runtime-linked", "reference.md");
+    await writeFile(linkedDocument, "# Contract\n\nVersion one.\n", "utf8");
+
+    const config = await request<any>("/api/config");
+    const profiles = config.orchestration.profiles.map((entry: any, profileIndex: number) => ({
+      ...entry,
+      roles: entry.roles.map((entryRole: any, roleIndex: number) => profileIndex === 0 && roleIndex === 0
+        ? {
+            ...entryRole,
+            skillIds: [createdSkill.skill.id],
+            capabilities: [...new Set([...entryRole.capabilities, "skills.read"])],
+          }
+        : entryRole),
+    }));
+    await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ orchestration: { ...config.orchestration, profiles } }),
+    });
+    const mission = await request<{ run: { runId: string } }>("/api/pipeline-runs", {
+      method: "POST",
+      body: JSON.stringify({ pipelineId: "coding-product", goal: "Pin linked documentation" }),
+    });
+
+    await writeFile(linkedDocument, "# Contract\n\nVersion two.\n", "utf8");
+    const start = await response(`/api/pipeline-runs/${mission.run.runId}/start`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(start.status).toBe(409);
+    expect(await start.json()).toMatchObject({ code: "pipeline_runtime_changed" });
+  });
+
   it("rejects mission admission when an effective provider is not ready", async () => {
     await configureOrganization();
     const config = await request<any>("/api/config");
@@ -845,7 +890,7 @@ describe("gateway Pipeline v1 control plane", () => {
     expect(await create.json()).toMatchObject({ code: "pipeline_runtime_unavailable" });
   });
 
-  it("rejects mission admission when a referenced skill is unavailable", async () => {
+  it("rejects unavailable skill ids at the Team config boundary", async () => {
     await configureOrganization();
     const config = await request<any>("/api/config");
     const profiles = config.orchestration.profiles.map((entry: any, profileIndex: number) => ({
@@ -855,16 +900,12 @@ describe("gateway Pipeline v1 control plane", () => {
         skillIds: profileIndex === 0 && roleIndex === 0 ? ["missing-required-skill"] : role.skillIds,
       })),
     }));
-    await request("/api/config", {
+    const save = await response("/api/config", {
       method: "PUT",
       body: JSON.stringify({ orchestration: { ...config.orchestration, profiles } }),
     });
-    const create = await response("/api/pipeline-runs", {
-      method: "POST",
-      body: JSON.stringify({ pipelineId: "coding-product", goal: "Must have required skills" }),
-    });
-    expect(create.status).toBe(409);
-    expect(await create.json()).toMatchObject({ code: "pipeline_runtime_unavailable" });
+    expect(save.status).toBe(400);
+    expect(await save.json()).toMatchObject({ code: "team_role_skill_unavailable" });
   });
 
   it("rejects stale Pipeline saves and workspace drift before mission start", async () => {

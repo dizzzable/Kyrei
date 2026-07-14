@@ -6,6 +6,7 @@ import type {
   KyreiEvent,
   ProviderAttemptLifecycle,
   RuntimeSkill,
+  RuntimeSkillDocumentContent,
   RuntimeTeamSpec,
 } from "../types.js";
 import { executeTeamTaskGraph } from "./execute.js";
@@ -42,6 +43,7 @@ export interface RunTeamDepartmentOptions {
   readonly abortSignal?: AbortSignal;
   readonly emit?: (event: KyreiEvent) => void;
   readonly onSkillUsed?: (id: string) => void | Promise<void>;
+  readonly readSkillDocument?: (skillId: string, documentId: string) => Promise<RuntimeSkillDocumentContent | null>;
   readonly providerAttemptLifecycle?: ProviderAttemptLifecycle;
 }
 
@@ -212,6 +214,7 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
     sensitiveValues: options.sensitiveValues,
     emit,
     onSkillUsed: options.onSkillUsed,
+    ...(options.readSkillDocument ? { readSkillDocument: options.readSkillDocument } : {}),
     providerAttemptLifecycle: options.providerAttemptLifecycle,
     readOnly: true,
   });

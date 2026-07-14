@@ -1,8 +1,8 @@
 /** Model registry (Phase 3). Requirements §7.1, §7.2. */
 
 export interface ModelLimits {
-  contextWindow: number;
-  maxOutput: number;
+  contextWindow?: number;
+  maxOutput?: number;
 }
 export interface ModelCost {
   inputPerM: number;
@@ -21,6 +21,13 @@ export interface ModelEntry {
   limits: ModelLimits;
   cost: ModelCost;
   caps: ModelCaps;
+}
+
+export interface ModelResolveHint {
+  baseURL?: string;
+  id?: string;
+  provider?: string;
+  protocol?: string;
 }
 
 const REGISTRY: Record<string, ModelEntry> = {
@@ -50,15 +57,46 @@ const REGISTRY: Record<string, ModelEntry> = {
   },
 };
 
-/** Resolve a model id to an entry; unknown ids get safe defaults from the hint. */
-export function resolve(id: string, hint?: { baseURL?: string; id?: string; provider?: string }): ModelEntry {
+const CANONICAL_PROTOCOLS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  openai: Object.freeze(["openai-chat", "openai-responses"]),
+  deepseek: Object.freeze(["openai-chat"]),
+  ollama: Object.freeze(["openai-chat"]),
+});
+
+function normalizedEndpoint(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.search || url.hash) return undefined;
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    return `${url.protocol}//${url.host.toLowerCase()}${path}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function isCanonicalHint(entry: ModelEntry, hint?: ModelResolveHint): boolean {
+  if (!hint) return true;
+  if (hint.baseURL !== undefined) {
+    const expected = normalizedEndpoint(entry.baseURL);
+    const actual = normalizedEndpoint(hint.baseURL);
+    if (!expected || !actual || expected !== actual) return false;
+  }
+  const protocols = CANONICAL_PROTOCOLS[entry.provider];
+  if (hint.protocol !== undefined && protocols && !protocols.includes(hint.protocol)) return false;
+  return true;
+}
+
+/** Resolve a model id; unknown endpoint/model combinations keep their limits unknown. */
+export function resolve(id: string, hint?: ModelResolveHint): ModelEntry {
   const entry = REGISTRY[id];
-  if (entry) return { ...entry, baseURL: hint?.baseURL ?? entry.baseURL, provider: hint?.provider ?? entry.provider };
+  if (entry && isCanonicalHint(entry, hint)) {
+    return { ...entry, baseURL: hint?.baseURL ?? entry.baseURL, provider: hint?.provider ?? entry.provider };
+  }
   return {
     id: hint?.id ?? id,
     provider: hint?.provider ?? "custom",
     baseURL: hint?.baseURL ?? "http://localhost:11434/v1",
-    limits: { contextWindow: 32_000, maxOutput: 4_096 },
+    limits: {},
     cost: { inputPerM: 0, outputPerM: 0 },
     caps: { tools: true, reasoning: false, streaming: true, vision: false },
   };

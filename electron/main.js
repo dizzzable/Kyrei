@@ -1,14 +1,17 @@
-import { app, BrowserWindow, Menu, dialog, safeStorage, shell } from "electron";
+import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, shell } from "electron";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../core/gateway.js";
+import { registerDesktopIpc } from "./desktop-ipc.js";
 import { installDesktopViewportGuard } from "./desktop-viewport-guard.js";
+import { TerminalSessionManager } from "./terminal-session-manager.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const appIcon = join(here, "..", "assets", "icon.png");
 
 let windowRef;
 let gateway; // { port, token, close }
+let desktopCapabilities; // { terminalManager, dispose }
 let shutdownStarted = false;
 let shutdownComplete = false;
 
@@ -108,6 +111,15 @@ if (ownsSingleInstance) app.whenReady().then(async () => {
     const devUrl = process.env.KYREI_RENDERER_URL;
     const rendererOrigin = devUrl ? new URL(devUrl).origin : "null";
     const secretsCodec = await createSecretsCodec();
+    const terminalManager = new TerminalSessionManager({ defaultCwd: app.getPath("home") });
+    const commandRunner = {
+      run: (input) => terminalManager.runAgentCommand({
+        ...input,
+        // Renderer identity is derived from the trusted BrowserWindow. It is
+        // never accepted from the HTTP request or tool arguments.
+        rendererId: windowRef && !windowRef.isDestroyed() ? windowRef.webContents.id : 0,
+      }),
+    };
     gateway = await startGateway({
       dataDir: join(app.getPath("userData"), "kyrei"),
       chooseFolder,
@@ -116,7 +128,15 @@ if (ownsSingleInstance) app.whenReady().then(async () => {
       rendererOrigin,
       runtimeBuildId: `${app.getVersion()}:${process.env.KYREI_BUILD_ID ?? "release"}`,
       requireProtectedSecrets: true,
+      commandRunner,
       ...(secretsCodec ? { secretsCodec } : {}),
+    });
+    desktopCapabilities = registerDesktopIpc({
+      ipcMain,
+      dialog,
+      defaultCwd: app.getPath("home"),
+      getWindow: (webContents) => BrowserWindow.fromWebContents(webContents),
+      terminalManager,
     });
     await createWindow(gateway.port, gateway.token);
   } catch (error) {
@@ -132,8 +152,11 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
-  Promise.resolve(gateway && typeof gateway.close === "function" ? gateway.close() : undefined)
-    .catch(error => console.error("[kyrei] gateway shutdown failed:", error))
+  Promise.all([
+    Promise.resolve(gateway && typeof gateway.close === "function" ? gateway.close() : undefined),
+    Promise.resolve(desktopCapabilities && typeof desktopCapabilities.dispose === "function" ? desktopCapabilities.dispose() : undefined),
+  ])
+    .catch(error => console.error("[kyrei] desktop shutdown failed:", error))
     .finally(() => {
       shutdownComplete = true;
       app.quit();

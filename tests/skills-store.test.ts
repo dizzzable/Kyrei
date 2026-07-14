@@ -26,6 +26,184 @@ async function writeSkill(directory: string, name: string, description = "descri
 }
 
 describe("SkillsStore discovery and durable state", () => {
+  it("discovers the read-only Kiro root and exposes only safe linked-doc metadata publicly", async () => {
+    const kiroRoot = join(root, ".kiro");
+    const skillDirectory = join(kiroRoot, "skills", "official-react");
+    await mkdir(join(skillDirectory, "references"), { recursive: true });
+    await mkdir(join(kiroRoot, "docs", "react-official"), { recursive: true });
+    await writeFile(join(skillDirectory, "SKILL.md"), `---\nname: official-react\ndescription: Read official React docs\n---\n\nRead [local map](references/index.md) and [source](../../docs/react-official/source.md). Ignore [escape](../../outside.md).\n`, "utf8");
+    await writeFile(join(skillDirectory, "references", "index.md"), "# Local map", "utf8");
+    await writeFile(join(kiroRoot, "docs", "react-official", "source.md"), "# Official source", "utf8");
+    await writeFile(join(kiroRoot, "outside.md"), "must not be reachable", "utf8");
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "official-react")!;
+    expect(skill).toMatchObject({ provenance: "kiro", owned: false });
+    expect(skill.references).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "local map", relativePath: "references/index.md", source: "skill" }),
+      expect.objectContaining({ label: "source", relativePath: "react-official/source.md", source: "kiro-docs" }),
+    ]));
+    expect(skill.references).toHaveLength(2);
+    expect(JSON.stringify(skill.references)).not.toContain("Official source");
+    await expect(store.delete(skill.id)).rejects.toMatchObject({ code: "root_not_owned" });
+
+    const runtime = await store.runtimeSkills({ ids: [skill.id] });
+    expect(runtime.skills[0]?.documents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "local map", source: "skill" }),
+      expect.objectContaining({ label: "source", source: "kiro-docs" }),
+    ]));
+    expect(JSON.stringify(runtime.skills[0]?.documents)).not.toContain("# Local map");
+    const source = skill.references.find((reference: { label: string }) => reference.label === "source");
+    await expect(store.readRuntimeDocument(skill.id, source.id)).resolves.toMatchObject({
+      id: source.id,
+      content: "# Official source",
+    });
+    expect(JSON.stringify(runtime.skills[0]?.documents)).not.toContain("must not be reachable");
+  });
+
+  it("expands one bounded Kiro index level and lazily reads linked MDX leaves", async () => {
+    const kiroRoot = join(root, ".kiro-index");
+    const skillDirectory = join(kiroRoot, "skills", "official-react");
+    const references = join(skillDirectory, "references");
+    const docs = join(kiroRoot, "docs", "react", "reference");
+    await mkdir(references, { recursive: true });
+    await mkdir(docs, { recursive: true });
+    await writeFile(join(skillDirectory, "SKILL.md"), `---\nname: official-react\n---\n\n[index](references/index.md)\n`, "utf8");
+    await writeFile(join(references, "index.md"), "# Index\n\n[useState](../../../docs/react/reference/use-state.mdx)\n\n```md\n[fake](../../../docs/react/reference/ignored.mdx)\n```\n", "utf8");
+    await writeFile(join(docs, "use-state.mdx"), "# useState\n\nExact local reference.", "utf8");
+    await writeFile(join(docs, "ignored.mdx"), "must stay outside", "utf8");
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "official-react")!;
+    const index = skill.references.find((reference: { label: string }) => reference.label === "index")!;
+    const leaf = skill.references.find((reference: { label: string }) => reference.label === "useState")!;
+    expect(leaf).toMatchObject({
+      source: "kiro-docs",
+      relativePath: "react/reference/use-state.mdx",
+      parentId: index.id,
+    });
+    const runtime = await store.runtimeSkills({ ids: [skill.id] });
+    expect(JSON.stringify(runtime.skills[0]?.documents)).not.toContain("Exact local reference");
+    await expect(store.readRuntimeDocument(skill.id, leaf.id)).resolves.toMatchObject({
+      content: "# useState\n\nExact local reference.",
+    });
+    await expect(store.readRuntimeDocument(skill.id, "doc_000000000000000000000000")).resolves.toBeNull();
+    expect(skill.references.some((reference: { label: string }) => reference.label === "fake")).toBe(false);
+  });
+
+  it("builds a deterministic content identity for SKILL.md, linked indexes, and lazy leaves", async () => {
+    const kiroRoot = join(root, ".kiro-identity");
+    const skillDirectory = join(kiroRoot, "skills", "identity-skill");
+    const references = join(skillDirectory, "references");
+    const docs = join(kiroRoot, "docs", "identity");
+    await mkdir(references, { recursive: true });
+    await mkdir(docs, { recursive: true });
+    const skillFile = join(skillDirectory, "SKILL.md");
+    const indexFile = join(references, "index.md");
+    const leafFile = join(docs, "leaf.md");
+    await writeFile(skillFile, `---\nname: identity-skill\n---\n\n[index](references/index.md)\n`, "utf8");
+    await writeFile(indexFile, "# Index\n\n[leaf](../../../docs/identity/leaf.md)\n", "utf8");
+    await writeFile(leafFile, "leaf content one", "utf8");
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "identity-skill")!;
+    const first = await store.runtimeIdentity({ ids: [skill.id] });
+    expect(first).toMatchObject({ version: 1, complete: true });
+    expect(first.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.skills[0]).toMatchObject({
+      id: skill.id,
+      enabled: true,
+      available: true,
+      documents: [
+        expect.objectContaining({ available: true, digest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+        expect.objectContaining({ available: true, digest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      ],
+    });
+    expect(JSON.stringify(first)).not.toContain("leaf content one");
+
+    await writeFile(leafFile, "leaf content two", "utf8");
+    const afterLeaf = await store.runtimeIdentity({ ids: [skill.id] });
+    expect(afterLeaf.digest).not.toBe(first.digest);
+
+    await writeFile(indexFile, "# Renamed index\n\n[leaf](../../../docs/identity/leaf.md)\n", "utf8");
+    const afterIndex = await store.runtimeIdentity({ ids: [skill.id] });
+    expect(afterIndex.digest).not.toBe(afterLeaf.digest);
+
+    await writeFile(skillFile, `---\nname: identity-skill\n---\n\nUpdated instructions.\n\n[index](references/index.md)\n`, "utf8");
+    const afterSkill = await store.runtimeIdentity({ ids: [skill.id] });
+    expect(afterSkill.digest).not.toBe(afterIndex.digest);
+  });
+
+  it("marks missing linked documents and runtime identity budgets as incomplete", async () => {
+    const kiroRoot = join(root, ".kiro-incomplete-identity");
+    const skillDirectory = join(kiroRoot, "skills", "incomplete-skill");
+    const references = join(skillDirectory, "references");
+    const docs = join(kiroRoot, "docs", "identity");
+    await mkdir(references, { recursive: true });
+    await mkdir(docs, { recursive: true });
+    await writeFile(join(skillDirectory, "SKILL.md"), `---\nname: incomplete-skill\n---\n\n[index](references/index.md)\n`, "utf8");
+    await writeFile(join(references, "index.md"), "[leaf](../../../docs/identity/leaf.md)\n", "utf8");
+    const leafFile = join(docs, "leaf.md");
+    await writeFile(leafFile, "temporary leaf", "utf8");
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "incomplete-skill")!;
+    await rm(leafFile);
+    const missing = await store.runtimeIdentity({ ids: [skill.id] });
+    expect(missing.complete).toBe(false);
+    expect(missing.skills[0]).toMatchObject({ available: false, error: "runtime_identity_incomplete" });
+    expect(missing.unavailable).toEqual(expect.arrayContaining([
+      expect.objectContaining({ skillId: skill.id, code: "document_unavailable" }),
+    ]));
+
+    const bounded = await store.runtimeIdentity({ ids: [skill.id], maxBytes: 1 });
+    expect(bounded.complete).toBe(false);
+    expect(bounded.bytes).toBe(0);
+    expect(bounded.unavailable).toEqual(expect.arrayContaining([
+      expect.objectContaining({ skillId: skill.id, code: "identity_byte_limit" }),
+    ]));
+    const missingSkillId = skill.id === "skill_000000000000000000000000"
+      ? "skill_111111111111111111111111"
+      : "skill_000000000000000000000000";
+    await expect(store.runtimeIdentity({ ids: [skill.id, missingSkillId], maxSkills: 1 }))
+      .rejects.toMatchObject({ code: "runtime_identity_skill_limit" });
+  });
+
+  it("does not expand linked indexes for disabled skills", async () => {
+    const kiroRoot = join(root, ".kiro-disabled-identity");
+    const skillDirectory = join(kiroRoot, "skills", "disabled-skill");
+    const references = join(skillDirectory, "references");
+    await mkdir(references, { recursive: true });
+    await writeFile(join(skillDirectory, "SKILL.md"), `---\nname: disabled-skill\n---\n\n[index](references/index.md)\n`, "utf8");
+    const indexFile = join(references, "index.md");
+    await writeFile(indexFile, "[leaf](leaf.md)\n", "utf8");
+    await writeFile(join(references, "leaf.md"), "must remain unread", "utf8");
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "disabled-skill")!;
+    expect(skill.references.length).toBeGreaterThan(0);
+    await store.setEnabled(skill.id, false);
+    await rm(indexFile);
+
+    const disabled = (await store.list()).find((candidate) => candidate.id === skill.id)!;
+    expect(disabled).toMatchObject({ enabled: false, references: [] });
+    const identity = await store.runtimeIdentity({ ids: [skill.id] });
+    expect(identity).toMatchObject({ complete: false });
+    expect(identity.skills[0]).toMatchObject({
+      id: skill.id,
+      enabled: false,
+      available: false,
+      documents: [],
+      error: "skill_disabled",
+    });
+    expect(JSON.stringify(identity)).not.toContain("must remain unread");
+  });
+
   it("creates global and workspace roots and discovers only root/immediate-child SKILL.md files", async () => {
     const store = new SkillsStore({ dataDir, workspace });
     await store.load();
@@ -130,6 +308,68 @@ describe("SkillsStore safety and owned mutations", () => {
     }
     expect((await store.list()).some((skill) => skill.name === "outside")).toBe(false);
     await expect(store.addRoot(linkedRoot)).rejects.toMatchObject({ code: "invalid_root" });
+  });
+
+  it("blocks symlinked Kiro roots and linked documents", async () => {
+    const outside = join(root, "kiro-outside");
+    const linkedKiro = join(root, ".kiro-linked");
+    await writeSkill(join(outside, "skills", "outside"), "outside");
+    await mkdir(join(outside, "docs"), { recursive: true });
+    try {
+      await symlink(outside, linkedKiro, process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      return;
+    }
+    const store = new SkillsStore({ dataDir, kiroRoot: linkedKiro });
+    await store.load();
+    expect((await store.roots()).find((candidate) => candidate.provenance === "kiro")).toMatchObject({ available: false });
+    expect((await store.list()).some((skill) => skill.name === "outside")).toBe(false);
+  });
+
+  it("keeps Kiro skills available but rejects a symlinked docs root", async () => {
+    const kiroRoot = join(root, ".kiro-docs-link");
+    const outsideDocs = join(root, "outside-docs-root");
+    const skillDirectory = join(kiroRoot, "skills", "linked-docs");
+    await mkdir(skillDirectory, { recursive: true });
+    await mkdir(outsideDocs, { recursive: true });
+    await writeFile(join(outsideDocs, "secret.md"), "outside secret", "utf8");
+    await writeFile(join(skillDirectory, "SKILL.md"), `---\nname: linked-docs\n---\n\n[secret](../../docs/secret.md)\n`, "utf8");
+    try {
+      await symlink(outsideDocs, join(kiroRoot, "docs"), process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      return;
+    }
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "linked-docs");
+    expect(skill).toBeDefined();
+    expect(skill?.references).toEqual([]);
+    expect(JSON.stringify(await store.runtimeSkills({ ids: [skill!.id] }))).not.toContain("outside secret");
+  });
+
+  it("rejects symlinked files and intermediate directories inside linked-document roots", async () => {
+    const kiroRoot = join(root, ".kiro-contained-links");
+    const skillDirectory = join(kiroRoot, "skills", "contained-links");
+    const docsRoot = join(kiroRoot, "docs");
+    const outside = join(root, "outside-contained-links");
+    await mkdir(skillDirectory, { recursive: true });
+    await mkdir(docsRoot, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "secret.md"), "outside secret", "utf8");
+    await writeFile(join(skillDirectory, "SKILL.md"), `---\nname: contained-links\n---\n\n[file](../../docs/file.md) [nested](../../docs/nested/secret.md)\n`, "utf8");
+    try {
+      await symlink(join(outside, "secret.md"), join(docsRoot, "file.md"), "file");
+      await symlink(outside, join(docsRoot, "nested"), process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      return;
+    }
+
+    const store = new SkillsStore({ dataDir, kiroRoot });
+    await store.load();
+    const skill = (await store.list()).find((candidate) => candidate.name === "contained-links");
+    expect(skill?.references).toEqual([]);
+    expect(JSON.stringify(await store.runtimeSkills({ ids: [skill!.id] }))).not.toContain("outside secret");
   });
 
   it.each([".kyrei", "skills"] as const)(

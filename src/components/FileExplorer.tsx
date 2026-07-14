@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, ChevronRight, File, Folder, RefreshCw, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { ArrowLeft, ChevronRight, File, Folder, FolderOpen, RefreshCw, X } from "lucide-react";
 
 import { CodeBlock } from "./CodeBlock";
 import { useI18n } from "@/i18n";
+import { desktopWorkspace } from "@/lib/desktop";
 import { gateway } from "@/lib/gateway";
+import { cn } from "@/lib/utils";
 
 interface Entry {
   name: string;
@@ -23,39 +25,109 @@ function langFor(name: string): string {
 }
 
 export function FileExplorer({
-  hasWorkspace,
+  workspace,
   workspaceName,
+  onWorkspaceOpen,
   onClose,
 }: {
-  hasWorkspace: boolean;
+  workspace?: string;
   workspaceName: string;
+  onWorkspaceOpen: (path: string) => Promise<void> | void;
   onClose: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const navigationRequest = useRef(0);
+  const previewRequest = useRef(0);
+  const hasWorkspace = Boolean(workspace);
+  const desktopAvailable = desktopWorkspace.available();
 
   const load = useCallback((nextPath: string) => {
+    const request = ++navigationRequest.current;
     setError(null);
     gateway.listFiles(nextPath)
       .then((result) => {
+        if (request !== navigationRequest.current) return;
         setEntries(result.entries);
         setPath(result.path);
       })
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .catch((reason: unknown) => {
+        if (request === navigationRequest.current) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      });
   }, []);
 
   useEffect(() => {
-    if (hasWorkspace) load("");
-  }, [hasWorkspace, load]);
+    previewRequest.current += 1;
+    setPreview(null);
+    if (workspace) load("");
+    else {
+      navigationRequest.current += 1;
+      setPath("");
+      setEntries([]);
+    }
+  }, [workspace, load]);
+
+  const connectWorkspace = async (nextPath: string) => {
+    setError(null);
+    setOpening(true);
+    try {
+      await onWorkspaceOpen(nextPath);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setOpening(false);
+      setDropActive(false);
+    }
+  };
+
+  const chooseWorkspace = async () => {
+    setError(null);
+    try {
+      const selected = await desktopWorkspace.choose(lang);
+      if (!selected.canceled && selected.path) await connectWorkspace(selected.path);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const dropWorkspace = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (hasWorkspace || opening) return;
+    const file = event.dataTransfer.files.length === 1 ? event.dataTransfer.files.item(0) : null;
+    const rawPath = file ? window.kyrei?.getPathForFile?.(file) ?? "" : "";
+    if (!rawPath) {
+      setDropActive(false);
+      setError(t("shell.developer.dropInvalid"));
+      return;
+    }
+    try {
+      const selected = await desktopWorkspace.validatePath(rawPath);
+      await connectWorkspace(selected.path);
+    } catch (reason) {
+      setDropActive(false);
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
 
   const openFile = (filePath: string) => {
+    const request = ++previewRequest.current;
     setError(null);
     gateway.readFile(filePath)
-      .then((result) => setPreview({ path: result.path, content: result.content }))
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
+      .then((result) => {
+        if (request === previewRequest.current) setPreview({ path: result.path, content: result.content });
+      })
+      .catch((reason: unknown) => {
+        if (request === previewRequest.current) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        }
+      });
   };
 
   const up = () => {
@@ -71,8 +143,18 @@ export function FileExplorer({
         <Folder size={13} aria-hidden />
         <span className="truncate font-semibold uppercase tracking-[0.12em]">{workspaceName}</span>
         <button
+          onClick={() => void chooseWorkspace()}
+          disabled={!desktopAvailable || opening}
+          className="shell-icon-button ml-auto disabled:cursor-not-allowed disabled:opacity-35"
+          title={t("shell.developer.openWorkspace")}
+          aria-label={t("shell.developer.openWorkspace")}
+        >
+          <FolderOpen size={13} aria-hidden />
+        </button>
+        <button
           onClick={() => (preview ? setPreview(null) : load(path))}
-          className="shell-icon-button ml-auto"
+          disabled={!hasWorkspace}
+          className="shell-icon-button disabled:cursor-not-allowed disabled:opacity-35"
           title={t("shell.developer.refresh")}
           aria-label={t("shell.developer.refresh")}
         >
@@ -89,7 +171,39 @@ export function FileExplorer({
       </div>
 
       {!hasWorkspace ? (
-        <div className="px-3 py-4 text-[11.5px] leading-5 text-muted">{t("shell.developer.noWorkspace")}</div>
+        <div
+          className={cn(
+            "m-2 flex min-h-0 flex-1 flex-col items-center justify-center rounded-md border border-dashed px-4 py-6 text-center transition-colors",
+            dropActive ? "border-primary bg-primary/8" : "border-border-soft bg-bg/30",
+          )}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            if (!opening) setDropActive(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+          }}
+          onDragLeave={(event) => {
+            const next = event.relatedTarget;
+            if (!(next instanceof Node) || !event.currentTarget.contains(next)) setDropActive(false);
+          }}
+          onDrop={(event) => void dropWorkspace(event)}
+        >
+          <FolderOpen size={24} className="mb-3 text-primary" aria-hidden />
+          <div className="text-[11.5px] font-medium text-secondary">{t("shell.developer.noWorkspace")}</div>
+          <div className="mt-1 max-w-[14rem] text-[10px] leading-4 text-muted">{t("shell.developer.dropWorkspace")}</div>
+          <button
+            type="button"
+            onClick={() => void chooseWorkspace()}
+            disabled={!desktopAvailable || opening}
+            className="primary-action mt-4 inline-flex items-center gap-1.5 px-3 py-1.5 text-[10.5px] disabled:cursor-wait disabled:opacity-50"
+          >
+            <FolderOpen size={12} aria-hidden />
+            {opening ? t("shell.developer.openingWorkspace") : t("shell.developer.openWorkspace")}
+          </button>
+          {error && <div className="mt-3 max-w-full break-words text-[10px] leading-4 text-danger">{error}</div>}
+        </div>
       ) : preview ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center gap-2 border-b border-border-soft px-2 py-1.5">

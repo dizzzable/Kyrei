@@ -144,6 +144,22 @@ const DelegationConfigSchema = z.object({
   maxSteps: z.number().int().min(1).max(24).default(DEFAULT_ENGINE_CONFIG.delegation.maxSteps),
 });
 
+const PromptProfileIdSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+const SafeSingleLineSchema = (max: number, min = 0) => z.string().trim().min(min).max(max)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "control characters are not allowed");
+const SafeMultilineSchema = z.string().trim().max(20_000)
+  .refine((value) => !/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(value), "control characters are not allowed");
+const PromptProfileSchema = z.object({
+  id: PromptProfileIdSchema,
+  name: SafeSingleLineSchema(120, 1),
+  description: SafeSingleLineSchema(1_000).default(""),
+  systemPrompt: SafeMultilineSchema,
+});
+const PromptProfilesSchema = z.array(PromptProfileSchema).max(64).refine(
+  (profiles) => new Set(profiles.map((profile) => profile.id)).size === profiles.length,
+  "prompt profile ids must be unique",
+);
+
 /** Full engine config schema. All fields optional with sane defaults. */
 export const EngineConfigSchema = z.object({
   maxSteps: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.maxSteps),
@@ -155,6 +171,8 @@ export const EngineConfigSchema = z.object({
   sandbox: z.enum(["off", "strict", "strict-required"]).default(DEFAULT_ENGINE_CONFIG.sandbox),
   apiMaxRetries: z.number().int().min(0).max(10).default(DEFAULT_ENGINE_CONFIG.apiMaxRetries),
   personality: z.string().max(4000).default(DEFAULT_ENGINE_CONFIG.personality),
+  promptProfiles: PromptProfilesSchema.default(DEFAULT_ENGINE_CONFIG.promptProfiles),
+  activePromptProfileId: z.union([PromptProfileIdSchema, z.literal("")]).default(DEFAULT_ENGINE_CONFIG.activePromptProfileId),
   fileReadMaxChars: z.number().int().min(1000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.fileReadMaxChars),
   delegation: DelegationConfigSchema.default(DEFAULT_ENGINE_CONFIG.delegation),
   memory: MemoryConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory),
@@ -257,6 +275,10 @@ export function resolveEngineConfig(raw?: unknown): ResolveResult {
       warnings.push("delegation.maxParallel > maxTasks - clamped to maxTasks");
       cfg.delegation = { ...cfg.delegation, maxParallel: cfg.delegation.maxTasks };
     }
+    if (cfg.activePromptProfileId && !cfg.promptProfiles.some((profile) => profile.id === cfg.activePromptProfileId)) {
+      warnings.push("activePromptProfileId does not reference an available prompt profile - cleared");
+      cfg.activePromptProfileId = "";
+    }
     return { config: cfg as EngineConfig, warnings };
   }
 
@@ -271,5 +293,8 @@ export function resolveEngineConfig(raw?: unknown): ResolveResult {
   }
   const retry = EngineConfigSchema.safeParse(salvaged);
   const config = (retry.success ? retry.data : EngineConfigSchema.parse({})) as EngineConfig;
+  if (config.activePromptProfileId && !config.promptProfiles.some((profile) => profile.id === config.activePromptProfileId)) {
+    config.activePromptProfileId = "";
+  }
   return { config, warnings };
 }

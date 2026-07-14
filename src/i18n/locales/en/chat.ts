@@ -64,6 +64,8 @@ export const enChat = {
   "chat.model.none": "No model",
   "chat.message.copy": "Copy",
   "chat.message.copied": "Copied",
+  "chat.message.rewind": "Edit from here",
+  "chat.message.rewindConfirm": "Restore code to this point and move this prompt back into the composer? Later messages will be removed.",
   "chat.code.language": "code",
   "chat.code.copy": "Copy",
   "chat.code.copied": "Copied",

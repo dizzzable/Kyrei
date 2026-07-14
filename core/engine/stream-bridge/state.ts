@@ -6,6 +6,7 @@ export interface ToolInFlight {
   args?: unknown;
   startedAt: number;
   inlineDiff?: string;
+  snapshotId?: string;
   result?: string;
   error?: string;
 }

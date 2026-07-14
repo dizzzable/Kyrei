@@ -17,6 +17,8 @@ export interface ToolPart {
   args?: unknown;
   result?: string;
   inlineDiff?: string;
+  /** Opaque automatic workspace checkpoint used only by the rewind API. */
+  snapshotId?: string;
   error?: string;
   running: boolean;
   durationS?: number;
@@ -46,6 +48,26 @@ export interface SessionInfo {
   modelId?: string;
   /** Soft affinity to one credential inside the provider account pool. */
   providerAccountId?: string;
+  /** Live or most recent runtime activity for this session. */
+  activity?: {
+    active: boolean;
+    phase: "thinking" | "reasoning" | "tool" | "recovering" | "responding" | "complete" | "failed" | "interrupted";
+    startedAt: number;
+    updatedAt: number;
+    completedAt?: number;
+    currentTool?: string;
+    eventCount: number;
+    toolCount: number;
+    tokens?: number;
+  };
+}
+
+export interface StoredChatMessage {
+  id: string;
+  role: ChatMessage["role"];
+  content: string;
+  parts?: MessagePart[];
+  at?: string;
 }
 
 export interface GatewayStatus {
@@ -66,7 +88,16 @@ export interface GatewayStatus {
   agents: SubagentRun[];
 }
 
-export type SkillProvenance = "global" | "workspace" | "custom";
+export type SkillProvenance = "global" | "workspace" | "custom" | "kiro";
+
+export interface SkillReference {
+  id: string;
+  label: string;
+  relativePath: string;
+  source: "skill" | "kiro-docs";
+  /** Opaque id of the direct local index that linked this leaf. */
+  parentId?: string;
+}
 
 export interface SkillRoot {
   id: string;
@@ -88,6 +119,8 @@ export interface SkillInfo {
   lastUsedAt?: string;
   relativePath: string;
   content?: string;
+  /** Metadata only; linked document contents remain behind the runtime tool boundary. */
+  references?: SkillReference[];
 }
 
 export interface CronRun {
@@ -142,14 +175,70 @@ export interface SubagentRun {
   error?: string;
 }
 
+export type ModelModality = "text" | "image" | "audio" | "video" | "file";
+export type ModelCapabilitySource = "live-provider" | "curated" | "mixed" | "user-override" | "unknown";
+export type ModelCapabilityConfidence = "high" | "medium" | "low" | "unknown";
+export type ModelCapabilityField =
+  | "contextWindow"
+  | "maxOutput"
+  | "inputModalities"
+  | "outputModalities"
+  | "tools"
+  | "reasoning"
+  | "streaming";
+
+export interface ModelCapabilityFieldProvenance {
+  source: ModelCapabilitySource;
+  confidence: ModelCapabilityConfidence;
+  /** Present only for allowlisted official curated sources. */
+  reference?: string;
+}
+
+export interface ModelCapabilityMetadata {
+  limits?: {
+    contextWindow?: number;
+    maxOutput?: number;
+  };
+  modalities?: {
+    input?: ModelModality[];
+    output?: ModelModality[];
+  };
+  features?: {
+    tools?: boolean;
+    reasoning?: boolean;
+    streaming?: boolean;
+  };
+  provenance: {
+    source: ModelCapabilitySource;
+    confidence: ModelCapabilityConfidence;
+    retrievedAt?: number;
+    fields: Partial<Record<ModelCapabilityField, ModelCapabilityFieldProvenance>>;
+    /** Exact endpoint identity that produced live metadata; never inferred from a model id. */
+    origin?: {
+      protocol: ProviderProtocol;
+      baseURL: string;
+      modelId: string;
+    };
+  };
+}
+
 export interface ProviderModel {
   id: string;
   name?: string;
+  /** Sanitized discovery/registry metadata; absence means unknown, never 32k by default. */
+  capabilities?: ModelCapabilityMetadata;
 }
 
 export interface ModelRef {
   providerId: string;
   modelId: string;
+}
+
+export interface PromptProfile {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
 }
 
 export type TeamWorkflow = "supervisor" | "consensus";
@@ -167,6 +256,7 @@ export interface TeamRoleProfile {
   name: string;
   description: string;
   instructions: string;
+  promptProfileId?: string;
   model?: ModelRef;
   skillIds: string[];
   capabilities: TeamCapability[];
@@ -527,6 +617,7 @@ export interface GatewayEvent {
     error?: string;
     duration_s?: number;
     inline_diff?: string;
+    snapshot_id?: string;
     status?: string;
     session_id?: string;
     provider_id?: string;

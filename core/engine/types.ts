@@ -112,6 +112,7 @@ export type KyreiEvent =
         name: string;
         result?: string;
         inline_diff?: string;
+        snapshot_id?: string;
         error?: string;
         duration_s: number;
       };
@@ -135,6 +136,7 @@ export type MessagePart =
       args?: unknown;
       result?: string;
       inlineDiff?: string;
+      snapshotId?: string;
       error?: string;
       running: boolean;
       durationS?: number;
@@ -167,6 +169,14 @@ export interface DelegationConfig {
   maxSteps: number;
 }
 
+/** User-authored behaviour profile. It is advisory and always subordinate to Kyrei policy. */
+export interface PromptProfile {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+}
+
 export interface EngineConfig {
   maxSteps: number;
   commandTimeoutMs: number;
@@ -180,6 +190,10 @@ export interface EngineConfig {
   apiMaxRetries: number;
   /** Optional assistant personality/style prepended to the system prompt. */
   personality: string;
+  /** Bounded user-authored prompt profiles available to the main agent and Team roles. */
+  promptProfiles: PromptProfile[];
+  /** Empty means no additional profile is assigned to the main agent. */
+  activePromptProfileId: string;
   /** Max characters returned by read_file (separate from tool-output cap). */
   fileReadMaxChars: number;
   /** Flat, bounded, read-only subagent delegation. */
@@ -198,6 +212,8 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   sandbox: "off",
   apiMaxRetries: 2,
   personality: "",
+  promptProfiles: [],
+  activePromptProfileId: "",
   fileReadMaxChars: 250_000,
   delegation: {
     enabled: true,
@@ -223,6 +239,10 @@ export interface ModelParams {
   fast?: boolean;
   /** Explicit thinking toggle; when true without effort, implies medium. */
   reasoning?: boolean;
+  /** User-confirmed context/input limit. Runtime validates bounds before use. */
+  contextWindowOverride?: number;
+  /** User-confirmed output-token limit. Runtime validates bounds before use. */
+  maxOutputOverride?: number;
 }
 
 export type ProviderProtocol =
@@ -250,8 +270,33 @@ export interface RuntimeSkill {
   id: string;
   name: string;
   description: string;
-  provenance: "global" | "project" | "custom";
+  provenance: "global" | "project" | "custom" | "kiro";
   content: string;
+  /** Private runtime-only documents explicitly linked from this skill. */
+  documents?: RuntimeSkillDocument[];
+}
+
+export interface RuntimeSkillDocument {
+  id: string;
+  label: string;
+  relativePath: string;
+  source: "skill" | "kiro-docs";
+  /** Set for a leaf discovered from one directly linked local index. */
+  parentId?: string;
+}
+
+export interface RuntimeSkillDocumentContent extends RuntimeSkillDocument {
+  content: string;
+}
+
+/**
+ * Provider-reported model limits carried across the private gateway boundary.
+ * Fields stay optional because an honest provider catalog may not publish one
+ * or both values.
+ */
+export interface RuntimeModelLimits {
+  contextWindow?: number;
+  maxOutput?: number;
 }
 
 /** Gateway-resolved private target for an isolated auxiliary model call. */
@@ -266,6 +311,8 @@ export interface RuntimeProviderTarget {
   credentials?: ProviderCredentials;
   headers?: Record<string, string>;
   requiresApiKey?: boolean;
+  /** Sanitized live/curated limits for this exact provider endpoint + model. */
+  limits?: RuntimeModelLimits;
 }
 
 /** Credential-free identity exposed to gateway-owned account admission. */
@@ -332,6 +379,10 @@ export interface RuntimeTeamRole {
   name: string;
   description?: string;
   instructions?: string;
+  /** Public assignment id retained for diagnostics; it contains no prompt text. */
+  promptProfileId?: string;
+  /** Engine-resolved profile content. Never accepted from a renderer runtime spec. */
+  systemPrompt?: string;
   target: RuntimeProviderTarget;
   skillIds: string[];
   capabilities: AgentCapability[];
@@ -345,6 +396,27 @@ export interface RuntimeTeamSpec {
   workflow: "supervisor" | "consensus";
   limits: RuntimeTeamLimits;
   roles: RuntimeTeamRole[];
+}
+
+/**
+ * Gateway-owned execution port for the acting agent's `run_command` tool.
+ *
+ * The tool remains the policy authority: this port is called only after
+ * permission checks, pre-hooks, and sandbox command wrapping have completed.
+ * Implementations must execute `command` exactly once and return its bounded
+ * textual result.
+ */
+export interface CommandRunnerPort {
+  run(input: {
+    command: string;
+    cwd: string;
+    timeoutMs: number;
+    ownerId: string;
+    actorId: string;
+    toolCallId: string;
+    abortSignal?: AbortSignal;
+    sensitiveValues?: readonly string[];
+  }): Promise<string>;
 }
 
 /** Options passed to the engine entry point (v1-compatible + abortSignal). */
@@ -365,6 +437,8 @@ export interface RunKyreiChatOpts {
   /** Multi-field credentials for Bedrock/Vertex; never supplied by the renderer chat request. */
   providerCredentials?: ProviderCredentials;
   model: string;
+  /** Sanitized limits for the selected primary provider target. */
+  modelLimits?: RuntimeModelLimits;
   /** Optional dedicated provider/model for read-only delegated children. */
   workerProvider?: RuntimeProviderTarget;
   /** Ordered, gateway-resolved fallback targets with isolated credentials. */
@@ -378,6 +452,8 @@ export interface RunKyreiChatOpts {
   auditLogPath?: string;
   /** Gateway-owned session correlation for local audit records. */
   sessionId?: string;
+  /** Optional internal desktop adapter; never accepted from renderer input. */
+  commandRunner?: CommandRunnerPort;
   abortSignal?: AbortSignal;
   config?: Partial<EngineConfig>;
   /** Reasoning/effort tuning applied to the provider request (opt-in). */
@@ -386,6 +462,8 @@ export interface RunKyreiChatOpts {
   skills?: RuntimeSkill[];
   /** Gateway-owned usage recorder; never supplied by the renderer. */
   onSkillUsed?: (id: string) => void | Promise<void>;
+  /** Gateway-owned lazy reader; document contents never ride in runtime config. */
+  readSkillDocument?: (skillId: string, documentId: string) => Promise<RuntimeSkillDocumentContent | null>;
 }
 
 export interface RunKyreiChatResult {

@@ -16,6 +16,42 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(config.commandTimeoutMs).toBe(DEFAULT_ENGINE_CONFIG.commandTimeoutMs);
   });
 
+  it("normalizes bounded prompt profiles and reconciles the active main-agent assignment", () => {
+    const { config } = resolveEngineConfig({
+      promptProfiles: [{
+        id: "coding-lead",
+        name: "Coding lead",
+        description: "Plans and verifies changes",
+        systemPrompt: "Prefer evidence and focused patches.",
+        ignoredSecretCarrier: "discarded",
+      }],
+      activePromptProfileId: "coding-lead",
+    });
+    expect(config.promptProfiles).toEqual([{
+      id: "coding-lead",
+      name: "Coding lead",
+      description: "Plans and verifies changes",
+      systemPrompt: "Prefer evidence and focused patches.",
+    }]);
+    expect(config.activePromptProfileId).toBe("coding-lead");
+    expect(resolveEngineConfig({
+      promptProfiles: config.promptProfiles,
+      activePromptProfileId: "missing",
+    }).config.activePromptProfileId).toBe("");
+  });
+
+  it("drops malformed prompt-profile collections instead of accepting unsafe controls", () => {
+    const { config, warnings } = resolveEngineConfig({
+      maxSteps: 20,
+      promptProfiles: [{ id: "unsafe", name: "Unsafe", systemPrompt: "line one\u0000line two" }],
+      activePromptProfileId: "unsafe",
+    });
+    expect(config.maxSteps).toBe(20);
+    expect(config.promptProfiles).toEqual([]);
+    expect(config.activePromptProfileId).toBe("");
+    expect(warnings.some((warning) => warning.includes("promptProfiles"))).toBe(true);
+  });
+
   it("preserves the fail-closed sandbox admission mode", () => {
     expect(resolveEngineConfig({ sandbox: "strict-required" }).config.sandbox).toBe("strict-required");
   });

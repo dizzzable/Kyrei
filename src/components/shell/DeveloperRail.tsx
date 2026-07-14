@@ -1,15 +1,18 @@
-import { useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { FileExplorer } from "@/components/FileExplorer";
 import { useI18n } from "@/i18n";
+import { gateway } from "@/lib/gateway";
 import type { ChatMessage } from "@/lib/types";
 import { TerminalActivity } from "./TerminalActivity";
 
 interface DeveloperRailProps {
   workspace?: string;
+  sessionId?: string | null;
   messages: ChatMessage[];
   streaming: boolean;
   split: number;
   onSplitChange: (split: number) => void;
+  onWorkspaceOpen?: (path: string) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -21,14 +24,23 @@ function workspaceName(workspace?: string): string {
 
 export function DeveloperRail({
   workspace,
-  messages,
-  streaming,
+  sessionId,
   split,
   onSplitChange,
+  onWorkspaceOpen,
   onClose,
 }: DeveloperRailProps) {
   const { t } = useI18n();
   const railRef = useRef<HTMLElement | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState(workspace ?? "");
+
+  useEffect(() => setActiveWorkspace(workspace ?? ""), [workspace]);
+
+  const connectWorkspace = async (path: string) => {
+    if (onWorkspaceOpen) await onWorkspaceOpen(path);
+    else await gateway.setConfig({ workspace: path });
+    setActiveWorkspace(path);
+  };
 
   const startSplitResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -57,8 +69,9 @@ export function DeveloperRail({
     <aside ref={railRef} className="developer-rail flex h-full min-h-0 w-full flex-col bg-surface">
       <div className="relative min-h-0" style={{ height: `${split * 100}%` }}>
         <FileExplorer
-          hasWorkspace={Boolean(workspace)}
-          workspaceName={workspaceName(workspace)}
+          workspace={activeWorkspace}
+          workspaceName={workspaceName(activeWorkspace)}
+          onWorkspaceOpen={connectWorkspace}
           onClose={onClose}
         />
         <div
@@ -73,7 +86,7 @@ export function DeveloperRail({
         />
       </div>
       <div className="min-h-0 flex-1 border-t border-border-soft">
-        <TerminalActivity messages={messages} streaming={streaming} />
+        <TerminalActivity ownerId={sessionId || "workspace"} workspace={activeWorkspace || undefined} />
       </div>
     </aside>
   );

@@ -1,20 +1,25 @@
-import { Check, LoaderCircle, Plus, Trash2, UsersRound, Workflow } from "lucide-react";
+import { Check, LoaderCircle, Plus, Search, Trash2, UsersRound, Workflow, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button, Input, Switch, Textarea } from "@/components/ui";
 import { useI18n } from "@/i18n";
 import { gateway } from "@/lib/gateway";
-import type { AppConfig, ModelRef, TeamOrchestrationConfig, TeamProfile, TeamProfileLimits, TeamRoleProfile } from "@/lib/types";
+import type { AppConfig, ModelRef, PromptProfile, SkillInfo, TeamOrchestrationConfig, TeamProfile, TeamProfileLimits, TeamRoleProfile } from "@/lib/types";
 import { modelOptionsForProvider, selectableModelProviders } from "../models/model-options";
+import { PromptProfilesEditor } from "./PromptProfilesEditor";
 import {
   boundedInteger,
   cloneTeamOrchestration,
   createTeamProfile,
   createTeamRole,
   defaultTeamModel,
-  parseSkillIds,
+  isPromptProfilesDraftValid,
+  promptProfilesFromEngine,
+  reconcileTeamPromptAssignments,
   teamModeForWorkflow,
+  withPromptProfiles,
   withTeamCapability,
+  withTeamSkillSelection,
 } from "./team-profile";
 
 interface TeamSettingsProps {
@@ -26,32 +31,65 @@ const SELECT_CLASS = "h-8 w-full rounded-md border border-border bg-surface px-2
 
 export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
   const { t } = useI18n();
-  const [draft, setDraft] = useState(() => cloneTeamOrchestration(config.orchestration));
+  const [promptDraft, setPromptDraft] = useState(() => promptProfilesFromEngine(config.engine));
+  const [draft, setDraft] = useState(() => reconcileTeamPromptAssignments(
+    config.orchestration,
+    promptProfilesFromEngine(config.engine).promptProfiles.map((profile) => profile.id),
+  ));
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [enabledSkills, setEnabledSkills] = useState<SkillInfo[]>([]);
+  const [skillsStatus, setSkillsStatus] = useState<"loading" | "ready" | "error">("loading");
   const mainModel = useMemo<ModelRef>(() => ({
     providerId: config.activeProviderId,
     modelId: config.activeModelId,
   }), [config.activeModelId, config.activeProviderId]);
 
   useEffect(() => {
-    setDraft(cloneTeamOrchestration(config.orchestration));
+    const nextPrompts = promptProfilesFromEngine(config.engine);
+    setPromptDraft(nextPrompts);
+    setDraft(reconcileTeamPromptAssignments(
+      config.orchestration,
+      nextPrompts.promptProfiles.map((profile) => profile.id),
+    ));
     setSaved(false);
-  }, [config.orchestration]);
+  }, [config.engine, config.orchestration]);
+
+  useEffect(() => {
+    let alive = true;
+    setSkillsStatus("loading");
+    gateway.listSkills()
+      .then(({ skills }) => {
+        if (!alive) return;
+        setEnabledSkills(skills
+          .filter((skill) => skill.enabled)
+          .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)));
+        setSkillsStatus("ready");
+      })
+      .catch(() => {
+        if (!alive) return;
+        setEnabledSkills([]);
+        setSkillsStatus("error");
+      });
+    return () => { alive = false; };
+  }, []);
 
   const teamEnabled = draft.defaultMode !== "single";
   const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId)
     ?? draft.profiles[0];
   const currentValue = useMemo(() => JSON.stringify(cloneTeamOrchestration(config.orchestration)), [config.orchestration]);
-  const dirty = JSON.stringify(draft) !== currentValue;
-  const invalid = (teamEnabled && !activeProfile) || draft.profiles.some((profile) => (
+  const currentPromptValue = useMemo(() => JSON.stringify(promptProfilesFromEngine(config.engine)), [config.engine]);
+  const dirty = JSON.stringify(draft) !== currentValue || JSON.stringify(promptDraft) !== currentPromptValue;
+  const enabledSkillIds = useMemo(() => new Set(enabledSkills.map((skill) => skill.id)), [enabledSkills]);
+  const invalid = !isPromptProfilesDraftValid(promptDraft) || (teamEnabled && !activeProfile) || draft.profiles.some((profile) => (
     !profile.name.trim()
     || profile.roles.length === 0
     || (profile.enabled && profile.roles.some((role) => {
       const provider = config.providers.find((candidate) => candidate.id === role.model?.providerId);
       return !role.name.trim()
         || !role.model?.modelId
+        || (skillsStatus === "ready" && role.skillIds.some((id) => !enabledSkillIds.has(id)))
         || !provider?.enabled
         || (provider.requiresApiKey && !provider.hasKey)
         || !provider.models.some((model) => model.id === role.model?.modelId);
@@ -60,6 +98,14 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
 
   const changeDraft = (updater: (current: TeamOrchestrationConfig) => TeamOrchestrationConfig) => {
     setDraft((current) => updater(cloneTeamOrchestration(current)));
+    setSaved(false);
+    setFailed(false);
+  };
+
+  const changePromptDraft = (next: typeof promptDraft) => {
+    setPromptDraft(next);
+    const available = next.promptProfiles.map((profile) => profile.id);
+    setDraft((current) => reconcileTeamPromptAssignments(current, available));
     setSaved(false);
     setFailed(false);
   };
@@ -138,9 +184,15 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
     setFailed(false);
     try {
       const submitted = cloneTeamOrchestration(draft);
-      const response = await gateway.setConfig({ orchestration: submitted });
+      const submittedEngine = withPromptProfiles(config.engine, promptDraft);
+      const response = await gateway.setConfig({ orchestration: submitted, engine: submittedEngine });
       const next = response.orchestration ? response : { ...response, orchestration: submitted };
-      setDraft(cloneTeamOrchestration(next.orchestration));
+      const nextPromptDraft = promptProfilesFromEngine(next.engine ?? submittedEngine);
+      setPromptDraft(nextPromptDraft);
+      setDraft(reconcileTeamPromptAssignments(
+        next.orchestration,
+        nextPromptDraft.promptProfiles.map((profile) => profile.id),
+      ));
       onSaved(next);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 1400);
@@ -156,7 +208,9 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
     ?? config.activeModelId;
 
   return (
-    <section className="max-w-4xl space-y-4 border-t border-border-soft pt-6" aria-labelledby="team-settings-title">
+    <>
+      <PromptProfilesEditor draft={promptDraft} disabled={busy} onChange={changePromptDraft} />
+      <section className="max-w-4xl space-y-4 border-t border-border-soft pt-6" aria-labelledby="team-settings-title">
       <div className="flex items-start gap-3">
         <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-border-soft bg-surface text-muted">
           <UsersRound className="size-4" aria-hidden />
@@ -297,6 +351,9 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
                 role={role}
                 index={index}
                 providers={config.providers}
+                promptProfiles={promptDraft.promptProfiles}
+                enabledSkills={enabledSkills}
+                skillsStatus={skillsStatus}
                 disabled={busy}
                 onChange={(nextRole) => updateActiveProfile((profile) => ({
                   ...profile,
@@ -325,7 +382,8 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
           {saved ? t("settings.saved") : t("common.save")}
         </Button>
       </div>
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -373,10 +431,142 @@ function TeamLimits({
   );
 }
 
+function SkillMultiSelect({
+  skills,
+  selectedIds,
+  status,
+  disabled,
+  onToggle,
+}: {
+  skills: readonly SkillInfo[];
+  selectedIds: readonly string[];
+  status: "loading" | "ready" | "error";
+  disabled: boolean;
+  onToggle: (skillId: string, selected: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState("");
+  const skillsById = useMemo(() => new Map(skills.map((skill) => [skill.id, skill])), [skills]);
+  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const matches = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return skills.filter((skill) => !normalized
+      || `${skill.name}\n${skill.description}\n${skill.id}\n${skill.provenance}`
+        .toLocaleLowerCase()
+        .includes(normalized));
+  }, [query, skills]);
+
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="text-[9.5px] text-muted">{t("settings.team.skills")}</span>
+        <span className="text-[8.5px] text-faint">{t("settings.team.skillsSelected", { count: selectedIds.length })}</span>
+      </div>
+      <div className="rounded-md border border-border-soft bg-bg/35 p-2">
+        {selectedIds.length ? (
+          <div className="mb-2 flex flex-wrap gap-1" aria-label={t("settings.team.skillsSelected", { count: selectedIds.length })}>
+            {selectedIds.map((id) => {
+              const skill = skillsById.get(id);
+              const name = skill?.name ?? t("settings.team.skillUnavailable");
+              return (
+                <span
+                  key={id}
+                  className="inline-flex min-w-0 max-w-full items-center gap-1 rounded border border-border-soft bg-elevated px-1.5 py-1 text-[9px] text-secondary"
+                  title={id}
+                >
+                  <span className="truncate">{name}</span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={disabled}
+                    onClick={() => onToggle(id, false)}
+                    aria-label={t("settings.team.skillRemove", { name })}
+                  >
+                    <X className="size-2.5" aria-hidden />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
+        <label className="relative block">
+          <span className="sr-only">{t("settings.team.skillsSearch")}</span>
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted" aria-hidden />
+          <Input
+            value={query}
+            disabled={disabled || status !== "ready"}
+            placeholder={t("settings.team.skillsPlaceholder")}
+            className="pl-8 text-[10px]"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <p className="mt-1.5 text-[8.5px] leading-3 text-faint">{t("settings.team.skillsHint")}</p>
+        {status === "loading" ? (
+          <p className="mt-2 flex items-center gap-1.5 text-[9px] text-muted" role="status">
+            <LoaderCircle className="size-3 animate-spin" aria-hidden />{t("settings.team.skillsLoading")}
+          </p>
+        ) : status === "error" ? (
+          <p className="mt-2 text-[9px] text-danger" role="alert">{t("settings.team.skillsLoadFailed")}</p>
+        ) : skills.length === 0 ? (
+          <p className="mt-2 text-[9px] text-muted">{t("settings.team.skillsEmpty")}</p>
+        ) : matches.length === 0 ? (
+          <p className="mt-2 text-[9px] text-muted">{t("settings.team.skillsNoMatch")}</p>
+        ) : (
+          <div
+            className="mt-2 max-h-28 overflow-y-auto rounded border border-border-soft bg-surface/55 p-1"
+            role="listbox"
+            aria-multiselectable="true"
+            aria-label={t("settings.team.skills")}
+          >
+            {matches.map((skill) => {
+              const checked = selected.has(skill.id);
+              return (
+                <button
+                  key={skill.id}
+                  type="button"
+                  role="option"
+                  aria-selected={checked}
+                  disabled={disabled}
+                  className="flex w-full min-w-0 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => onToggle(skill.id, !checked)}
+                >
+                  <span className="grid size-3.5 shrink-0 place-items-center rounded border border-border text-primary">
+                    {checked ? <Check className="size-2.5" aria-hidden /> : null}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[9.5px] text-secondary">{skill.name}</span>
+                    <span className="block truncate font-mono text-[8px] text-faint" title={skill.id}>{skill.id}</span>
+                  </span>
+                  <span className="shrink-0 text-[8px] text-faint">{skillProvenanceLabel(skill.provenance, t)}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function skillProvenanceLabel(
+  provenance: SkillInfo["provenance"],
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  switch (provenance) {
+    case "workspace": return t("settings.skills.workspace");
+    case "custom": return t("settings.skills.custom");
+    case "kiro": return t("settings.skills.documentKiro");
+    default: return t("settings.skills.global");
+  }
+}
+
 function TeamRoleRow({
   role,
   index,
   providers,
+  promptProfiles,
+  enabledSkills,
+  skillsStatus,
   disabled,
   onChange,
   onDelete,
@@ -384,12 +574,14 @@ function TeamRoleRow({
   role: TeamRoleProfile;
   index: number;
   providers: AppConfig["providers"];
+  promptProfiles: readonly PromptProfile[];
+  enabledSkills: readonly SkillInfo[];
+  skillsStatus: "loading" | "ready" | "error";
   disabled: boolean;
   onChange: (role: TeamRoleProfile) => void;
   onDelete: () => void;
 }) {
   const { t } = useI18n();
-  const [skillsText, setSkillsText] = useState(() => role.skillIds.join(", "));
   const providerOptions = selectableModelProviders(providers, role.model?.providerId);
   const models = modelOptionsForProvider(providerOptions, role.model?.providerId ?? "");
   const toggleCapability = (capability: "workspace.read" | "web" | "memory.read", enabled: boolean) => {
@@ -457,25 +649,31 @@ function TeamRoleRow({
           onChange={(event) => onChange({ ...role, instructions: event.target.value })}
         />
       </label>
-      <div className="mt-2 grid items-end gap-2 xl:grid-cols-[minmax(0,1fr)_auto_auto_8rem]">
-        <label className="space-y-1">
-          <span className="text-[9.5px] text-muted">{t("settings.team.skills")}</span>
-          <Input
-            value={skillsText}
-            disabled={disabled}
-            placeholder={t("settings.team.skillsPlaceholder")}
-            className="font-mono text-[10.5px]"
-            onChange={(event) => {
-              const skillIds = parseSkillIds(event.target.value);
-              setSkillsText(event.target.value);
-              onChange({
-                ...role,
-                skillIds,
-                capabilities: withTeamCapability(role.capabilities, "skills.read", skillIds.length > 0),
-              });
-            }}
-          />
-        </label>
+      <label className="mt-2 block max-w-sm space-y-1">
+        <span className="text-[9.5px] text-muted">{t("settings.promptProfiles.roleAssignment")}</span>
+        <select
+          value={role.promptProfileId ?? ""}
+          disabled={disabled}
+          className={SELECT_CLASS}
+          onChange={(event) => onChange({
+            ...role,
+            promptProfileId: event.target.value || undefined,
+          })}
+        >
+          <option value="">{t("settings.promptProfiles.none")}</option>
+          {promptProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+        </select>
+      </label>
+      <div className="mt-2">
+        <SkillMultiSelect
+          skills={enabledSkills}
+          selectedIds={role.skillIds}
+          status={skillsStatus}
+          disabled={disabled}
+          onToggle={(skillId, selected) => onChange(withTeamSkillSelection(role, skillId, selected))}
+        />
+      </div>
+      <div className="mt-2 grid items-end gap-2 xl:grid-cols-[minmax(0,1fr)_auto_8rem]">
         <fieldset className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border-soft px-2.5 py-1">
           <legend className="sr-only">{t("settings.team.access")}</legend>
           {([

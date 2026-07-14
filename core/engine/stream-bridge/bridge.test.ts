@@ -54,8 +54,8 @@ async function* parts(list: unknown[]): AsyncIterable<unknown> {
 }
 
 describe("stream-bridge (synthetic parts)", () => {
-  it("emits tool lifecycle with stable id and inline_diff from toolMeta", async () => {
-    const toolMeta = new Map<string, ToolMeta>([["call_1", { inlineDiff: "+new line" }]]);
+  it("emits tool lifecycle with stable id, diff, and automatic snapshot metadata", async () => {
+    const toolMeta = new Map<string, ToolMeta>([["call_1", { inlineDiff: "+new line", snapshotId: "snapshot-1" }]]);
     const events: KyreiEvent[] = [];
     const out = await bridgeStream(
       parts([
@@ -78,8 +78,10 @@ describe("stream-bridge (synthetic parts)", () => {
     expect(complete && complete.type === "tool.complete" && complete.payload.tool_call_id).toBe("call_1");
     if (complete?.type === "tool.complete") {
       expect(complete.payload.inline_diff).toBe("+new line");
+      expect(complete.payload.snapshot_id).toBe("snapshot-1");
       expect(complete.payload.result).toBe("Файл создан: a.txt");
     }
+    expect(out.parts).toContainEqual(expect.objectContaining({ snapshotId: "snapshot-1" }));
     expect(out.status).toBe("complete");
     expect(out.text).toBe("готово");
   });

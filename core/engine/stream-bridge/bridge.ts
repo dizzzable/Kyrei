@@ -69,6 +69,7 @@ function finalizeToolPart(st: BridgeState, t: ToolInFlight): void {
     args: t.args,
     result: t.result,
     inlineDiff: t.inlineDiff,
+    snapshotId: t.snapshotId,
     error: t.error,
     running: false,
     durationS: (Date.now() - t.startedAt) / 1000,
@@ -151,9 +152,11 @@ export async function bridgeStream(
         const t = st.tools.get(id);
         const result = outputToText(part["output"] ?? part["result"]);
         const inlineDiff = ctx.toolMeta.get(id)?.inlineDiff;
+        const snapshotId = ctx.toolMeta.get(id)?.snapshotId;
         if (t) {
           t.result = result;
           t.inlineDiff = inlineDiff;
+          t.snapshotId = snapshotId;
           finalizeToolPart(st, t);
           emit({
             type: "tool.complete",
@@ -162,6 +165,7 @@ export async function bridgeStream(
               name: t.name,
               result,
               inline_diff: inlineDiff,
+              snapshot_id: snapshotId,
               duration_s: (Date.now() - t.startedAt) / 1000,
             },
           });

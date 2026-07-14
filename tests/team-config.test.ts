@@ -46,6 +46,7 @@ function profile(overrides: Record<string, unknown> = {}) {
         name: "Researcher",
         description: "Find grounded evidence",
         instructions: "Check primary sources.",
+        promptProfileId: "research-policy",
         model: { providerId: "worker", modelId: "worker-model" },
         skillIds: ["repo-research"],
         capabilities: ["workspace.read", "web", "skills.read"],
@@ -88,6 +89,7 @@ describe("team orchestration config", () => {
             name: "Custom role",
             description: "Arbitrary user role",
             instructions: "Investigate only.",
+            promptProfileId: "research-policy",
             model: { providerId: "worker", modelId: "worker-model" },
             skillIds: ["skill-a", "skill-a", "skill-b"],
             capabilities: ["workspace.read", "web", "terminal", "web", "delegate"],
@@ -113,6 +115,7 @@ describe("team orchestration config", () => {
     });
     expect(config.profiles[0]?.roles[0]).toMatchObject({
       id: "custom-role",
+      promptProfileId: "research-policy",
       skillIds: ["skill-a", "skill-b"],
       capabilities: ["workspace.read", "web", "delegate"],
       canSpawn: true,
@@ -327,6 +330,53 @@ describe("team orchestration config", () => {
       defaultMode: "single",
       profiles: [profile({ name: "Line one\nLine two" })],
     }, providers)).toThrow("team_profile_name_invalid");
+  });
+
+  it("preserves a safe prompt-profile assignment and rejects malformed ids", () => {
+    const valid = validateOrchestrationInput({
+      defaultMode: "single",
+      activeProfileId: "research-team",
+      profiles: [profile({
+        roles: [{
+          ...profile().roles[0],
+          capabilities: ["workspace.read", "web", "skills.read", "delegate"],
+        }],
+      })],
+    }, providers);
+    expect(valid.profiles[0]?.roles[0]?.promptProfileId).toBe("research-policy");
+
+    expect(() => validateOrchestrationInput({
+      defaultMode: "single",
+      profiles: [profile({
+        roles: [{ ...profile().roles[0], promptProfileId: "../escape" }],
+      })],
+    }, providers)).toThrow("team_role_prompt_profile_invalid");
+  });
+
+  it("can fail closed against the prompt profiles and skills available at the save boundary", () => {
+    const requested = {
+      defaultMode: "single",
+      profiles: [profile({
+        roles: [{
+          ...profile().roles[0],
+          promptProfileId: "research-policy",
+          skillIds: ["skill_available"],
+          capabilities: ["workspace.read", "web", "skills.read", "delegate"],
+        }],
+      })],
+    };
+    expect(() => validateOrchestrationInput(requested, providers, {
+      promptProfileIds: new Set(["research-policy"]),
+      skillIds: new Set(["skill_available"]),
+    })).not.toThrow();
+    expect(() => validateOrchestrationInput(requested, providers, {
+      promptProfileIds: new Set(),
+      skillIds: new Set(["skill_available"]),
+    })).toThrow("team_role_prompt_profile_unavailable");
+    expect(() => validateOrchestrationInput(requested, providers, {
+      promptProfileIds: new Set(["research-policy"]),
+      skillIds: new Set(),
+    })).toThrow("team_role_skill_unavailable");
   });
 
   it("reconciles removed providers and returns only safe orchestration publicly", () => {
