@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 /**
  * Durable, append-safe state for Kyrei sessions and the active mission.
@@ -10,7 +11,40 @@ import { dirname, join } from "node:path";
  * on-disk format can evolve without breaking older installs.
  */
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+const MESSAGE_ID_RE = /^msg-[a-zA-Z0-9_-]{8,80}$/;
+
+export function isSessionMessageId(value) {
+  return typeof value === "string" && MESSAGE_ID_RE.test(value);
+}
+
+function normalizedMessageId(value, sessionId, index) {
+  if (isSessionMessageId(value)) return value;
+  const safeSession = String(sessionId ?? "session").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 40) || "session";
+  return `msg-legacy-${safeSession}-${index}`;
+}
+
+function normalizeStoredMessage(value, sessionId, index) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    ...source,
+    id: normalizedMessageId(source.id, sessionId, index),
+  };
+}
+
+function normalizedMessagesBySession(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([sessionId, messages]) => [
+    sessionId,
+    Array.isArray(messages)
+      ? messages.map((message, index) => normalizeStoredMessage(message, sessionId, index))
+      : [],
+  ]));
+}
+
+function nextMessageId() {
+  return `msg-${randomUUID()}`;
+}
 
 function boundedTarget(value, maxLength) {
   return typeof value === "string" && value.trim() && value.trim().length <= maxLength
@@ -69,7 +103,8 @@ export class SessionStore {
 
   migrate(parsed) {
     // Bring any older shape up to the current schema without losing data.
-    const messages = parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {};
+    const rawMessages = parsed.messages && typeof parsed.messages === "object" ? parsed.messages : {};
+    const messages = normalizedMessagesBySession(rawMessages);
     const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
     const titleMigratedSessions = Number(parsed.schemaVersion ?? 1) < 2
       ? sessions.map(session => {
@@ -114,14 +149,72 @@ export class SessionStore {
 
   appendMessage(sessionId, message) {
     const list = this.state.messages[sessionId] ?? (this.state.messages[sessionId] = []);
-    list.push({ ...message, at: message.at ?? new Date().toISOString() });
+    const requestedId = isSessionMessageId(message?.id)
+      ? message.id
+      : nextMessageId();
+    const id = list.some(candidate => candidate.id === requestedId) ? nextMessageId() : requestedId;
+    const stored = { ...message, id, at: message.at ?? new Date().toISOString() };
+    list.push(stored);
     if (list.length > this.maxMessages) list.splice(0, list.length - this.maxMessages);
     this.touch();
-    return message;
+    return stored;
   }
 
   getMessages(sessionId) {
     return this.state.messages[sessionId] ?? [];
+  }
+
+  planRewind(sessionId, messageId) {
+    const list = this.state.messages[sessionId] ?? [];
+    const index = list.findIndex(message => message.id === messageId);
+    if (index < 0 || list[index]?.role !== "user") return null;
+    const removed = list.slice(index);
+    const snapshotIds = removed.flatMap(message => Array.isArray(message.parts)
+      ? message.parts.flatMap(part => part?.type === "tool" && typeof part.snapshotId === "string" ? [part.snapshotId] : [])
+      : []);
+    return {
+      sessionId,
+      messageId,
+      index,
+      expectedLength: list.length,
+      originalMessages: list.slice(),
+      originalSession: this.getSession(sessionId) ? { ...this.getSession(sessionId) } : null,
+      draft: typeof list[index].content === "string" ? list[index].content : "",
+      workspace: typeof list[index].workspace === "string" ? list[index].workspace : "",
+      snapshotIds,
+    };
+  }
+
+  commitRewind(plan) {
+    if (!plan || typeof plan !== "object") return false;
+    const list = this.state.messages[plan.sessionId] ?? [];
+    if (
+      list.length !== plan.expectedLength
+      || list[plan.index]?.id !== plan.messageId
+      || list[plan.index]?.role !== "user"
+    ) return false;
+    this.state.messages[plan.sessionId] = list.slice(0, plan.index);
+    const session = this.getSession(plan.sessionId);
+    if (session) this.upsertSession({ id: plan.sessionId, updatedAt: new Date().toISOString() });
+    else this.touch();
+    return true;
+  }
+
+  rollbackRewind(plan) {
+    if (!plan || typeof plan !== "object" || !Array.isArray(plan.originalMessages)) return false;
+    const current = this.state.messages[plan.sessionId] ?? [];
+    const expectedPrefix = plan.originalMessages.slice(0, plan.index);
+    if (
+      current.length !== expectedPrefix.length
+      || current.some((message, index) => message.id !== expectedPrefix[index]?.id)
+    ) return false;
+    this.state.messages[plan.sessionId] = plan.originalMessages.slice();
+    const sessionIndex = this.state.sessions.findIndex(session => session.id === plan.sessionId);
+    if (plan.originalSession && sessionIndex >= 0) {
+      this.state.sessions[sessionIndex] = { ...plan.originalSession };
+    }
+    this.touch();
+    return true;
   }
 
   setMission(mission) {

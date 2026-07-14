@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Copy, Download, MoreHorizontal, Pencil, Pin, PinOff, Trash2 } from "lucide-react";
 
 import type { SessionInfo } from "@/lib/types";
@@ -58,6 +58,7 @@ function SessionRow({
   onSelect,
   onDelete,
   onRename,
+  now,
 }: {
   session: SessionInfo;
   active: boolean;
@@ -66,6 +67,7 @@ function SessionRow({
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
+  now: number;
 }) {
   const { t } = useI18n();
   const title = sessionTitle(session, t("shell.session.untitled"));
@@ -81,7 +83,7 @@ function SessionRow({
   return (
     <div
       className={cn(
-        "session-row group flex min-h-7 cursor-pointer items-center gap-2 rounded-md py-1 pl-2 pr-1 text-[11.5px] leading-none",
+        "session-row group flex min-h-8 cursor-pointer items-center gap-2 rounded-md py-1 pl-2 pr-1 text-[11.5px] leading-none",
         active ? "bg-(--ui-row-active) text-foreground" : "text-secondary hover:bg-(--ui-row-hover)",
       )}
       onClick={(event) => {
@@ -113,7 +115,15 @@ function SessionRow({
           className="h-5 flex-1 px-1 py-0 text-[11.5px]"
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate">{title}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate">{title}</span>
+          {session.activity?.active && (
+            <span className="mt-0.5 flex min-w-0 items-center gap-1 font-mono text-[9px] leading-none text-muted">
+              <span className="truncate">{session.activity.currentTool || t(`shell.session.phase.${session.activity.phase}` as const)}</span>
+              <span className="shrink-0 text-faint">{Math.max(0, Math.floor((now - session.activity.startedAt) / 1000))}s</span>
+            </span>
+          )}
+        </span>
       )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -162,11 +172,18 @@ function SectionHeader({ label, count, className }: { label: string; count: numb
 export function Sidebar({ sessions, currentId, workingId, onSelect, onDelete, onRename }: SidebarProps) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
+  const [now, setNow] = useState(Date.now());
   const pinnedIds = usePinnedIds();
   const pinnedSet = useMemo(() => new Set(pinnedIds), [pinnedIds]);
   const filtered = useMemo(() => sessions.filter((session) => sessionMatchesSearch(session, query)), [sessions, query]);
   const pinned = filtered.filter((session) => pinnedSet.has(session.id));
   const recent = filtered.filter((session) => !pinnedSet.has(session.id));
+
+  useEffect(() => {
+    if (!sessions.some((session) => session.activity?.active)) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [sessions]);
 
   const renderRow = (session: SessionInfo) => (
     <SessionRow
@@ -178,6 +195,7 @@ export function Sidebar({ sessions, currentId, workingId, onSelect, onDelete, on
       onSelect={onSelect}
       onDelete={onDelete}
       onRename={onRename}
+      now={now}
     />
   );
 

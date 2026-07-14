@@ -611,15 +611,87 @@ describe("gateway provider registry", () => {
       allowBenchmarkNetwork: true,
     }));
 
-    await expect(request("/api/providers/discover", {
+    const anthropic = await request<{ models: Array<{ id: string }>; count: number }>("/api/providers/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile: {
-        protocol: "anthropic-messages",
-        baseURL: "https://api.anthropic.com/v1",
-        requiresApiKey: true,
+      body: JSON.stringify({
+        profile: {
+          id: "anthropic",
+          protocol: "anthropic-messages",
+          baseURL: "https://api.anthropic.com/v1",
+          requiresApiKey: true,
+        },
+        apiKey: credential,
+      }),
+    });
+    expect(anthropic).toEqual({ models: [{ id: "discovered-model", name: "Discovered" }], count: 1 });
+    expect(providerDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
+      providerId: "anthropic",
+      protocol: "anthropic-messages",
+      baseURL: "https://api.anthropic.com/v1",
+      credentials: { apiKey: credential },
+    }));
+  });
+
+  it("rejects renderer-forged live metadata until an exact discovery receipt exists", async () => {
+    const baseURL = "http://127.0.0.1:12455/v1";
+    const modelId = "receipt-model";
+    const discovered = {
+      limits: { contextWindow: 72_000, maxOutput: 7_200 },
+      provenance: {
+        source: "live-provider",
+        confidence: "high",
+        fields: {
+          contextWindow: { source: "live-provider", confidence: "high" },
+          maxOutput: { source: "live-provider", confidence: "high" },
+        },
+      },
+    };
+    const submitted = {
+      ...discovered,
+      provenance: {
+        ...discovered.provenance,
+        origin: { protocol: "openai-chat", baseURL, modelId },
+      },
+    };
+    const providerDiscovery = vi.fn(async () => [{ id: modelId, capabilities: discovered }]);
+    await restartGateway({ providerDiscovery });
+
+    await request("/api/providers", {
+      method: "POST",
+      body: JSON.stringify({ provider: {
+        id: "receipt-provider",
+        name: "Receipt provider",
+        protocol: "openai-chat",
+        baseURL,
+        models: [{ id: modelId, capabilities: submitted }],
+        requiresApiKey: false,
       } }),
-    })).rejects.toThrow("provider_discovery_unsupported");
+    });
+    let config = await request<any>("/api/config");
+    expect(config.providers.find((provider: any) => provider.id === "receipt-provider")
+      ?.models.find((model: any) => model.id === modelId)?.capabilities).toBeUndefined();
+
+    await request("/api/providers/discover", {
+      method: "POST",
+      body: JSON.stringify({ profile: {
+        id: "receipt-provider",
+        protocol: "openai-chat",
+        baseURL,
+        requiresApiKey: false,
+      } }),
+    });
+    await request("/api/providers/receipt-provider", {
+      method: "PATCH",
+      body: JSON.stringify({ models: [{ id: modelId, capabilities: submitted }] }),
+    });
+
+    config = await request<any>("/api/config");
+    expect(config.providers.find((provider: any) => provider.id === "receipt-provider")
+      ?.models.find((model: any) => model.id === modelId)?.capabilities).toMatchObject({
+        limits: { contextWindow: 72_000, maxOutput: 7_200 },
+        provenance: { source: "live-provider" },
+      });
   });
 
   it("keeps Settings defaults separate from durable session model overrides and gateway execution", async () => {
@@ -765,6 +837,137 @@ describe("gateway provider registry", () => {
       method: "DELETE",
     });
     expect(reconciled.modelAssignments.fallbacks).toEqual([]);
+  });
+
+  it("passes sanitized per-model limits to the primary and fallback runtime targets", async () => {
+    const runKyreiChat = vi.fn(async () => ({ text: "done", parts: [], status: "complete" }));
+    const discoveredCapabilities = (contextWindow: number, maxOutput: number) => ({
+      limits: { contextWindow, maxOutput },
+      provenance: {
+        source: "live-provider",
+        confidence: "high",
+        fields: {
+          contextWindow: { source: "live-provider", confidence: "high" },
+          maxOutput: { source: "live-provider", confidence: "high" },
+        },
+      },
+    });
+    const providerDiscovery = vi.fn(async ({ baseURL }: { baseURL: string }) => baseURL.includes("11435")
+      ? [{ id: "fallback-rich", capabilities: discoveredCapabilities(40_000, 4_000) }]
+      : [{ id: "primary-rich", capabilities: discoveredCapabilities(90_000, 9_000) }]);
+    await restartGateway({
+      engineLoader: async () => ({ runKyreiChat, listModels: () => [] }),
+      providerDiscovery,
+    });
+    await request("/api/providers/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: {
+        id: "limit-main",
+        protocol: "openai-chat",
+        baseURL: "http://127.0.0.1:11434/v1",
+        requiresApiKey: false,
+      } }),
+    });
+    await request("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: {
+          id: "limit-main",
+          name: "Limit main",
+          protocol: "openai-chat",
+          baseURL: "http://127.0.0.1:11434/v1",
+          models: [{
+            id: "primary-rich",
+            capabilities: {
+              limits: { contextWindow: 90_000, maxOutput: 9_000 },
+              provenance: {
+                source: "live-provider",
+                confidence: "high",
+                origin: {
+                  protocol: "openai-chat",
+                  baseURL: "http://127.0.0.1:11434/v1",
+                  modelId: "primary-rich",
+                },
+                fields: {
+                  contextWindow: { source: "live-provider", confidence: "high" },
+                  maxOutput: { source: "live-provider", confidence: "high" },
+                },
+              },
+            },
+          }],
+          requiresApiKey: false,
+        },
+        useAsDefault: true,
+      }),
+    });
+    await request("/api/providers/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: {
+        id: "limit-fallback",
+        protocol: "openai-chat",
+        baseURL: "http://localhost:11435/v1",
+        requiresApiKey: false,
+      } }),
+    });
+    await request("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: {
+        id: "limit-fallback",
+        name: "Limit fallback",
+        protocol: "openai-chat",
+        baseURL: "http://localhost:11435/v1",
+        models: [{
+          id: "fallback-rich",
+          capabilities: {
+            limits: { contextWindow: 40_000, maxOutput: 4_000 },
+            provenance: {
+              source: "live-provider",
+              confidence: "high",
+              origin: {
+                protocol: "openai-chat",
+                baseURL: "http://localhost:11435/v1",
+                modelId: "fallback-rich",
+              },
+              fields: {
+                contextWindow: { source: "live-provider", confidence: "high" },
+                maxOutput: { source: "live-provider", confidence: "high" },
+              },
+            },
+          },
+        }],
+        requiresApiKey: false,
+      } }),
+    });
+    await request("/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelAssignments: {
+        fallbacks: [{ providerId: "limit-fallback", modelId: "fallback-rich" }],
+      } }),
+    });
+
+    const created = await request<{ id: string }>("/api/sessions", { method: "POST" });
+    await request("/api/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: created.id, text: "Use truthful model limits" }),
+    });
+    await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+
+    expect(runKyreiChat).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: "limit-main",
+      model: "primary-rich",
+      modelLimits: { contextWindow: 90_000, maxOutput: 9_000 },
+      fallbackProviders: [expect.objectContaining({
+        providerId: "limit-fallback",
+        model: "fallback-rich",
+        limits: { contextWindow: 40_000, maxOutput: 4_000 },
+      })],
+    }));
   });
 
   it("exposes and assigns only providers whose required credentials are ready", async () => {

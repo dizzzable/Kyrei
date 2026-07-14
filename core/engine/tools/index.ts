@@ -17,7 +17,7 @@ import { dirname, relative } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { rgPath } from "@vscode/ripgrep";
 import fg from "fast-glob";
-import type { EngineConfig } from "../types.js";
+import type { CommandRunnerPort, EngineConfig } from "../types.js";
 import { safePath, validateWorkspaceTarget, validateWriteTarget } from "../security/jail.js";
 import { decideAll, type ActionContext, type Decision } from "../security/permissions.js";
 import { runPreHooks, secretScanHook } from "../security/pre-hook.js";
@@ -34,6 +34,8 @@ import { buildProjectIntelTools } from "./project-intel.js";
 
 export interface ToolMeta {
   inlineDiff?: string;
+  /** Automatic pre-edit workspace snapshot, retained for turn rewind. */
+  snapshotId?: string;
 }
 
 export interface ToolAuditWriter {
@@ -44,6 +46,8 @@ export interface BuildToolsOptions {
   abortSignal?: AbortSignal;
   audit?: ToolAuditWriter;
   sessionId?: string;
+  actorId?: string;
+  commandRunner?: CommandRunnerPort;
   sensitiveValues?: readonly string[];
 }
 
@@ -221,6 +225,24 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
   const abortSignal = options.abortSignal;
   const snapshots = createSnapshotStore(workspace);
   const sandbox = createSandbox(cfg.sandbox);
+  const runAuthorizedCommand = (
+    command: string,
+    timeoutMs: number,
+    toolCallId: string,
+  ): Promise<string> => {
+    if (!options.commandRunner) return runCommand(command, workspace, timeoutMs, abortSignal);
+    if (!options.sessionId) throw new Error("command_runner_session_required");
+    return options.commandRunner.run({
+      command,
+      cwd: workspace,
+      timeoutMs,
+      ownerId: options.sessionId,
+      actorId: options.actorId ?? "main",
+      toolCallId,
+      ...(abortSignal ? { abortSignal } : {}),
+      ...(options.sensitiveValues ? { sensitiveValues: options.sensitiveValues } : {}),
+    });
+  };
 
   const audit = async (toolName: string, toolCallId: string, record: Omit<AuditRecord, "ts" | "tool" | "toolCallId" | "sessionId">): Promise<void> => {
     try {
@@ -412,13 +434,19 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           }
           if (abortSignal?.aborted) throw abortError();
           await validateWriteTarget(workspace, canonicalPath);
+          const rel = relative(workspace, file) || path;
+          const snapshotId = await snapshots.create([rel]);
           await mkdir(dirname(file), { recursive: true });
           if (abortSignal?.aborted) throw abortError();
           await validateWriteTarget(workspace, canonicalPath);
           await writeFile(file, next, "utf8");
-          const rel = relative(workspace, file) || path;
-          const diff = previous !== null ? lineDiff(previous, next) : "";
-          if (diff) toolMeta.set(toolCallId, { inlineDiff: redact(diff, options.sensitiveValues) });
+          const diff = previous !== null
+            ? lineDiff(previous, next)
+            : renderFileDiff("add", rel, "", next).body;
+          toolMeta.set(toolCallId, {
+            snapshotId,
+            ...(diff ? { inlineDiff: redact(diff, options.sensitiveValues) } : {}),
+          });
           return previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
         });
       },
@@ -451,7 +479,10 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             const report = await applyPatch(workspace, patches, snapshots, abortSignal);
             const rendered = report.files.map((f) => renderFileDiff(f.op === "add" ? "add" : f.op === "delete" ? "delete" : "modify", f.rel, f.oldText, f.newText));
             const combined = rendered.map((r) => `${r.header} (${r.counter})\n${r.body}`).join("\n---\n");
-            if (combined) toolMeta.set(toolCallId, { inlineDiff: redact(combined, options.sensitiveValues) });
+            toolMeta.set(toolCallId, {
+              snapshotId: report.snapshotId,
+              ...(combined ? { inlineDiff: redact(combined, options.sensitiveValues) } : {}),
+            });
             return rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
           } catch (e) {
             if (e instanceof ApplyError) throw new Error(`Правка отклонена [${e.code}]: ${e.message}`);
@@ -473,7 +504,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             command: exactCommand,
             cwd: workspace,
           }, { required: cfg.sandbox === "strict-required" });
-          const out = await runCommand(sb.command, workspace, cfg.commandTimeoutMs, abortSignal);
+          const out = await runAuthorizedCommand(sb.command, cfg.commandTimeoutMs, toolCallId);
           return safeClip(out, cfg.maxToolOutput);
         });
       },
@@ -519,7 +550,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
               { command: pick.command, cwd: workspace },
               { required: cfg.sandbox === "strict-required" },
             );
-            return safeClip(`$ ${pick.command}\n${await runCommand(wrapped.command, workspace, 60_000, abortSignal)}`, cfg.maxToolOutput);
+            return safeClip(`$ ${pick.command}\n${await runAuthorizedCommand(wrapped.command, 60_000, toolCallId)}`, cfg.maxToolOutput);
           },
         );
       },

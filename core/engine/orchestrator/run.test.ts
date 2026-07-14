@@ -18,6 +18,7 @@ const resolveEngineConfigMock = vi.fn();
 const toPartsMock = vi.fn(() => []);
 const buildWebToolsMock = vi.fn(() => ({}));
 const createAuditLogMock = vi.fn();
+const makePrepareStepMock = vi.fn(() => "prepare-step");
 
 vi.mock("ai", () => ({
   streamText: streamTextMock,
@@ -37,13 +38,13 @@ vi.mock("../provider/build.js", () => ({
 }));
 
 vi.mock("../provider/registry.js", () => ({
-  resolve: (id: string, hint?: { baseURL?: string; id?: string; provider?: string }) => {
+  resolve: (id: string, hint?: { baseURL?: string; id?: string; provider?: string; protocol?: string }) => {
     resolveModelMock(id, hint);
     return ({
     id: hint?.id ?? id,
     provider: hint?.provider ?? "mock-provider",
     baseURL: hint?.baseURL ?? "http://mock",
-    limits: { contextWindow: 128_000, maxOutput: 8_192 },
+    limits: id === "unknown-partial-model" ? {} : { contextWindow: 128_000, maxOutput: 8_192 },
     cost: { inputPerM: 1, outputPerM: 2 },
     });
   },
@@ -103,7 +104,7 @@ vi.mock("./stop-conditions.js", () => ({
 }));
 
 vi.mock("./prepare-step.js", () => ({
-  makePrepareStep: () => "prepare-step",
+  makePrepareStep: makePrepareStepMock,
 }));
 
 vi.mock("./no-key-guidance.js", () => ({
@@ -129,6 +130,8 @@ function engineConfig(delegation: Partial<{ enabled: boolean; maxTasks: number; 
     sandbox: "off",
     apiMaxRetries: 2,
     personality: "",
+    activePromptProfileId: "",
+    promptProfiles: [],
     fileReadMaxChars: 250_000,
     delegation: { enabled: true, maxTasks: 3, maxParallel: 2, maxSteps: 8, ...delegation },
     memory: {
@@ -188,6 +191,114 @@ describe("runKyreiChat project context wiring", () => {
     const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(streamOptions.instructions).toBe("system prompt");
     expect(streamOptions).not.toHaveProperty("system");
+  });
+
+  it("applies bounded context/output overrides only to the primary candidate", async () => {
+    openStreamMock.mockImplementationOnce(async (
+      _count: number,
+      hasTools: boolean,
+      start: (ci: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+    ) => {
+      start(0, hasTools);
+      return { ...start(1, hasTools), candidateIndex: 1 };
+    });
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      modelLimits: { contextWindow: 90_000, maxOutput: 9_000 },
+      modelParams: { contextWindowOverride: 96_000, maxOutputOverride: 12_000 },
+    });
+
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), "mock-model", 96_000, expect.anything());
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), "fallback-model", 128_000, expect.anything());
+    expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 12_000 });
+    expect(streamTextMock.mock.calls[1]?.[0]).toMatchObject({ maxOutputTokens: 8_192 });
+  });
+
+  it("uses each target's sanitized detected limits for compaction and output", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: { ...engineConfig(), fallbackChain: [] },
+      warnings: [],
+    });
+    openStreamMock.mockImplementationOnce(async (
+      _count: number,
+      hasTools: boolean,
+      start: (ci: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+    ) => {
+      start(0, hasTools);
+      return { ...start(1, hasTools), candidateIndex: 1 };
+    });
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "https://primary.example/v1",
+      providerProtocol: "openai-chat",
+      providerId: "primary",
+      apiKey: "primary-key",
+      model: "primary-model",
+      workspace: "/workspace",
+      modelLimits: { contextWindow: 90_000, maxOutput: 9_000 },
+      fallbackProviders: [{
+        providerId: "fallback",
+        protocol: "openai-chat",
+        baseURL: "https://fallback.example/v1",
+        model: "fallback-model",
+        apiKey: "fallback-key",
+        limits: { contextWindow: 40_000, maxOutput: 4_000 },
+      }],
+    });
+
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), "primary-model", 90_000, expect.anything());
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), "fallback-model", 40_000, expect.anything());
+    expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 9_000 });
+    expect(streamTextMock.mock.calls[1]?.[0]).toMatchObject({ maxOutputTokens: 4_000 });
+  });
+
+  it("keeps an output-only runtime limit partial instead of inventing context", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: { ...engineConfig(), fallbackChain: [] },
+      warnings: [],
+    });
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "https://proxy.example/v1",
+      providerProtocol: "openai-chat",
+      providerId: "proxy",
+      apiKey: "proxy-key",
+      model: "unknown-partial-model",
+      workspace: "/workspace",
+      modelLimits: { contextWindow: -1, maxOutput: 2_000 },
+    });
+
+    expect(makePrepareStepMock).not.toHaveBeenCalled();
+    expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 2_000 });
+  });
+
+  it("rejects untrusted non-integer and out-of-range limit overrides at runtime", async () => {
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      modelParams: {
+        contextWindowOverride: "96000" as unknown as number,
+        maxOutputOverride: 10_000_001,
+      },
+    });
+
+    expect(makePrepareStepMock).toHaveBeenCalledWith(expect.anything(), "mock-model", 128_000, expect.anything());
+    expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 8_192 });
   });
 
   it("fails open when project context assembly throws", async () => {
@@ -473,6 +584,7 @@ describe("runKyreiChat project context wiring", () => {
       emit: () => {},
       messages: [{ role: "user", content: "hi" }],
       providerBase: "https://active.example/v1",
+      providerProtocol: "openai-chat",
       providerId: "active",
       apiKey: "key",
       model: "primary-model",
@@ -482,6 +594,7 @@ describe("runKyreiChat project context wiring", () => {
       baseURL: "https://active.example/v1",
       id: "fallback-model",
       provider: "active",
+      protocol: "openai-chat",
     });
   });
 
@@ -902,6 +1015,7 @@ describe("runKyreiChat project context wiring", () => {
               apiKey: "anthropic-secret",
               credentials: { apiKey: "anthropic-secret" },
               headers: { "X-Worker": "reviewer" },
+              limits: { contextWindow: 42_000, maxOutput: 3_333 },
             },
             skillIds: ["review"],
             capabilities: ["workspace.read", "skills.read"],
@@ -981,9 +1095,10 @@ describe("runKyreiChat project context wiring", () => {
     expect(Object.keys(researcherCall["tools"] as Record<string, unknown>)).toEqual(["web_search"]);
     expect(reviewerCall["tools"]).not.toHaveProperty("write_file");
     expect(reviewerCall["tools"]).not.toHaveProperty("run_command");
+    expect(reviewerCall).toMatchObject({ maxOutputTokens: 3_333 });
     expect(String(reviewerCall["instructions"])).toContain("PROJECT_CTX");
     expect(String(researcherCall["instructions"])).not.toContain("PROJECT_CTX");
-    expect(String(researcherCall["instructions"])).toContain("Workspace: not selected");
+    expect(String(researcherCall["instructions"])).toContain("Workspace boundary: not selected");
     expect(events.filter((event) => event.type === "subagent.complete").map((event) => event.payload?.provider_id).sort())
       .toEqual(["anthropic-worker", "search-worker"]);
     expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "completed" } });

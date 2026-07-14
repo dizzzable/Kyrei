@@ -105,7 +105,7 @@ export function toolProgress(
 
 export function toolComplete(
   parts: MessagePart[],
-  info: { toolCallId?: string; name?: string; result?: string; error?: string; durationS?: number; inlineDiff?: string },
+  info: { toolCallId?: string; name?: string; result?: string; error?: string; durationS?: number; inlineDiff?: string; snapshotId?: string },
 ): MessagePart[] {
   const idx = findToolIndex(parts, info);
   if (idx === -1) return parts;
@@ -118,6 +118,7 @@ export function toolComplete(
     error: info.error ?? existing.error,
     durationS: info.durationS ?? existing.durationS,
     inlineDiff: info.inlineDiff ?? existing.inlineDiff,
+    snapshotId: info.snapshotId ?? existing.snapshotId,
     progress: undefined,
   };
   return next;

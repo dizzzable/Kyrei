@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { isAuthFailure, isRetryable, isRateLimit, isToolUnsupported, isServerError, retryAfterMsOf } from "./errors.js";
-import { resolve, isLocalBaseURL } from "./registry.js";
+import { resolve, isLocalBaseURL, registerModel } from "./registry.js";
 import { KeyPool } from "./keys.js";
 import { openStream, type StreamLike } from "./open-stream.js";
 import { buildModel, buildProviderOptions, hasProviderCredentials } from "./build.js";
@@ -198,6 +198,42 @@ describe("registry.resolve", () => {
     const custom = resolve("my-model", { baseURL: "http://localhost:11434/v1", id: "my-model" });
     expect(custom.provider).toBe("custom");
     expect(custom.baseURL).toBe("http://localhost:11434/v1");
+  });
+  it("does not attach canonical limits to a proxy that reuses a known model id", () => {
+    const canonical = resolve("gpt-4o-mini", {
+      baseURL: "https://api.openai.com/v1/",
+      protocol: "openai-chat",
+      provider: "configured-openai",
+    });
+    expect(canonical.limits).toEqual({ contextWindow: 128_000, maxOutput: 16_384 });
+
+    const proxy = resolve("gpt-4o-mini", {
+      baseURL: "https://proxy.example/v1",
+      protocol: "openai-chat",
+      provider: "configured-openai",
+    });
+    expect(proxy.limits).toEqual({});
+
+    const wrongProtocol = resolve("gpt-4o-mini", {
+      baseURL: "https://api.openai.com/v1",
+      protocol: "anthropic-messages",
+      provider: "configured-openai",
+    });
+    expect(wrongProtocol.limits).toEqual({});
+  });
+  it("preserves partial limits without inventing a missing context window", () => {
+    registerModel({
+      id: "output-only-test-model",
+      provider: "test-provider",
+      baseURL: "https://partial.example/v1",
+      limits: { maxOutput: 2_048 },
+      cost: { inputPerM: 0, outputPerM: 0 },
+      caps: { tools: false, reasoning: false, streaming: true, vision: false },
+    });
+    expect(resolve("output-only-test-model", {
+      baseURL: "https://partial.example/v1",
+      protocol: "openai-chat",
+    }).limits).toEqual({ maxOutput: 2_048 });
   });
   it("detects local base URLs", () => {
     expect(isLocalBaseURL("http://localhost:11434/v1")).toBe(true);

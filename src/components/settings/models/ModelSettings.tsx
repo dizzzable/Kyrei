@@ -12,6 +12,10 @@ import { isSameModelRef, modelOptionsForProvider, selectableModelProviders } fro
 import { TeamSettings } from "../team/TeamSettings";
 import { PipelineSettings } from "../team/PipelineSettings";
 import { FallbackChainEditor } from "./FallbackChainEditor";
+import {
+  ModelCapabilitySettings,
+  type ModelCapabilitySettingsCopy,
+} from "./ModelCapabilitySettings";
 
 const EFFORTS = ["off", "minimal", "low", "medium", "high", "max"] as const;
 
@@ -21,7 +25,7 @@ interface ModelSettingsProps {
 }
 
 export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const [providerId, setProviderId] = useState(config.activeProviderId);
   const [modelId, setModelId] = useState(config.activeModelId);
   const [effort, setEffort] = useState("medium");
@@ -34,6 +38,47 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
     [config.activeProviderId, config.providers],
   );
   const models = useMemo(() => modelOptionsForProvider(config.providers, providerId), [config.providers, providerId]);
+  const selectedModel = models.find((model) => model.id === modelId);
+  const capabilityCopy: ModelCapabilitySettingsCopy = {
+    title: t("settings.model.capabilities.title"),
+    description: t("settings.model.capabilities.description"),
+    contextWindow: t("settings.model.capabilities.contextWindow"),
+    maxOutput: t("settings.model.capabilities.maxOutput"),
+    detected: t("settings.model.capabilities.detected"),
+    overridePlaceholder: t("settings.model.capabilities.overridePlaceholder"),
+    overrideActive: t("settings.model.capabilities.overrideActive"),
+    reset: t("settings.model.capabilities.reset"),
+    invalidValue: t("settings.model.capabilities.invalidValue"),
+    unknown: t("settings.model.capabilities.unknown"),
+    inputModalities: t("settings.model.capabilities.inputModalities"),
+    outputModalities: t("settings.model.capabilities.outputModalities"),
+    features: t("settings.model.capabilities.features"),
+    featureTools: t("settings.model.capabilities.feature.tools"),
+    featureReasoning: t("settings.model.capabilities.feature.reasoning"),
+    featureStreaming: t("settings.model.capabilities.feature.streaming"),
+    supported: t("settings.model.capabilities.supported"),
+    unsupported: t("settings.model.capabilities.unsupported"),
+    source: {
+      "live-provider": t("settings.model.capabilities.source.live"),
+      curated: t("settings.model.capabilities.source.curated"),
+      mixed: t("settings.model.capabilities.source.mixed"),
+      "user-override": t("settings.model.capabilities.source.override"),
+      unknown: t("settings.model.capabilities.source.unknown"),
+    },
+    confidence: {
+      high: t("settings.model.capabilities.confidence.high"),
+      medium: t("settings.model.capabilities.confidence.medium"),
+      low: t("settings.model.capabilities.confidence.low"),
+      unknown: t("settings.model.capabilities.confidence.unknown"),
+    },
+    modality: {
+      text: t("settings.model.capabilities.modality.text"),
+      image: t("settings.model.capabilities.modality.image"),
+      audio: t("settings.model.capabilities.modality.audio"),
+      video: t("settings.model.capabilities.modality.video"),
+      file: t("settings.model.capabilities.modality.file"),
+    },
+  };
   const tuningSupported = supportsModelTuning(
     config.providers.find((provider) => provider.id === providerId)?.protocol,
   );
@@ -178,6 +223,14 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
             {t("settings.model.tuningUnavailable")}
           </p>
         ) : null}
+        <ModelCapabilitySettings
+          providerId={providerId}
+          modelId={modelId}
+          metadata={selectedModel?.capabilities}
+          locale={lang}
+          copy={capabilityCopy}
+          disabled={busy}
+        />
         {failed ? <p className="text-[10.5px] text-danger" role="alert">{t("settings.model.saveFailed")}</p> : null}
       </section>
 

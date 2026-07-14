@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ProviderProfile, ProviderTemplate } from "@/lib/types";
+import type { ModelCapabilityMetadata, ProviderProfile, ProviderTemplate } from "@/lib/types";
 import {
   canUseStoredCredentialsForDiscovery,
+  consumeBenchmarkNetworkPermission,
   createDraftFromProfile,
   createDraftFromTemplate,
   draftDiscoveryInput,
@@ -13,7 +14,27 @@ import {
   providerDraftHasCredentialInput,
   providerDraftModels,
   providerSupportsModelDiscovery,
+  updateProviderDraftEndpoint,
 } from "./provider-draft";
+
+const liveCapabilities: ModelCapabilityMetadata = {
+  limits: { contextWindow: 128_000, maxOutput: 16_384 },
+  modalities: { input: ["text", "image"], output: ["text"] },
+  features: { tools: true, streaming: true },
+  provenance: {
+    source: "live-provider",
+    confidence: "high",
+    retrievedAt: 123,
+    fields: {
+      contextWindow: { source: "live-provider", confidence: "high" },
+      maxOutput: { source: "live-provider", confidence: "high" },
+      inputModalities: { source: "live-provider", confidence: "high" },
+      outputModalities: { source: "live-provider", confidence: "high" },
+      tools: { source: "live-provider", confidence: "high" },
+      streaming: { source: "live-provider", confidence: "high" },
+    },
+  },
+};
 
 const configured: ProviderProfile = {
   id: "xpiki",
@@ -27,11 +48,11 @@ const configured: ProviderProfile = {
 };
 
 describe("provider setup drafts", () => {
-  it("advertises automatic discovery only for implemented OpenAI-compatible transports", () => {
+  it("advertises automatic discovery only for implemented read-only catalog transports", () => {
     expect(providerSupportsModelDiscovery("openai-chat")).toBe(true);
     expect(providerSupportsModelDiscovery("openai-responses")).toBe(true);
-    expect(providerSupportsModelDiscovery("anthropic-messages")).toBe(false);
-    expect(providerSupportsModelDiscovery("google-generative-ai")).toBe(false);
+    expect(providerSupportsModelDiscovery("anthropic-messages")).toBe(true);
+    expect(providerSupportsModelDiscovery("google-generative-ai")).toBe(true);
     expect(providerSupportsModelDiscovery("amazon-bedrock")).toBe(false);
     expect(providerSupportsModelDiscovery("google-vertex")).toBe(false);
   });
@@ -69,6 +90,41 @@ describe("provider setup drafts", () => {
     ]);
   });
 
+  it("binds fresh metadata to the current endpoint and clears stale metadata when a row is now unknown", () => {
+    const draft = createDraftFromProfile({
+      ...configured,
+      models: [{ id: "chat-model", name: "Chat model", capabilities: liveCapabilities }],
+    }, false);
+    const refreshed = mergeDiscoveredModels(draft, [{ id: "chat-model", capabilities: liveCapabilities }]);
+    expect((refreshed.availableModels[0]?.capabilities?.provenance as ModelCapabilityMetadata["provenance"] & {
+      origin?: unknown;
+    }).origin).toEqual({
+      protocol: "openai-chat",
+      baseURL: "https://api.example.com/v1",
+      modelId: "chat-model",
+    });
+
+    const unknownNow = mergeDiscoveredModels(refreshed, [{ id: "chat-model" }]);
+    expect(unknownNow.availableModels[0]).toEqual({ id: "chat-model", name: "Chat model" });
+  });
+
+  it("invalidates learned capabilities whenever protocol or base URL changes", () => {
+    const draft = createDraftFromProfile({
+      ...configured,
+      models: [{ id: "gpt-4o-mini", capabilities: liveCapabilities }],
+    }, false);
+    draft.allowBenchmarkNetwork = true;
+
+    const proxy = updateProviderDraftEndpoint(draft, { baseURL: "https://api.xpiki.com/v1" });
+    expect(proxy.allowBenchmarkNetwork).toBe(false);
+    expect(proxy.hasStoredCredentials).toBe(false);
+    expect(proxy.availableModels[0]?.capabilities).toBeUndefined();
+    expect(mergeDiscoveredModels(proxy, [{ id: "gpt-4o-mini" }]).availableModels[0]?.capabilities).toBeUndefined();
+
+    const anthropic = updateProviderDraftEndpoint(draft, { protocol: "anthropic-messages" });
+    expect(anthropic.availableModels[0]?.capabilities).toBeUndefined();
+  });
+
   it("creates a custom draft without performing any persistence", () => {
     const custom: ProviderTemplate = { id: "custom", name: "Custom provider", custom: true };
     const draft = createDraftFromTemplate(custom, false);
@@ -77,12 +133,17 @@ describe("provider setup drafts", () => {
     expect(providerDraftModels(draft)).toEqual([]);
   });
 
-  it("keeps benchmark-network permission scoped to the discovery request", () => {
+  it("consumes benchmark-network permission after one discovery attempt", () => {
     const draft = createDraftFromProfile(configured, false);
     draft.allowBenchmarkNetwork = true;
 
-    expect(draftDiscoveryInput(draft)).toMatchObject({ allowBenchmarkNetwork: true });
-    expect(draftProviderInput(draft)).not.toHaveProperty("allowBenchmarkNetwork");
+    const firstAttempt = draftDiscoveryInput(draft);
+    const afterAttempt = consumeBenchmarkNetworkPermission(draft);
+    const secondAttempt = draftDiscoveryInput(afterAttempt);
+
+    expect(firstAttempt).toMatchObject({ allowBenchmarkNetwork: true });
+    expect(secondAttempt).not.toHaveProperty("allowBenchmarkNetwork");
+    expect(draftProviderInput(afterAttempt)).not.toHaveProperty("allowBenchmarkNetwork");
   });
 
   it("keeps stored specialised credentials when every write-only field is blank", () => {

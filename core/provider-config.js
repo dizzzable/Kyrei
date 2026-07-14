@@ -19,6 +19,10 @@ import {
   normalizeKiroOrganizationSecrets,
   serializeKiroOrganizationSecrets,
 } from "./kiro-organization-config.js";
+import {
+  normalizeStoredModelCapabilities,
+  resolveModelCapabilities,
+} from "./model-capabilities.js";
 
 export { PROVIDER_ACCOUNT_POOL_STRATEGIES };
 
@@ -236,7 +240,118 @@ export function normalizeBaseURL(value, fallback = defaultBaseURLForProtocol(DEF
   }
 }
 
-function normalizeModels(value, fallbackModel) {
+const LIVE_CAPABILITY_FIELDS = [
+  "contextWindow",
+  "maxOutput",
+  "inputModalities",
+  "outputModalities",
+  "tools",
+  "reasoning",
+  "streaming",
+];
+const DISCOVERABLE_CAPABILITY_PROTOCOLS = new Set([
+  "openai-chat",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+]);
+
+function capabilityFieldValue(metadata, name) {
+  if (name === "contextWindow" || name === "maxOutput") return metadata?.limits?.[name];
+  if (name === "inputModalities") return metadata?.modalities?.input;
+  if (name === "outputModalities") return metadata?.modalities?.output;
+  return metadata?.features?.[name];
+}
+
+function assignCapabilityField(target, name, value) {
+  if (value === undefined) return;
+  if (name === "contextWindow" || name === "maxOutput") {
+    target.limits ??= {};
+    target.limits[name] = value;
+  } else if (name === "inputModalities" || name === "outputModalities") {
+    target.modalities ??= {};
+    target.modalities[name === "inputModalities" ? "input" : "output"] = [...value];
+  } else {
+    target.features ??= {};
+    target.features[name] = value;
+  }
+}
+
+function validatedLiveCapabilities(value, { protocol, baseURL, modelId }, verifyLiveCapabilities) {
+  if (!DISCOVERABLE_CAPABILITY_PROTOCOLS.has(protocol)) return undefined;
+  const raw = object(value);
+  const rawOrigin = object(object(raw.provenance).origin);
+  if (rawOrigin.protocol !== protocol || rawOrigin.modelId !== modelId) return undefined;
+  let originBaseURL;
+  try {
+    originBaseURL = strictBaseURL(rawOrigin.baseURL);
+  } catch {
+    return undefined;
+  }
+  if (originBaseURL !== baseURL) return undefined;
+
+  const normalized = normalizeStoredModelCapabilities(raw);
+  if (!normalized) return undefined;
+  const live = {};
+  const fields = {};
+  const confidences = [];
+  for (const name of LIVE_CAPABILITY_FIELDS) {
+    const provenance = normalized.provenance?.fields?.[name];
+    if (provenance?.source !== "live-provider") continue;
+    const value = capabilityFieldValue(normalized, name);
+    if (value === undefined) continue;
+    assignCapabilityField(live, name, value);
+    fields[name] = provenance;
+    confidences.push(provenance.confidence);
+  }
+  if (!Object.keys(fields).length) return undefined;
+  if (typeof verifyLiveCapabilities === "function") {
+    let verified = false;
+    try {
+      verified = verifyLiveCapabilities({
+        capabilities: normalized,
+        protocol,
+        baseURL,
+        modelId,
+      }) === true;
+    } catch {
+      // Verification is a trust boundary. Cache failures and malformed hooks
+      // fail closed, leaving only server-curated metadata eligible below.
+    }
+    if (!verified) return undefined;
+  }
+  live.provenance = {
+    source: "live-provider",
+    confidence: confidences.includes("low") ? "low" : confidences.includes("medium") ? "medium" : "high",
+    ...(normalized.provenance.retrievedAt ? { retrievedAt: normalized.provenance.retrievedAt } : {}),
+    fields,
+  };
+  return normalizeStoredModelCapabilities(live);
+}
+
+function modelCapabilities(source, { providerId, protocol, baseURL, modelId, verifyLiveCapabilities }) {
+  const live = validatedLiveCapabilities(
+    source.capabilities,
+    { protocol, baseURL, modelId },
+    verifyLiveCapabilities,
+  );
+  const capabilities = normalizeStoredModelCapabilities(resolveModelCapabilities({
+    providerId,
+    baseURL,
+    modelId,
+    live,
+  }));
+  if (!capabilities || !live) return capabilities;
+  return {
+    ...capabilities,
+    provenance: {
+      ...capabilities.provenance,
+      origin: { protocol, baseURL, modelId },
+    },
+  };
+}
+
+function normalizeModels(value, fallbackModel, providerContext) {
   const rows = Array.isArray(value) ? value : [];
   const seen = new Set();
   const models = [];
@@ -246,13 +361,18 @@ function normalizeModels(value, fallbackModel) {
     if (!id || id.length > MAX_MODEL_ID || /[\u0000-\u001f\u007f]/.test(id) || seen.has(id)) continue;
     seen.add(id);
     const name = text(source.name).slice(0, MAX_MODEL_NAME);
-    models.push({ id, ...(name ? { name } : {}) });
+    const capabilities = modelCapabilities(source, { ...providerContext, modelId: id });
+    models.push({ id, ...(name ? { name } : {}), ...(capabilities ? { capabilities } : {}) });
   }
-  if (!models.length) models.push({ id: text(fallbackModel, DEFAULT_MODEL) });
+  if (!models.length) {
+    const id = text(fallbackModel, DEFAULT_MODEL);
+    const capabilities = modelCapabilities({}, { ...providerContext, modelId: id });
+    models.push({ id, ...(capabilities ? { capabilities } : {}) });
+  }
   return models;
 }
 
-function validateModels(value) {
+function validateModels(value, providerContext) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new ProviderConfigError("provider_models_required");
   }
@@ -266,7 +386,8 @@ function validateModels(value) {
     seen.add(id);
     const name = typeof source.name === "string" ? source.name.trim() : "";
     if (name.length > MAX_MODEL_NAME) throw new ProviderConfigError("provider_model_invalid");
-    models.push({ id, ...(name ? { name } : {}) });
+    const capabilities = modelCapabilities(source, { ...providerContext, modelId: id });
+    models.push({ id, ...(name ? { name } : {}), ...(capabilities ? { capabilities } : {}) });
   }
   if (!models.length) throw new ProviderConfigError("provider_models_required");
   return models;
@@ -308,7 +429,7 @@ export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID) {
   const protocol = normalizeProviderProtocol(source.protocol);
   const baseURL = normalizeBaseURL(source.baseURL ?? source.provider, defaultBaseURLForProtocol(protocol));
   const headers = normalizeHeaders(source.headers);
-  const models = normalizeModels(source.models, source.model);
+  const models = normalizeModels(source.models, source.model, { providerId: id, protocol, baseURL });
   const name = text(source.name, id === DEFAULT_PROVIDER_ID ? "OpenAI-compatible" : id);
   return {
     id,
@@ -342,8 +463,13 @@ function strictBaseURL(value) {
   }
 }
 
-/** Strict route-boundary validation; migration keeps tolerant normalization. */
-export function validateProviderInput(value, { creating = false, providerId } = {}) {
+/**
+ * Strict route-boundary validation; migration keeps tolerant normalization.
+ * `verifyLiveCapabilities`, when supplied by the gateway, receives sanitized
+ * metadata with the renderer-provided origin removed. Only an exact, recent
+ * discovery-cache match should return true.
+ */
+export function validateProviderInput(value, { creating = false, providerId, verifyLiveCapabilities } = {}) {
   const source = object(value);
   if (!creating && source.id !== undefined && normalizeExplicitProviderId(source.id) !== normalizeExplicitProviderId(providerId)) {
     throw new ProviderConfigError("provider_id_immutable");
@@ -357,7 +483,12 @@ export function validateProviderInput(value, { creating = false, providerId } = 
   const protocol = typeof source.protocol === "string" ? source.protocol.trim().toLowerCase() : "";
   if (!SUPPORTED_PROVIDER_PROTOCOLS.includes(protocol)) throw new ProviderConfigError("provider_protocol_invalid");
   const baseURL = strictBaseURL(source.baseURL);
-  const models = validateModels(source.models);
+  const models = validateModels(source.models, {
+    providerId: id,
+    protocol,
+    baseURL,
+    verifyLiveCapabilities,
+  });
   const headers = normalizeHeaders(source.headers, { strict: true });
   return {
     id,

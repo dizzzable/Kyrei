@@ -1,4 +1,5 @@
 import type {
+  ModelCapabilityMetadata,
   ProviderCredentialsInput,
   ProviderDiscoveryInput,
   ProviderModel,
@@ -35,8 +36,76 @@ export interface ProviderDraft {
   useAsDefault: boolean;
 }
 
+interface ModelCapabilityOrigin {
+  protocol: ProviderProtocol;
+  baseURL: string;
+  modelId: string;
+}
+
+function canonicalCapabilityBaseURL(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:")
+      || url.username
+      || url.password
+      || url.search
+      || url.hash
+    ) return null;
+    return url.href.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function withoutModelCapabilities(model: ProviderModel): ProviderModel {
+  const { capabilities: _capabilities, ...publicModel } = model;
+  return publicModel;
+}
+
+function bindDiscoveredCapabilities(draft: ProviderDraft, model: ProviderModel): ProviderModel {
+  if (!model.capabilities) return withoutModelCapabilities(model);
+  const baseURL = canonicalCapabilityBaseURL(draft.baseURL);
+  if (!baseURL) return withoutModelCapabilities(model);
+  const origin: ModelCapabilityOrigin = { protocol: draft.protocol, baseURL, modelId: model.id };
+  const provenance: ModelCapabilityMetadata["provenance"] = {
+    ...model.capabilities.provenance,
+    origin,
+  };
+  return { ...model, capabilities: { ...model.capabilities, provenance } };
+}
+
+/** Endpoint changes invalidate every fact learned from the previous catalog. */
+export function updateProviderDraftEndpoint(
+  draft: ProviderDraft,
+  patch: Partial<Pick<ProviderDraft, "protocol" | "baseURL" | "hasStoredCredentials">>,
+): ProviderDraft {
+  const protocol = patch.protocol ?? draft.protocol;
+  const baseURL = patch.baseURL ?? draft.baseURL;
+  const endpointChanged = protocol !== draft.protocol || baseURL !== draft.baseURL;
+  return {
+    ...draft,
+    ...patch,
+    allowBenchmarkNetwork: false,
+    ...(endpointChanged
+      ? {
+          hasStoredCredentials: false,
+          availableModels: draft.availableModels.map(withoutModelCapabilities),
+        }
+      : {}),
+  };
+}
+
+/** The reserved-network exception is a one-attempt capability, never dialog state. */
+export function consumeBenchmarkNetworkPermission(draft: ProviderDraft): ProviderDraft {
+  return draft.allowBenchmarkNetwork ? { ...draft, allowBenchmarkNetwork: false } : draft;
+}
+
 export function providerSupportsModelDiscovery(protocol: ProviderProtocol): boolean {
-  return protocol === "openai-chat" || protocol === "openai-responses";
+  return protocol === "openai-chat"
+    || protocol === "openai-responses"
+    || protocol === "anthropic-messages"
+    || protocol === "google-generative-ai";
 }
 
 function copyModels(models: readonly ProviderModel[] | undefined): ProviderModel[] {
@@ -163,7 +232,13 @@ export function mergeDiscoveredModels(draft: ProviderDraft, discovered: readonly
   const selected = new Set(draft.selectedModelIds);
   for (const model of discovered) {
     const previous = byId.get(model.id);
-    byId.set(model.id, { ...previous, ...model });
+    // A fresh catalog row without metadata means "unknown now". Do not retain
+    // limits learned from an earlier endpoint or an older catalog response.
+    const previousWithoutCapabilities = previous ? withoutModelCapabilities(previous) : undefined;
+    byId.set(model.id, {
+      ...previousWithoutCapabilities,
+      ...bindDiscoveredCapabilities(draft, model),
+    });
     selected.add(model.id);
   }
   return { ...draft, availableModels: [...byId.values()], selectedModelIds: selected };

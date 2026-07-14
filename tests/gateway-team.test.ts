@@ -138,7 +138,62 @@ describe("gateway Team orchestration", () => {
     expect(JSON.stringify(saved)).not.toContain(workerKey);
   });
 
-  it("passes a private, skill-filtered RuntimeTeamSpec with explicit and main-model targets", async () => {
+  it("atomically validates prompt profiles and their Team role assignments", async () => {
+    await readyMain();
+    const initial = await request<any>("/api/config");
+    const promptProfile = {
+      id: "review-policy",
+      name: "Review policy",
+      description: "Challenge unsupported claims",
+      systemPrompt: "Require evidence and report uncertainty.",
+    };
+    const saved = await request<any>("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        engine: {
+          ...initial.engine,
+          promptProfiles: [promptProfile],
+          activePromptProfileId: promptProfile.id,
+        },
+        orchestration: orchestration([role({ promptProfileId: promptProfile.id })]),
+      }),
+    });
+    expect(saved.engine).toMatchObject({
+      activePromptProfileId: promptProfile.id,
+      promptProfiles: [promptProfile],
+    });
+    expect(saved.orchestration.profiles[0].roles[0].promptProfileId).toBe(promptProfile.id);
+
+    await expect(request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ engine: {
+        ...saved.engine,
+        promptProfiles: [],
+        activePromptProfileId: "",
+      } }),
+    })).rejects.toThrow("team_role_prompt_profile_unavailable");
+    await expect(request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ engine: {
+        ...saved.engine,
+        promptProfiles: [promptProfile, promptProfile],
+      } }),
+    })).rejects.toThrow("engine_prompt_profile_id_invalid");
+    await expect(request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ engine: {
+        ...saved.engine,
+        promptProfiles: [{ ...promptProfile, name: "Unsafe\nname" }],
+      } }),
+    })).rejects.toThrow("engine_prompt_profile_name_invalid");
+
+    expect(await request<any>("/api/config")).toMatchObject({
+      engine: { activePromptProfileId: promptProfile.id, promptProfiles: [promptProfile] },
+      orchestration: { profiles: [{ roles: [{ promptProfileId: promptProfile.id }] }] },
+    });
+  });
+
+  it("passes a private RuntimeTeamSpec with validated skill ids and explicit/main targets", async () => {
     const main = await readyMain();
     const workerKey = "worker-private-runtime-credential";
     await addWorker(workerKey);
@@ -164,7 +219,7 @@ describe("gateway Team orchestration", () => {
       body: JSON.stringify({ enabled: false }),
     });
 
-    await request("/api/config", {
+    await expect(request("/api/config", {
       method: "PUT",
       body: JSON.stringify({
         orchestration: orchestration([
@@ -181,6 +236,25 @@ describe("gateway Team orchestration", () => {
           }),
         ]),
       }),
+    })).rejects.toThrow("team_role_skill_unavailable");
+
+    await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        orchestration: orchestration([
+          role({
+            id: "specialist",
+            name: "Specialist",
+            model: { providerId: "worker-provider", modelId: "worker-model" },
+            skillIds: [enabled.skill.id],
+          }),
+          role({
+            id: "reviewer",
+            name: "Reviewer",
+            skillIds: [enabled.skill.id],
+          }),
+        ]),
+      }),
     });
 
     const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
@@ -191,6 +265,7 @@ describe("gateway Team orchestration", () => {
     await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
 
     const engineOptions = runKyreiChat.mock.calls[0]?.[0] as {
+      readSkillDocument: (skillId: string, documentId: string) => Promise<unknown>;
       team: {
         profileId: string;
         roles: Array<{
@@ -200,6 +275,8 @@ describe("gateway Team orchestration", () => {
         }>;
       };
     };
+    expect(engineOptions.readSkillDocument).toEqual(expect.any(Function));
+    await expect(engineOptions.readSkillDocument("invalid", "invalid")).resolves.toBeNull();
     expect(engineOptions.team.profileId).toBe("repo-team");
     const specialist = engineOptions.team.roles.find((candidate) => candidate.id === "specialist");
     const reviewer = engineOptions.team.roles.find((candidate) => candidate.id === "reviewer");

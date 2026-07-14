@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   collectProviderCredentialValues,
   defaultBaseURLForProtocol,
@@ -41,6 +41,225 @@ describe("provider registry config", () => {
       strategy: "balanced",
       sessionAffinity: true,
       members: [{ id: "primary" }],
+    });
+  });
+
+  it("persists only bounded public model capability metadata", () => {
+    const config = normalizeGatewayConfig({
+      providers: [{
+        id: "metadata-provider",
+        name: "Metadata provider",
+        baseURL: "https://models.example/v1",
+        models: [{
+          id: "live-model",
+          capabilities: {
+            limits: { contextWindow: 128_000, maxOutput: 16_384, injected: 1 },
+            modalities: { input: ["text", "image", "script"], output: ["text"] },
+            features: { tools: true, reasoning: false, command: "calc.exe" },
+            provenance: {
+              source: "live-provider",
+              confidence: "high",
+              retrievedAt: 123,
+              origin: {
+                protocol: "openai-chat",
+                baseURL: "https://models.example/v1",
+                modelId: "live-model",
+              },
+              fields: {
+                contextWindow: { source: "live-provider", confidence: "high" },
+                tools: { source: "live-provider", confidence: "high" },
+              },
+            },
+          },
+        }],
+      }],
+    });
+
+    expect(config.providers[0]?.models[0]).toEqual({
+      id: "live-model",
+      capabilities: {
+        limits: { contextWindow: 128_000, maxOutput: 16_384 },
+        modalities: { input: ["text", "image"], output: ["text"] },
+        features: { tools: true, reasoning: false },
+        provenance: expect.objectContaining({
+          source: "live-provider",
+          confidence: "high",
+          retrievedAt: 123,
+        }),
+      },
+    });
+    expect(JSON.stringify(config)).not.toMatch(/script|command|calc\.exe|injected/);
+  });
+
+  it("fills exact official metadata only for a canonical provider endpoint", () => {
+    const official = normalizeGatewayConfig({
+      providers: [{
+        id: "openai",
+        name: "OpenAI",
+        protocol: "openai-responses",
+        baseURL: "https://api.openai.com/v1",
+        models: [{ id: "gpt-4o-mini" }],
+      }],
+    });
+    expect(official.providers[0]?.models[0]?.capabilities?.limits).toEqual({
+      contextWindow: 128_000,
+      maxOutput: 16_384,
+    });
+
+    const proxy = normalizeGatewayConfig({
+      providers: [{
+        id: "xpiki",
+        name: "Custom proxy",
+        protocol: "openai-chat",
+        baseURL: "https://api.xpiki.com/v1",
+        models: [{ id: "gpt-4o-mini" }],
+      }],
+    });
+    expect(proxy.providers[0]?.models[0]?.capabilities).toBeUndefined();
+
+    const staleOfficialModel = official.providers[0]?.models[0];
+    const editedToProxy = validateProviderInput({
+      id: "xpiki",
+      name: "Custom proxy",
+      protocol: "openai-chat",
+      baseURL: "https://api.xpiki.com/v1",
+      models: [{ id: "gpt-4o-mini", capabilities: staleOfficialModel?.capabilities }],
+      requiresApiKey: true,
+    }, { creating: true });
+    expect(editedToProxy.models[0]?.capabilities).toBeUndefined();
+  });
+
+  it("accepts live metadata only with a matching validated catalog origin", () => {
+    const live = {
+      limits: { contextWindow: 96_000, maxOutput: 12_000 },
+      provenance: {
+        source: "live-provider",
+        confidence: "high",
+        origin: {
+          protocol: "openai-chat",
+          baseURL: "https://catalog.example/v1",
+          modelId: "catalog-model",
+        },
+        fields: {
+          contextWindow: { source: "live-provider", confidence: "high" },
+          maxOutput: { source: "live-provider", confidence: "high" },
+        },
+      },
+    };
+    const input = {
+      id: "catalog",
+      name: "Catalog",
+      protocol: "openai-chat",
+      baseURL: "https://catalog.example/v1",
+      models: [{ id: "catalog-model", capabilities: live }],
+      requiresApiKey: true,
+    };
+
+    const verifyLiveCapabilities = vi.fn(() => true);
+    const accepted = validateProviderInput(input, { creating: true, verifyLiveCapabilities });
+    expect(accepted.models[0]?.capabilities).toMatchObject({
+      limits: { contextWindow: 96_000, maxOutput: 12_000 },
+      provenance: {
+        source: "live-provider",
+        origin: {
+          protocol: "openai-chat",
+          baseURL: "https://catalog.example/v1",
+          modelId: "catalog-model",
+        },
+      },
+    });
+    expect(verifyLiveCapabilities).toHaveBeenCalledWith({
+      capabilities: {
+        limits: { contextWindow: 96_000, maxOutput: 12_000 },
+        provenance: {
+          source: "live-provider",
+          confidence: "high",
+          fields: {
+            contextWindow: { source: "live-provider", confidence: "high" },
+            maxOutput: { source: "live-provider", confidence: "high" },
+          },
+        },
+      },
+      protocol: "openai-chat",
+      baseURL: "https://catalog.example/v1",
+      modelId: "catalog-model",
+    });
+    expect(normalizeGatewayConfig({ providers: [accepted] }).providers[0]?.models[0]?.capabilities).toMatchObject({
+      limits: { contextWindow: 96_000, maxOutput: 12_000 },
+      provenance: { source: "live-provider" },
+    });
+
+    const unbound = validateProviderInput({
+      ...input,
+      models: [{ id: "catalog-model", capabilities: { ...live, provenance: { ...live.provenance, origin: undefined } } }],
+    }, { creating: true });
+    expect(unbound.models[0]?.capabilities).toBeUndefined();
+
+    const moved = validateProviderInput({ ...input, baseURL: "https://other.example/v1" }, { creating: true });
+    expect(moved.models[0]?.capabilities).toBeUndefined();
+  });
+
+  it("rejects forged matching-origin live metadata when the discovery verifier denies it", () => {
+    const forged = {
+      limits: { contextWindow: 777_777, maxOutput: 77_777 },
+      provenance: {
+        source: "live-provider",
+        confidence: "high",
+        origin: {
+          protocol: "openai-chat",
+          baseURL: "https://forged.example/v1",
+          modelId: "forged-model",
+        },
+        fields: {
+          contextWindow: { source: "live-provider", confidence: "high" },
+          maxOutput: { source: "live-provider", confidence: "high" },
+        },
+      },
+    };
+    const input = {
+      id: "forged",
+      name: "Forged",
+      protocol: "openai-chat",
+      baseURL: "https://forged.example/v1",
+      models: [{ id: "forged-model", capabilities: forged }],
+      requiresApiKey: true,
+    };
+    const deny = vi.fn(() => false);
+
+    const rejected = validateProviderInput(input, { creating: true, verifyLiveCapabilities: deny });
+    expect(deny).toHaveBeenCalledOnce();
+    expect(rejected.models[0]?.capabilities).toBeUndefined();
+
+    const accepted = validateProviderInput(input, { creating: true, verifyLiveCapabilities: () => true });
+    expect(accepted.models[0]?.capabilities?.limits).toEqual({
+      contextWindow: 777_777,
+      maxOutput: 77_777,
+    });
+
+    const curatedOnly = validateProviderInput({
+      ...input,
+      id: "openai",
+      name: "OpenAI",
+      protocol: "openai-responses",
+      baseURL: "https://api.openai.com/v1",
+      models: [{
+        id: "gpt-4o-mini",
+        capabilities: {
+          ...forged,
+          provenance: {
+            ...forged.provenance,
+            origin: {
+              protocol: "openai-responses",
+              baseURL: "https://api.openai.com/v1",
+              modelId: "gpt-4o-mini",
+            },
+          },
+        },
+      }],
+    }, { creating: true, verifyLiveCapabilities: () => false });
+    expect(curatedOnly.models[0]?.capabilities).toMatchObject({
+      limits: { contextWindow: 128_000, maxOutput: 16_384 },
+      provenance: { source: "curated" },
     });
   });
 

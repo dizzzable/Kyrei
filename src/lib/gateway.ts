@@ -24,6 +24,7 @@ import type {
   SessionInfo,
   SkillInfo,
   SkillRoot,
+  ModelCapabilityMetadata,
 } from "./types";
 import type {
   KiroOrganizationAccountInput,
@@ -39,9 +40,11 @@ export interface ModelCatalogEntry {
   provider: string;
   providerName?: string;
   baseURL: string;
-  limits?: { contextWindow: number; maxOutput: number };
+  /** Truthful detected/effective limits. Missing fields are unknown. */
+  limits?: { contextWindow?: number; maxOutput?: number };
   cost?: { inputPerM: number; outputPerM: number };
-  caps?: { tools: boolean; reasoning: boolean; streaming: boolean; vision: boolean };
+  caps?: { tools?: boolean; reasoning?: boolean; streaming?: boolean; vision?: boolean };
+  capabilities?: ModelCapabilityMetadata;
 }
 
 /** Per-turn reasoning/effort tuning forwarded to the engine. */
@@ -49,6 +52,8 @@ export interface ModelParams {
   effort?: string;
   fast?: boolean;
   reasoning?: boolean;
+  contextWindowOverride?: number;
+  maxOutputOverride?: number;
 }
 
 const launchParams = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
@@ -362,12 +367,27 @@ export const gateway = {
       body: JSON.stringify({ providerId, modelId }),
     }).then((result) => result.session),
   getMessages: (id: string) =>
-    json<{ messages: { role: ChatMessage["role"]; content: string; parts?: import("./types").MessagePart[] }[] }>(
+    json<{ messages: import("./types").StoredChatMessage[] }>(
       `/api/sessions/${encodeURIComponent(id)}/messages`,
     ).then(r => r.messages),
 
-  sendPrompt: (session: string, text: string, modelParams?: ModelParams) =>
-    json<{ status: string }>("/api/prompt", { method: "POST", body: JSON.stringify({ session, text, ...(modelParams ? { modelParams } : {}) }) }),
+  sendPrompt: (session: string, text: string, modelParams?: ModelParams, messageId?: string) =>
+    json<{ status: string }>("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session, text, ...(modelParams ? { modelParams } : {}), ...(messageId ? { messageId } : {}) }),
+    }),
+  rewindSession: (session: string, messageId: string) =>
+    json<{
+      ok: boolean;
+      session_id: string;
+      draft: string;
+      messages: import("./types").StoredChatMessage[];
+      restoredSnapshots: number;
+      restoredFiles: number;
+    }>(`/api/sessions/${encodeURIComponent(session)}/rewind`, {
+      method: "POST",
+      body: JSON.stringify({ messageId }),
+    }),
   cancel: (session: string) => json<{ ok: boolean }>("/api/cancel", { method: "POST", body: JSON.stringify({ session }) }),
 
   listFiles: (path = "") =>

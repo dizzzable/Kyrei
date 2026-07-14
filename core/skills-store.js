@@ -13,7 +13,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const SKILLS_STATE_VERSION = 1;
 
@@ -23,12 +24,19 @@ const DEFAULT_MAX_SKILL_BYTES = 256_000;
 const HARD_MAX_SKILL_BYTES = 2_000_000;
 const HARD_MAX_RUNTIME_SKILLS = 256;
 const HARD_MAX_RUNTIME_CHARS = 1_000_000;
+const DEFAULT_RUNTIME_IDENTITY_BYTES = 16_000_000;
+const HARD_MAX_RUNTIME_IDENTITY_BYTES = 64_000_000;
+const MAX_LINKED_DOCUMENTS = 512;
+const MAX_LINKED_DOCUMENT_ISSUES = 64;
+const MAX_LINKED_DOCUMENT_BYTES = 512_000;
+const MAX_LINKED_DOCUMENT_TOTAL_BYTES = 2_000_000;
 const MAX_FRONTMATTER_CHARS = 16_384;
 const MAX_FRONTMATTER_LINES = 128;
 const MAX_DESCRIPTION_CHARS = 2_000;
 const MAX_METADATA_TEXT_CHARS = 512;
 const MAX_TAGS = 32;
 const PUBLIC_ID_RE = /^skill_[a-f0-9]{24}$/;
+const PUBLIC_DOCUMENT_ID_RE = /^doc_[a-f0-9]{24}$/;
 const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RESERVED_WINDOWS_NAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const ALLOWED_METADATA_KEYS = new Set(["name", "description", "version", "author", "tags"]);
@@ -56,6 +64,18 @@ function pathKey(value) {
 
 function stableHash(value, length = 24) {
   return createHash("sha256").update(value).digest("hex").slice(0, length);
+}
+
+function contentDigest(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function stableSkillId(canonicalFile) {
@@ -285,6 +305,16 @@ async function inspectWorkspaceSkillsRoot(workspace) {
   return { workspaceCanonical, kyreiCanonical, skillsCanonical };
 }
 
+async function inspectKiroSkillsRoot(kiroRoot) {
+  const configuredRoot = resolve(kiroRoot);
+  const rootCanonical = await secureDirectory(configuredRoot);
+  if (!rootCanonical) return null;
+  const skillsCanonical = await canonicalDirectChild(rootCanonical, join(rootCanonical, "skills"));
+  if (!skillsCanonical) return null;
+  const docsCanonical = await canonicalDirectChild(rootCanonical, join(rootCanonical, "docs"));
+  return { rootCanonical, skillsCanonical, docsCanonical };
+}
+
 async function ensureDirectoryComponent(path) {
   try {
     await mkdir(path);
@@ -296,8 +326,8 @@ async function ensureDirectoryComponent(path) {
 async function readSkillFile(path, containmentRoot, maxBytes) {
   const info = await pathInfoNoSymlink(path);
   if (!info?.isFile() || info.size > maxBytes) return null;
-  const canonical = await realpath(path);
-  if (!isPathInside(containmentRoot, canonical, false)) return null;
+  const canonicalBeforeOpen = await realpath(path);
+  if (!isPathInside(containmentRoot, canonicalBeforeOpen, false)) return null;
 
   const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
   let handle;
@@ -305,13 +335,211 @@ async function readSkillFile(path, containmentRoot, maxBytes) {
     handle = await open(path, fsConstants.O_RDONLY | noFollow);
     const openedInfo = await handle.stat();
     if (!openedInfo.isFile() || openedInfo.size > maxBytes) return null;
-    return { canonical, content: await handle.readFile("utf8") };
+    const pathInfoAfterOpen = await pathInfoNoSymlink(path);
+    const canonicalAfterOpen = await realpath(path);
+    if (!pathInfoAfterOpen?.isFile()
+      || pathKey(canonicalAfterOpen) !== pathKey(canonicalBeforeOpen)
+      || !isPathInside(containmentRoot, canonicalAfterOpen, false)
+      || openedInfo.dev !== pathInfoAfterOpen.dev
+      || openedInfo.ino !== pathInfoAfterOpen.ino) return null;
+
+    const content = await handle.readFile("utf8");
+    const openedInfoAfterRead = await handle.stat();
+    const pathInfoAfterRead = await pathInfoNoSymlink(path);
+    const canonicalAfterRead = await realpath(path);
+    if (!pathInfoAfterRead?.isFile()
+      || openedInfoAfterRead.size > maxBytes
+      || pathKey(canonicalAfterRead) !== pathKey(canonicalAfterOpen)
+      || !isPathInside(containmentRoot, canonicalAfterRead, false)
+      || openedInfoAfterRead.dev !== pathInfoAfterRead.dev
+      || openedInfoAfterRead.ino !== pathInfoAfterRead.ino) return null;
+    return { canonical: canonicalAfterRead, content };
   } catch (error) {
     if (["ELOOP", "ENOENT", "ENOTDIR"].includes(error?.code)) return null;
     throw error;
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+/** Inspect a regular file while rejecting every symlink/junction component. */
+async function inspectContainedDocument(path, containmentRoot, maxBytes) {
+  const target = resolve(path);
+  if (!isPathInside(containmentRoot, target, false)) return null;
+  const parts = relative(containmentRoot, target).split(sep).filter(Boolean);
+  let cursor = containmentRoot;
+  for (let index = 0; index < parts.length; index += 1) {
+    cursor = join(cursor, parts[index]);
+    const info = await pathInfoNoSymlink(cursor);
+    if (!info) return null;
+    if (index < parts.length - 1 && !info.isDirectory()) return null;
+    if (index === parts.length - 1 && (!info.isFile() || info.size > maxBytes)) return null;
+  }
+  const canonicalBeforeOpen = await realpath(target);
+  if (!isPathInside(containmentRoot, canonicalBeforeOpen, false)) return null;
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+  let handle;
+  try {
+    handle = await open(target, fsConstants.O_RDONLY | noFollow);
+    const openedInfo = await handle.stat();
+    const pathInfo = await pathInfoNoSymlink(target);
+    const canonicalAfterOpen = await realpath(target);
+    if (!openedInfo.isFile()
+      || openedInfo.size > maxBytes
+      || !pathInfo?.isFile()
+      || openedInfo.dev !== pathInfo.dev
+      || openedInfo.ino !== pathInfo.ino
+      || pathKey(canonicalAfterOpen) !== pathKey(canonicalBeforeOpen)
+      || !isPathInside(containmentRoot, canonicalAfterOpen, false)) return null;
+    return { canonical: canonicalAfterOpen, size: openedInfo.size };
+  } catch (error) {
+    if (["ELOOP", "ENOENT", "ENOTDIR"].includes(error?.code)) return null;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Read a regular UTF-8 file while rejecting every symlink/junction component. */
+async function readContainedDocument(path, containmentRoot, maxBytes) {
+  const inspected = await inspectContainedDocument(path, containmentRoot, maxBytes);
+  if (!inspected) return null;
+  const loaded = await readSkillFile(path, containmentRoot, maxBytes);
+  return loaded && pathKey(loaded.canonical) === pathKey(inspected.canonical) ? loaded : null;
+}
+
+function markdownLinks(source) {
+  const links = [];
+  const searchableLines = [];
+  let fence = null;
+  for (const line of String(source).split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) {
+      if (marker?.[0] === fence[0] && marker.length >= fence.length) fence = null;
+      continue;
+    }
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    if (/^(?: {4}|\t)/.test(line)) continue;
+    searchableLines.push(line);
+  }
+  const searchable = searchableLines.join("\n");
+  const pattern = /!?\[([^\]]{0,300})\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+["'][^)]*["'])?\s*\)/g;
+  for (const match of searchable.matchAll(pattern)) {
+    if (links.length >= MAX_LINKED_DOCUMENTS * 4) break;
+    const label = cleanText(match[1], 200).replace(/\s+/g, " ") || "Document";
+    let href = match[2] ?? match[3] ?? "";
+    try {
+      href = decodeURIComponent(href.split("#", 1)[0].split("?", 1)[0]);
+    } catch {
+      continue;
+    }
+    if (!href || href.includes("\0") || isAbsolute(href) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(href)) continue;
+    if (![".md", ".mdx"].includes(extname(href).toLowerCase())) continue;
+    links.push({ label, href });
+  }
+  return links;
+}
+
+function resolveLinkedDocument(link, baseDirectory, skillDirectory, kiroDocsCanonical) {
+  const target = resolve(baseDirectory, link.href);
+  if (isPathInside(skillDirectory, target, false)) {
+    return { target, source: "skill", root: skillDirectory };
+  }
+  if (kiroDocsCanonical && isPathInside(kiroDocsCanonical, target, false)) {
+    return { target, source: "kiro-docs", root: kiroDocsCanonical };
+  }
+  return null;
+}
+
+async function linkedDocumentsForSkill(skillContent, skillDirectory, kiroDocsCanonical) {
+  const documents = [];
+  const issues = [];
+  const seen = new Set();
+  let scannedBytes = 0;
+
+  const addIssue = (issue) => {
+    if (issues.length >= MAX_LINKED_DOCUMENT_ISSUES) return;
+    const key = `${issue.documentId ?? ""}\0${issue.code}`;
+    if (!issues.some((candidate) => `${candidate.documentId ?? ""}\0${candidate.code}` === key)) {
+      issues.push(issue);
+    }
+  };
+
+  const addDocument = async (link, baseDirectory, parentId = undefined, expand = false) => {
+    if (documents.length >= MAX_LINKED_DOCUMENTS) {
+      addIssue({ code: "document_limit_exceeded" });
+      return;
+    }
+    const resolved = resolveLinkedDocument(link, baseDirectory, skillDirectory, kiroDocsCanonical);
+    if (!resolved) {
+      addIssue({ code: "document_outside_allowed_roots" });
+      return;
+    }
+    // Direct links are read to discover one index level and therefore receive
+    // full path-component validation now. Leaf links stay metadata-only and
+    // receive the same validation later, immediately before their lazy read.
+    const inspected = expand
+      ? await inspectContainedDocument(
+          resolved.target,
+          resolved.root,
+          MAX_LINKED_DOCUMENT_BYTES,
+        ).catch(() => null)
+      : null;
+    const catalogPath = inspected?.canonical ?? resolve(resolved.target);
+    const key = pathKey(catalogPath);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const id = `doc_${stableHash(`${key}\0${resolved.source}`)}`;
+    if (expand && !inspected) {
+      addIssue({ documentId: id, code: "document_unavailable" });
+      return;
+    }
+    const relativePath = relative(resolved.root, catalogPath).replaceAll("\\", "/").slice(0, 1_000);
+    const document = {
+      id,
+      label: link.label,
+      relativePath,
+      source: resolved.source,
+      ...(parentId ? { parentId } : {}),
+      _canonical: catalogPath,
+      _root: resolved.root,
+    };
+    documents.push(document);
+
+    // Exactly one bounded expansion: SKILL.md -> linked index -> leaf. The
+    // leaf contents stay on disk until the model requests their opaque id.
+    if (!expand || !inspected) return;
+    if (scannedBytes + inspected.size > MAX_LINKED_DOCUMENT_TOTAL_BYTES) {
+      addIssue({ documentId: id, code: "document_index_budget_exceeded" });
+      return;
+    }
+    const loaded = await readContainedDocument(
+      inspected.canonical,
+      resolved.root,
+      MAX_LINKED_DOCUMENT_BYTES,
+    ).catch(() => null);
+    if (!loaded || pathKey(loaded.canonical) !== key) {
+      addIssue({ documentId: id, code: "document_unavailable" });
+      return;
+    }
+    const loadedBytes = Buffer.byteLength(loaded.content, "utf8");
+    document._contentBytes = loadedBytes;
+    document._contentDigest = contentDigest(loaded.content);
+    scannedBytes += loadedBytes;
+    for (const child of markdownLinks(loaded.content)) {
+      if (documents.length >= MAX_LINKED_DOCUMENTS) break;
+      await addDocument(child, dirname(loaded.canonical), id, false);
+    }
+  };
+
+  for (const link of markdownLinks(skillContent)) {
+    if (documents.length >= MAX_LINKED_DOCUMENTS) break;
+    await addDocument(link, skillDirectory, undefined, true);
+  }
+  return { documents, issues };
 }
 
 async function atomicWrite(path, content) {
@@ -350,6 +578,13 @@ function publicSkill(skill, includeContent = false) {
     rootId: skill.rootId,
     relativePath: skill.relativePath,
     metadata: { ...skill.metadata },
+    references: (skill._documents ?? []).map(({ id, label, relativePath, source, parentId }) => ({
+      id,
+      label,
+      relativePath,
+      source,
+      ...(parentId ? { parentId } : {}),
+    })),
     ...(includeContent ? { content: skill.content } : {}),
   };
 }
@@ -375,7 +610,12 @@ function renderSkillDocument({ name, description, content, metadata }) {
 }
 
 export class SkillsStore {
-  constructor({ dataDir, workspace = "", maxSkillBytes = DEFAULT_MAX_SKILL_BYTES } = {}) {
+  constructor({
+    dataDir,
+    workspace = "",
+    maxSkillBytes = DEFAULT_MAX_SKILL_BYTES,
+    kiroRoot = process.env.NODE_ENV === "test" ? "" : join(homedir(), ".kiro"),
+  } = {}) {
     if (typeof dataDir !== "string" || !dataDir.trim() || dataDir.includes("\0")) {
       fail("invalid_data_dir", "SkillsStore requires a dataDir");
     }
@@ -383,6 +623,9 @@ export class SkillsStore {
     this.globalRoot = join(this.dataDir, "skills");
     this.stateFile = join(this.dataDir, STATE_FILE);
     this.workspace = typeof workspace === "string" && workspace.trim() ? resolve(workspace) : "";
+    this.kiroRoot = typeof kiroRoot === "string" && kiroRoot.trim() && !kiroRoot.includes("\0")
+      ? resolve(kiroRoot)
+      : "";
     this.maxSkillBytes = Math.max(1_024, Math.min(HARD_MAX_SKILL_BYTES, Number(maxSkillBytes) || DEFAULT_MAX_SKILL_BYTES));
     this.state = normalizeState({});
     this.loaded = false;
@@ -518,11 +761,37 @@ export class SkillsStore {
     };
   }
 
+  async #kiroRootDescriptor() {
+    const configuredPath = join(this.kiroRoot, "skills");
+    const inspected = await inspectKiroSkillsRoot(this.kiroRoot);
+    if (!inspected) {
+      return {
+        id: stableRootId("kiro", configuredPath),
+        path: resolve(configuredPath),
+        canonical: null,
+        docsCanonical: null,
+        provenance: "kiro",
+        owned: false,
+        available: false,
+      };
+    }
+    return {
+      id: stableRootId("kiro", inspected.skillsCanonical),
+      path: inspected.skillsCanonical,
+      canonical: inspected.skillsCanonical,
+      docsCanonical: inspected.docsCanonical,
+      provenance: "kiro",
+      owned: false,
+      available: true,
+    };
+  }
+
   async rootsInternal() {
     const roots = [await this.#rootDescriptor(this.globalRoot, "global", true)];
     if (this.workspace) {
       roots.push(await this.#workspaceRootDescriptor());
     }
+    if (this.kiroRoot) roots.push(await this.#kiroRootDescriptor());
     for (const path of this.state.customRoots) {
       roots.push(await this.#rootDescriptor(path, "custom", false));
     }
@@ -534,7 +803,7 @@ export class SkillsStore {
     return (await this.rootsInternal()).map(publicRoot);
   }
 
-  async #skillFromDirectory(root, skillDirectory) {
+  async #skillFromDirectory(root, skillDirectory, linkedDocumentIds = null) {
     const directoryInfo = await pathInfoNoSymlink(skillDirectory);
     if (!directoryInfo?.isDirectory()) return null;
     const canonicalDirectory = await realpath(skillDirectory);
@@ -550,14 +819,25 @@ export class SkillsStore {
     const relativePath = (relativeDirectory ? join(relativeDirectory, SKILL_FILE) : SKILL_FILE).replaceAll("\\", "/");
     const id = stableSkillId(loaded.canonical);
     const usage = normalizeUsage(this.state.usage[id]) ?? { total: 0 };
+    const enabled = !this.state.disabledIds.includes(id);
 
+    // Disabled skills remain discoverable, but their linked indexes are not
+    // expanded or read. This prevents inactive local material from consuming
+    // I/O and makes the disabled boundary effective before reference loading.
+    const linked = enabled && (!linkedDocumentIds || linkedDocumentIds.has(id))
+      ? await linkedDocumentsForSkill(
+          loaded.content,
+          canonicalDirectory,
+          root.provenance === "kiro" ? root.docsCanonical : null,
+        )
+      : { documents: [], issues: [] };
     return {
       id,
       name: candidateName,
       description: cleanText(parsed.metadata.description, MAX_DESCRIPTION_CHARS) || descriptionFromBody(parsed.body),
       provenance: root.provenance,
       owned: root.owned,
-      enabled: !this.state.disabledIds.includes(id),
+      enabled,
       usage: usage.total,
       lastUsedAt: usage.lastUsedAt,
       rootId: root.id,
@@ -568,6 +848,8 @@ export class SkillsStore {
         ...(parsed.metadata.tags ? { tags: [...parsed.metadata.tags] } : {}),
       },
       content: loaded.content,
+      _documents: linked.documents,
+      _documentIssues: linked.issues,
       _rootCanonical: root.canonical,
       _skillDirectory: canonicalDirectory,
       _skillFile: loaded.canonical,
@@ -575,7 +857,7 @@ export class SkillsStore {
     };
   }
 
-  async #discover() {
+  async #discover({ linkedDocumentIds = null } = {}) {
     const found = [];
     const seenFiles = new Set();
     const roots = await this.rootsInternal();
@@ -592,7 +874,7 @@ export class SkillsStore {
         if (entry.isDirectory() && !entry.isSymbolicLink()) candidates.push(join(root.canonical, entry.name));
       }
       for (const candidate of candidates) {
-        const skill = await this.#skillFromDirectory(root, candidate).catch(() => null);
+        const skill = await this.#skillFromDirectory(root, candidate, linkedDocumentIds).catch(() => null);
         if (!skill) continue;
         const key = pathKey(skill._skillFile);
         if (seenFiles.has(key)) continue;
@@ -600,7 +882,7 @@ export class SkillsStore {
         found.push(skill);
       }
     }
-    const provenanceOrder = { workspace: 0, global: 1, custom: 2 };
+    const provenanceOrder = { workspace: 0, global: 1, kiro: 2, custom: 3 };
     found.sort((left, right) =>
       (provenanceOrder[left.provenance] - provenanceOrder[right.provenance]) ||
       left.name.localeCompare(right.name) ||
@@ -752,6 +1034,203 @@ export class SkillsStore {
     });
   }
 
+  /** Lazily read one opaque document that is still linked by an enabled skill. */
+  async readRuntimeDocument(skillId, documentId) {
+    await this.#settled();
+    if (typeof skillId !== "string" || !PUBLIC_ID_RE.test(skillId)
+      || typeof documentId !== "string" || !PUBLIC_DOCUMENT_ID_RE.test(documentId)) return null;
+    const skill = (await this.#discover()).find((candidate) => candidate.id === skillId && candidate.enabled);
+    const document = skill?._documents?.find((candidate) => candidate.id === documentId);
+    if (!skill || !document) return null;
+    const loaded = await readContainedDocument(
+      document._canonical,
+      document._root,
+      MAX_LINKED_DOCUMENT_BYTES,
+    ).catch(() => null);
+    if (!loaded || pathKey(loaded.canonical) !== pathKey(document._canonical)) return null;
+    return {
+      id: document.id,
+      label: document.label,
+      relativePath: document.relativePath,
+      source: document.source,
+      ...(document.parentId ? { parentId: document.parentId } : {}),
+      content: loaded.content,
+    };
+  }
+
+  /**
+   * Build a deterministic, bounded identity for exactly the requested runtime
+   * skills. Linked document contents are hashed but never returned.
+   */
+  async runtimeIdentity({
+    ids,
+    maxSkills = 64,
+    maxBytes = DEFAULT_RUNTIME_IDENTITY_BYTES,
+  } = {}) {
+    await this.#settled();
+    const skillLimit = Math.max(0, Math.min(
+      HARD_MAX_RUNTIME_SKILLS,
+      Number.isFinite(maxSkills) ? Math.floor(maxSkills) : 64,
+    ));
+    const byteLimit = Math.max(0, Math.min(
+      HARD_MAX_RUNTIME_IDENTITY_BYTES,
+      Number.isFinite(maxBytes) ? Math.floor(maxBytes) : DEFAULT_RUNTIME_IDENTITY_BYTES,
+    ));
+    const requestedIds = Array.isArray(ids)
+      ? [...new Set(ids.filter((id) => typeof id === "string"))]
+      : null;
+    if (requestedIds?.some((id) => !PUBLIC_ID_RE.test(id))) {
+      fail("runtime_identity_invalid_id", "Runtime identity contains an invalid skill id");
+    }
+    if (requestedIds && requestedIds.length > skillLimit) {
+      fail("runtime_identity_skill_limit", "Runtime identity exceeds the configured skill limit");
+    }
+
+    // Keep one discovery snapshot for the entire identity operation. This is
+    // important because documents may change between independent scans.
+    const discovered = await this.#discover({
+      linkedDocumentIds: requestedIds ? new Set(requestedIds) : null,
+    });
+    if (!requestedIds && discovered.length > skillLimit) {
+      fail("runtime_identity_skill_limit", "Runtime identity exceeds the configured skill limit");
+    }
+    const byId = new Map(discovered.map((skill) => [skill.id, skill]));
+    const selectedIds = requestedIds ?? discovered.slice(0, skillLimit).map((skill) => skill.id);
+    const skills = [];
+    const unavailable = [];
+    let bytes = 0;
+
+    const appendUnavailable = (entry) => {
+      unavailable.push(entry);
+    };
+
+    for (const id of selectedIds) {
+      const skill = byId.get(id);
+      if (!skill) {
+        const row = { id, enabled: false, available: false, documents: [], error: "skill_not_found" };
+        row.digest = contentDigest(canonicalJson(row));
+        skills.push(row);
+        appendUnavailable({ skillId: id, code: "skill_not_found" });
+        continue;
+      }
+
+      if (!skill.enabled) {
+        const skillBytes = Buffer.byteLength(skill.content, "utf8");
+        const row = {
+          id,
+          enabled: false,
+          available: false,
+          skill: { bytes: skillBytes, digest: contentDigest(skill.content) },
+          documents: [],
+          error: "skill_disabled",
+        };
+        row.digest = contentDigest(canonicalJson(row));
+        skills.push(row);
+        appendUnavailable({ skillId: id, code: "skill_disabled" });
+        continue;
+      }
+
+      const skillBytes = Buffer.byteLength(skill.content, "utf8");
+      let skillAvailable = true;
+      let skillIdentity;
+      if (bytes + skillBytes > byteLimit) {
+        skillAvailable = false;
+        appendUnavailable({ skillId: id, code: "identity_byte_limit" });
+      } else {
+        bytes += skillBytes;
+        skillIdentity = { bytes: skillBytes, digest: contentDigest(skill.content) };
+      }
+
+      const documents = [];
+      for (const document of skill._documents ?? []) {
+        const publicDocument = {
+          id: document.id,
+          label: document.label,
+          relativePath: document.relativePath,
+          source: document.source,
+          ...(document.parentId ? { parentId: document.parentId } : {}),
+        };
+        if (Number.isSafeInteger(document._contentBytes) && typeof document._contentDigest === "string") {
+          if (bytes + document._contentBytes > byteLimit) {
+            skillAvailable = false;
+            documents.push({ ...publicDocument, available: false, error: "identity_byte_limit" });
+            appendUnavailable({ skillId: id, documentId: document.id, code: "identity_byte_limit" });
+          } else {
+            bytes += document._contentBytes;
+            documents.push({
+              ...publicDocument,
+              available: true,
+              bytes: document._contentBytes,
+              digest: document._contentDigest,
+            });
+          }
+          continue;
+        }
+
+        const remaining = byteLimit - bytes;
+        const loaded = remaining > 0
+          ? await readContainedDocument(
+              document._canonical,
+              document._root,
+              Math.min(MAX_LINKED_DOCUMENT_BYTES, remaining),
+            ).catch(() => null)
+          : null;
+        if (!loaded || pathKey(loaded.canonical) !== pathKey(document._canonical)) {
+          const code = remaining > 0 ? "document_unavailable" : "identity_byte_limit";
+          skillAvailable = false;
+          documents.push({ ...publicDocument, available: false, error: code });
+          appendUnavailable({ skillId: id, documentId: document.id, code });
+          continue;
+        }
+        const documentBytes = Buffer.byteLength(loaded.content, "utf8");
+        bytes += documentBytes;
+        documents.push({
+          ...publicDocument,
+          available: true,
+          bytes: documentBytes,
+          digest: contentDigest(loaded.content),
+        });
+      }
+
+      for (const issue of skill._documentIssues ?? []) {
+        skillAvailable = false;
+        appendUnavailable({
+          skillId: id,
+          ...(issue.documentId ? { documentId: issue.documentId } : {}),
+          code: issue.code,
+        });
+      }
+      const row = {
+        id,
+        enabled: true,
+        available: skillAvailable,
+        ...(skillIdentity ? { skill: skillIdentity } : {}),
+        documents,
+        ...(!skillAvailable ? { error: "runtime_identity_incomplete" } : {}),
+      };
+      row.digest = contentDigest(canonicalJson({
+        ...row,
+        issues: (skill._documentIssues ?? []).map((issue) => ({
+          ...(issue.documentId ? { documentId: issue.documentId } : {}),
+          code: issue.code,
+        })),
+      }));
+      skills.push(row);
+    }
+
+    const identity = {
+      version: 1,
+      complete: unavailable.length === 0,
+      bytes,
+      skills,
+      unavailable,
+    };
+    return {
+      ...identity,
+      digest: contentDigest(canonicalJson(identity)),
+    };
+  }
+
   async runtimeSkills({ ids, maxSkills = 32, maxChars = 64_000 } = {}) {
     await this.#settled();
     const skillLimit = Math.max(0, Math.min(HARD_MAX_RUNTIME_SKILLS, Number.isFinite(maxSkills) ? Math.floor(maxSkills) : 32));
@@ -779,7 +1258,16 @@ export class SkillsStore {
       if (chars + separator.length + chunk.length > charLimit) continue;
       chunks.push(chunk);
       chars += separator.length + chunk.length;
-      included.push(publicSkill(skill, true));
+      included.push({
+        ...publicSkill(skill, true),
+        documents: (skill._documents ?? []).map(({ id, label, relativePath, source, parentId }) => ({
+          id,
+          label,
+          relativePath,
+          source,
+          ...(parentId ? { parentId } : {}),
+        })),
+      });
     }
     return {
       skills: included,

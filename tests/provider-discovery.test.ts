@@ -69,6 +69,155 @@ describe("OpenAI-compatible provider discovery", () => {
     expect(JSON.stringify(models)).not.toContain(credential);
   });
 
+  it("preserves sanitized live capability metadata and exact curated fallback fields", async () => {
+    const models = await discoverProviderModels({
+      protocol: "openai-chat",
+      providerId: "openai",
+      baseURL: "https://api.openai.com/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      now: () => 123,
+      request: async () => response(200, JSON.stringify({
+        data: [{
+          id: "gpt-4o-mini",
+          context_window: 96_000,
+          architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+          supported_parameters: ["tools"],
+        }],
+      })),
+    });
+
+    expect(models).toEqual([{
+      id: "gpt-4o-mini",
+      capabilities: expect.objectContaining({
+        limits: { contextWindow: 96_000, maxOutput: 16_384 },
+        modalities: { input: ["text"], output: ["text"] },
+        provenance: expect.objectContaining({ source: "mixed", retrievedAt: 123 }),
+      }),
+    }]);
+  });
+
+  it("preserves explicit XPiki-compatible capability fields without inventing unsupported ones", async () => {
+    const models = await discoverProviderModels({
+      protocol: "openai-chat",
+      providerId: "xpiki",
+      baseURL: "https://api.xpiki.com/v1",
+      credentials: {},
+      resolveHost: publicResolver,
+      now: () => 456,
+      request: async () => response(200, JSON.stringify({
+        data: [{
+          id: "vendor/model",
+          display_name: "Vendor model",
+          limits: { max_input_tokens: 262_144 },
+          max_output_tokens: 32_768,
+          input_modalities: ["text", "image", "audio", "video", "file"],
+          primary_output_modality: "text",
+          capabilities: {
+            supports_stream: true,
+            supports_reasoning: true,
+            supports_tools: false,
+            supports_json_output: true,
+          },
+        }],
+      })),
+    });
+
+    expect(models).toEqual([{
+      id: "vendor/model",
+      name: "Vendor model",
+      capabilities: {
+        limits: { contextWindow: 262_144, maxOutput: 32_768 },
+        modalities: {
+          input: ["text", "image", "audio", "video", "file"],
+          output: ["text"],
+        },
+        features: { tools: false, reasoning: true, streaming: true },
+        provenance: expect.objectContaining({ source: "live-provider", confidence: "high", retrievedAt: 456 }),
+      },
+    }]);
+    expect(JSON.stringify(models)).not.toMatch(/supports_json_output/);
+  });
+
+  it("uses Anthropic's official model catalog contract and live limits", async () => {
+    const credential = ["anthropic", "test", "key"].join("-");
+    const request = vi.fn(async (url: URL, options: Record<string, any>) => {
+      expect(url.pathname).toBe("/v1/models");
+      expect(url.searchParams.get("limit")).toBe("1000");
+      expect(options.headers).toMatchObject({
+        "X-Api-Key": credential,
+        "Anthropic-Version": "2023-06-01",
+      });
+      expect(options.headers).not.toHaveProperty("Authorization");
+      return response(200, JSON.stringify({
+        data: [{
+          id: "claude-sonnet-4-5-20250929",
+          display_name: "Claude Sonnet 4.5",
+          max_input_tokens: 200_000,
+          max_tokens: 64_000,
+          capabilities: { thinking: { supported: true }, image_input: { supported: true } },
+        }],
+      }));
+    });
+
+    const models = await discoverProviderModels({
+      protocol: "anthropic-messages",
+      baseURL: "https://api.anthropic.com/v1",
+      credentials: { apiKey: credential },
+      resolveHost: publicResolver,
+      request,
+      now: () => 123,
+    });
+
+    expect(models[0]).toMatchObject({
+      id: "claude-sonnet-4-5-20250929",
+      name: "Claude Sonnet 4.5",
+      capabilities: {
+        limits: { contextWindow: 200_000, maxOutput: 64_000 },
+        modalities: { input: ["text", "image"], output: ["text"] },
+        features: { tools: true, reasoning: true, streaming: true },
+      },
+    });
+  });
+
+  it("uses Gemini's official model catalog contract without putting the key in the URL", async () => {
+    const credential = ["gemini", "test", "key"].join("-");
+    const request = vi.fn(async (url: URL, options: Record<string, any>) => {
+      expect(url.pathname).toBe("/v1beta/models");
+      expect(url.searchParams.get("pageSize")).toBe("1000");
+      expect(url.href).not.toContain(credential);
+      expect(options.headers["X-Goog-Api-Key"]).toBe(credential);
+      return response(200, JSON.stringify({
+        models: [{
+          name: "models/gemini-2.5-pro",
+          displayName: "Gemini 2.5 Pro",
+          inputTokenLimit: 1_048_576,
+          outputTokenLimit: 65_536,
+          thinking: true,
+        }],
+      }));
+    });
+
+    const models = await discoverProviderModels({
+      protocol: "google-generative-ai",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta",
+      credentials: { apiKey: credential },
+      resolveHost: publicResolver,
+      request,
+      now: () => 123,
+    });
+
+    expect(models[0]).toMatchObject({
+      id: "gemini-2.5-pro",
+      name: "Gemini 2.5 Pro",
+      capabilities: {
+        limits: { contextWindow: 1_048_576, maxOutput: 65_536 },
+        modalities: { input: ["text", "image", "audio", "video"], output: ["text"] },
+        features: { tools: true, reasoning: true, streaming: true },
+      },
+    });
+  });
+
   it("never forwards credential-bearing public profile headers", async () => {
     const credential = ["private", "credential"].join("-");
     const request = vi.fn(async (_url: URL, options: Record<string, any>) => {
@@ -291,8 +440,8 @@ describe("OpenAI-compatible provider discovery", () => {
 
   it("uses stable errors for unsupported protocols, invalid JSON, and timeout", async () => {
     await expect(discoverProviderModels({
-      protocol: "anthropic-messages",
-      baseURL: "https://api.anthropic.com/v1",
+      protocol: "amazon-bedrock",
+      baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com",
       credentials: {},
     })).rejects.toMatchObject({ code: "provider_discovery_unsupported" });
 

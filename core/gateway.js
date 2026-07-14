@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, relative } from "node:path";
-import { SessionStore } from "./session-store.js";
+import { SessionStore, isSessionMessageId } from "./session-store.js";
+import { beginSnapshotRestore, SessionCheckpointError } from "./session-checkpoints.js";
 import { SkillsStore } from "./skills-store.js";
 import { CronStore } from "./cron-store.js";
 import { CronScheduler } from "./cron-scheduler.js";
@@ -24,6 +25,7 @@ import {
   validatePipelinesInput,
 } from "./pipeline-config.js";
 import { ProviderDiscoveryError, discoverProviderModels } from "./provider-discovery.js";
+import { normalizeStoredModelCapabilities, resolveModelCapabilities } from "./model-capabilities.js";
 import { publicProviderTemplates } from "./provider-templates.js";
 import { ProviderAccountPoolRouter } from "./provider-account-pool.js";
 import { KiroCliConnector } from "./kiro-cli-connector.js";
@@ -80,6 +82,7 @@ import {
  *   GET  /api/sessions                   -> { sessions }
  *   POST /api/sessions                   -> create -> { id }
  *   GET  /api/sessions/:id/messages      -> { messages }
+ *   POST /api/sessions/:id/rewind        -> restore edit checkpoints and truncate from one user message
  *   PATCH  /api/sessions/:id             -> rename { title }
  *   DELETE /api/sessions/:id             -> remove
  *   GET  /api/events?session=<id>        -> SSE event stream for a session
@@ -212,6 +215,26 @@ function sameModelEndpoint(left, right) {
   } catch {
     return false;
   }
+}
+
+function privateRuntimeModelLimits(model) {
+  const source = model?.capabilities?.limits;
+  const contextWindow = Number.isSafeInteger(source?.contextWindow)
+    && source.contextWindow >= 256
+    && source.contextWindow <= 100_000_000
+    ? source.contextWindow
+    : undefined;
+  const maxOutput = Number.isSafeInteger(source?.maxOutput)
+    && source.maxOutput >= 1
+    && source.maxOutput <= 10_000_000
+    ? source.maxOutput
+    : undefined;
+  return contextWindow !== undefined || maxOutput !== undefined
+    ? {
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        ...(maxOutput !== undefined ? { maxOutput } : {}),
+      }
+    : undefined;
 }
 
 function providerIsReady(provider, secretState) {
@@ -732,7 +755,77 @@ function validateEngineConfigBoundary(value) {
   ) {
     throw new TypeError("engine_sandbox_invalid");
   }
-  return value;
+  const next = { ...value };
+  const profileIds = new Set();
+  if (Object.hasOwn(value, "promptProfiles")) {
+    if (!Array.isArray(value.promptProfiles) || value.promptProfiles.length > 64) {
+      throw new TypeError("engine_prompt_profiles_invalid");
+    }
+    next.promptProfiles = value.promptProfiles.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new TypeError("engine_prompt_profile_invalid");
+      }
+      const id = typeof entry.id === "string" ? entry.id.trim() : "";
+      const name = typeof entry.name === "string" ? entry.name.trim() : "";
+      const description = entry.description === undefined
+        ? ""
+        : typeof entry.description === "string"
+          ? entry.description.trim()
+          : null;
+      const systemPrompt = typeof entry.systemPrompt === "string" ? entry.systemPrompt.trim() : null;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id) || profileIds.has(id)) {
+        throw new TypeError("engine_prompt_profile_id_invalid");
+      }
+      if (!name || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name)) {
+        throw new TypeError("engine_prompt_profile_name_invalid");
+      }
+      if (description === null || description.length > 1_000 || /[\u0000-\u001f\u007f]/.test(description)) {
+        throw new TypeError("engine_prompt_profile_description_invalid");
+      }
+      if (
+        systemPrompt === null
+        || systemPrompt.length > 20_000
+        || /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(systemPrompt)
+      ) throw new TypeError("engine_prompt_profile_system_prompt_invalid");
+      profileIds.add(id);
+      return { id, name, description, systemPrompt };
+    });
+  } else {
+    for (const profile of Array.isArray(value.promptProfiles) ? value.promptProfiles : []) profileIds.add(profile.id);
+  }
+  if (Object.hasOwn(value, "activePromptProfileId")) {
+    const activeId = typeof value.activePromptProfileId === "string" ? value.activePromptProfileId.trim() : null;
+    if (
+      activeId === null
+      || (activeId && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(activeId))
+      || (activeId && !profileIds.has(activeId))
+    ) throw new TypeError("engine_active_prompt_profile_invalid");
+    next.activePromptProfileId = activeId;
+  }
+  return next;
+}
+
+function promptProfileIdsForEngine(engine) {
+  return new Set(
+    (Array.isArray(engine?.promptProfiles) ? engine.promptProfiles : [])
+      .map((profile) => typeof profile?.id === "string" ? profile.id : "")
+      .filter(Boolean),
+  );
+}
+
+function validatePromptProfileAssignments(engine, orchestration) {
+  const ids = promptProfileIdsForEngine(engine);
+  if (engine?.activePromptProfileId && !ids.has(engine.activePromptProfileId)) {
+    throw new TypeError("engine_active_prompt_profile_invalid");
+  }
+  for (const profile of orchestration?.profiles ?? []) {
+    for (const role of profile.roles ?? []) {
+      if (role.promptProfileId && !ids.has(role.promptProfileId)) {
+        throw new TeamConfigError("team_role_prompt_profile_unavailable");
+      }
+    }
+  }
+  return ids;
 }
 
 async function verifyWriteResolutionMarker(marker, run, stage) {
@@ -1217,12 +1310,16 @@ export async function startGateway({
   openPath,
   kiroConnector = new KiroCliConnector(),
   kiroOrganizationWorker,
+  commandRunner,
   engineLoader = () => import("./engine/.dist/index.mjs"),
   providerDiscovery = discoverProviderModels,
   sandboxCapabilityProbe = pipelineSandboxCapability,
   runtimeBuildId = process.env.KYREI_BUILD_ID ?? process.env.npm_package_version ?? "development",
 } = {}) {
   if (typeof engineLoader !== "function") throw new TypeError("engine-loader-required");
+  if (commandRunner != null && typeof commandRunner.run !== "function") {
+    throw new TypeError("command-runner-invalid");
+  }
   if (typeof providerDiscovery !== "function") throw new TypeError("provider-discovery-required");
   if (typeof sandboxCapabilityProbe !== "function") throw new TypeError("sandbox-capability-probe-required");
   const kiroApi = createKiroConnectorApi(kiroConnector);
@@ -1237,6 +1334,54 @@ export async function startGateway({
     const actual = Buffer.from(candidate);
     const expected = Buffer.from(gatewayToken);
     return actual.length === expected.length && timingSafeEqual(actual, expected);
+  };
+  const capabilityReceipts = new Map();
+  const capabilityReceiptTtlMs = 10 * 60_000;
+  const capabilityReceiptKey = ({ protocol, baseURL, modelId }) => {
+    try {
+      const url = new URL(String(baseURL ?? ""));
+      if (url.username || url.password || url.search || url.hash) return "";
+      const canonicalBaseURL = url.href.replace(/\/+$/, "");
+      return `${String(protocol ?? "")}\0${canonicalBaseURL}\0${String(modelId ?? "")}`;
+    } catch {
+      return "";
+    }
+  };
+  const capabilityDigest = (value) => {
+    const normalized = normalizeStoredModelCapabilities(value);
+    return normalized ? digestJson(normalized) : "";
+  };
+  const pruneCapabilityReceipts = () => {
+    const now = Date.now();
+    for (const [key, receipt] of capabilityReceipts) {
+      if (receipt.expiresAt <= now) capabilityReceipts.delete(key);
+    }
+    while (capabilityReceipts.size > 4_096) {
+      capabilityReceipts.delete(capabilityReceipts.keys().next().value);
+    }
+  };
+  const rememberDiscoveredCapabilities = ({ protocol, baseURL, models }) => {
+    pruneCapabilityReceipts();
+    const expiresAt = Date.now() + capabilityReceiptTtlMs;
+    for (const model of Array.isArray(models) ? models : []) {
+      const key = capabilityReceiptKey({ protocol, baseURL, modelId: model?.id });
+      const digest = capabilityDigest(model?.capabilities);
+      if (key && digest) capabilityReceipts.set(key, { digest, expiresAt });
+    }
+  };
+  const liveCapabilityVerifier = (existingProvider) => ({ capabilities, protocol, baseURL, modelId }) => {
+    const key = capabilityReceiptKey({ protocol, baseURL, modelId });
+    const digest = capabilityDigest(capabilities);
+    if (!key || !digest) return false;
+    pruneCapabilityReceipts();
+    const recent = capabilityReceipts.get(key);
+    if (recent?.digest === digest) return true;
+    if (
+      existingProvider?.protocol !== protocol
+      || existingProvider?.baseURL !== baseURL
+    ) return false;
+    const existingModel = existingProvider.models?.find((model) => model.id === modelId);
+    return capabilityDigest(existingModel?.capabilities) === digest;
   };
   const isLoopbackHost = (host) => /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(String(host ?? ""));
   // Chromium normally serializes file origins as `null`; accept `file://` as
@@ -1428,18 +1573,12 @@ export async function startGateway({
     const skillIds = [...new Set(profiles.flatMap((profile) => (
       Array.isArray(profile.roles) ? profile.roles.flatMap((role) => role.skillIds ?? []) : []
     )))].sort();
-    const skills = await Promise.all(skillIds.map(async (id) => {
-      try {
-        const skill = await skillsStore.get(id);
-        return {
-          id,
-          enabled: skill.enabled,
-          digest: digestJson({ metadata: skill.metadata, content: skill.content }),
-        };
-      } catch {
-        return { id, missing: true };
-      }
-    }));
+    let skillIdentity;
+    try {
+      skillIdentity = await skillsStore.runtimeIdentity({ ids: skillIds, maxSkills: 256 });
+    } catch {
+      throw pipelineConflict("pipeline_runtime_unavailable");
+    }
     const effectiveTargets = profiles.flatMap((profile) => (
       Array.isArray(profile.roles)
         ? profile.roles.map((role) => ({
@@ -1503,7 +1642,7 @@ export async function startGateway({
           && (!Object.hasOwn(member, "modelIds") || member.modelIds.includes(target.modelId))
         ));
     });
-    if (unavailableTarget || skills.some((skill) => skill.missing === true || skill.enabled !== true)) {
+    if (unavailableTarget || skillIdentity.complete !== true) {
       throw pipelineConflict("pipeline_runtime_unavailable");
     }
     const sandbox = await sandboxCapabilityProbe(configSnapshot.engine ?? {}, configSnapshot.workspace);
@@ -1514,12 +1653,17 @@ export async function startGateway({
       providers,
       actingTarget,
       effectiveTargets,
-      skills,
+      skillIdentity: {
+        version: skillIdentity.version,
+        digest: skillIdentity.digest,
+        bytes: skillIdentity.bytes,
+        skills: skillIdentity.skills,
+      },
       engine: configSnapshot.engine ?? {},
       sandbox,
       runtimeBuildId: String(runtimeBuildId),
       engineContractVersion: 1,
-      pipelineRuntimeVersion: 1,
+      pipelineRuntimeVersion: 2,
       platform: process.platform,
       architecture: process.arch,
     });
@@ -1554,7 +1698,9 @@ export async function startGateway({
   // SSE subscribers + per-session AbortControllers, keyed by session id.
   const subscribers = new Map(); // sessionId -> Set<res>
   const controllers = new Map(); // sessionId -> AbortController
+  const sessionReservations = new Map(); // sessionId -> opaque owner token
   const runtimeStatus = new Map(); // sessionId -> "working" (absent = idle)
+  const runtimeActivity = new Map(); // sessionId -> public live/last turn activity
   const activePromptProviders = new Map(); // sessionId -> provider ids whose credentials may be in flight
   const subagentRuns = new Map(); // subagentId -> cross-session runtime summary
   const shutdownController = new AbortController();
@@ -1603,6 +1749,59 @@ export async function startGateway({
     }
   }
 
+  function trackSessionActivity(sessionId, event) {
+    const previous = runtimeActivity.get(sessionId);
+    if (!previous && event?.type !== "message.start") return;
+    const payload = event?.payload ?? {};
+    const now = Date.now();
+    const next = {
+      ...(previous ?? {
+        active: true,
+        phase: "thinking",
+        startedAt: now,
+        eventCount: 0,
+        toolCount: 0,
+      }),
+      updatedAt: now,
+      eventCount: (previous?.eventCount ?? 0) + 1,
+    };
+    switch (event?.type) {
+      case "reasoning.delta":
+        next.phase = "reasoning";
+        break;
+      case "tool.start":
+        next.phase = "tool";
+        next.currentTool = typeof payload.name === "string" ? payload.name : undefined;
+        next.toolCount = (previous?.toolCount ?? 0) + 1;
+        break;
+      case "tool.complete":
+        next.phase = payload.error ? "recovering" : "reasoning";
+        next.currentTool = undefined;
+        break;
+      case "message.delta":
+        next.phase = "responding";
+        next.currentTool = undefined;
+        break;
+      case "status.update": {
+        const usage = payload.usage;
+        if (usage && typeof usage === "object") {
+          const total = Number(usage.totalTokens ?? 0) || (Number(usage.inputTokens ?? 0) + Number(usage.outputTokens ?? 0));
+          if (total > 0) next.tokens = total;
+        }
+        break;
+      }
+      case "message.complete":
+        next.active = false;
+        next.phase = payload.status === "interrupted" ? "interrupted" : payload.status === "error" ? "failed" : "complete";
+        next.currentTool = undefined;
+        next.completedAt = now;
+        break;
+      default:
+        break;
+    }
+    runtimeActivity.set(sessionId, next);
+  }
+
   function publicRuntimeEvent(event, sensitiveValues = runtimeSensitiveValues()) {
     return redactSensitiveValue(event, sensitiveValues, {
       maxDepth: 12,
@@ -1621,6 +1820,7 @@ export async function startGateway({
 
   function emitTo(sessionId, event) {
     const publicEvent = publicRuntimeEvent(event);
+    trackSessionActivity(sessionId, publicEvent);
     trackSubagentEvent(sessionId, publicEvent);
     const runId = publicEvent?.payload?.run_id;
     if (typeof runId === "string" && runId) {
@@ -1823,6 +2023,7 @@ export async function startGateway({
       modelId: model.id,
     });
     if (!ordered.length) throw new ProviderConfigError("provider_accounts_unavailable");
+    const limits = privateRuntimeModelLimits(model);
     return ordered.map((account) => {
       const credentials = provider.requiresApiKey
         ? getProviderAccountCredentials(secretState, provider.id, account.id)
@@ -1837,6 +2038,7 @@ export async function startGateway({
         credentials,
         ...(provider.headers ? { headers: provider.headers } : {}),
         requiresApiKey: provider.requiresApiKey,
+        ...(limits ? { limits: { ...limits } } : {}),
       };
     });
   }
@@ -1905,6 +2107,7 @@ export async function startGateway({
       ...target,
       ...(target.credentials ? { credentials: { ...target.credentials } } : {}),
       ...(target.headers ? { headers: { ...target.headers } } : {}),
+      ...(target.limits ? { limits: { ...target.limits } } : {}),
     };
   }
 
@@ -1929,12 +2132,18 @@ export async function startGateway({
         .map((skill) => typeof skill?.id === "string" ? skill.id : "")
         .filter(Boolean),
     );
+    const availablePromptProfiles = promptProfileIdsForEngine(configState.engine);
+    if (profile.roles.some((role) => (
+      role.skillIds.some((id) => !availableSkills.has(id))
+      || (role.promptProfileId && !availablePromptProfiles.has(role.promptProfileId))
+    ))) return undefined;
     try {
       const roles = profile.roles.map((role) => ({
         id: role.id,
         name: role.name,
         ...(role.description ? { description: role.description } : {}),
         ...(role.instructions ? { instructions: role.instructions } : {}),
+        ...(role.promptProfileId ? { promptProfileId: role.promptProfileId } : {}),
         target: role.model
           ? privateRuntimeTargetForConfig(
               configState,
@@ -1944,7 +2153,7 @@ export async function startGateway({
               { routingKey: `${routingKeyPrefix}:${profile.id}:${role.id}` },
             )
           : cloneRuntimeTarget(mainTarget),
-        skillIds: role.skillIds.filter((id) => availableSkills.has(id)),
+        skillIds: [...role.skillIds],
         capabilities: [...role.capabilities],
         canSpawn: role.canSpawn,
         maxChildren: role.maxChildren,
@@ -1962,13 +2171,6 @@ export async function startGateway({
       // closes the small race where credentials are cleared during a prompt.
       return undefined;
     }
-  }
-
-  function teamRuntimeSpec(mainTarget, runtimeSkills, sessionId) {
-    const profile = activeOrchestrationProfile(config);
-    return profile
-      ? teamRuntimeSpecForProfile(profile.id, mainTarget, runtimeSkills, config, secrets, `session:${sessionId}`)
-      : undefined;
   }
 
   function pipelineText(value, max = 4_000, sensitiveValues = runtimeSensitiveValues()) {
@@ -2189,10 +2391,20 @@ export async function startGateway({
         description: typeof skill.description === "string" ? skill.description : "",
         provenance: skill.provenance === "workspace"
           ? "project"
-          : ["global", "project", "custom"].includes(skill.provenance)
+          : ["global", "project", "custom", "kiro"].includes(skill.provenance)
             ? skill.provenance
             : "custom",
         content: typeof skill.content === "string" ? skill.content : "",
+        documents: (Array.isArray(skill.documents) ? skill.documents : []).flatMap((document) => {
+          if (!document || typeof document.id !== "string") return [];
+          return [{
+            id: document.id.slice(0, 200),
+            label: typeof document.label === "string" ? document.label.slice(0, 200) : "Document",
+            relativePath: typeof document.relativePath === "string" ? document.relativePath.slice(0, 1_000) : "",
+            source: document.source === "kiro-docs" ? "kiro-docs" : "skill",
+            ...(typeof document.parentId === "string" ? { parentId: document.parentId.slice(0, 200) } : {}),
+          }];
+        }),
       }];
     });
   }
@@ -2263,6 +2475,7 @@ export async function startGateway({
         sessionId: pipelineSessionId,
         config: configSnapshot.engine,
         skills: runtimeSkillsForEngine(runtimeSkills.skills),
+        readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         dependencyArtifacts: departmentInputArtifacts(dependencyArtifacts),
         sensitiveValues,
         abortSignal: signal,
@@ -2361,7 +2574,21 @@ export async function startGateway({
     });
   }
 
-  async function runPrompt(sessionId, text, modelParams) {
+  async function runPrompt(sessionId, text, modelParams, messageId, reservationToken) {
+    const token = reservationToken ?? Symbol("prompt");
+    const existingReservation = sessionReservations.get(sessionId);
+    if (controllers.has(sessionId) || (existingReservation && existingReservation !== token)) {
+      return { status: "error", sessionId, error: "session_busy" };
+    }
+    sessionReservations.set(sessionId, token);
+    try {
+      return await runReservedPrompt(sessionId, text, modelParams, messageId);
+    } finally {
+      if (sessionReservations.get(sessionId) === token) sessionReservations.delete(sessionId);
+    }
+  }
+
+  async function runReservedPrompt(sessionId, text, modelParams, messageId) {
     if (shutdownController.signal.aborted) {
       return { status: "cancelled", sessionId, error: "gateway-shutdown" };
     }
@@ -2374,7 +2601,15 @@ export async function startGateway({
     );
 
     const safePromptText = redactSensitiveText(text, runtimeSensitiveValues());
-    store.appendMessage(sessionId, { role: "user", content: safePromptText });
+    const promptWorkspace = config.workspace
+      ? await realpath(config.workspace).catch(() => "")
+      : "";
+    store.appendMessage(sessionId, {
+      id: messageId,
+      role: "user",
+      content: safePromptText,
+      ...(promptWorkspace ? { workspace: promptWorkspace } : {}),
+    });
     if (!session.title) {
       store.upsertSession({
         id: sessionId,
@@ -2429,6 +2664,15 @@ export async function startGateway({
     controllers.set(sessionId, controller);
     activePromptProviders.set(sessionId, new Set(config.providers.map((provider) => provider.id)));
     runtimeStatus.set(sessionId, "working");
+    runtimeActivity.set(sessionId, {
+      active: true,
+      phase: "thinking",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      eventCount: 0,
+      toolCount: 0,
+    });
+    emitTo(sessionId, { type: "message.start", payload: { session_id: sessionId } });
 
     try {
       const runtimeSkills = await skillsStore.runtimeSkills().catch(() => ({ skills: [] }));
@@ -2438,7 +2682,18 @@ export async function startGateway({
         ...mainTargets.slice(1),
         ...fallbackRuntimeTargets(sessionId),
       ];
-      const team = teamRuntimeSpec(mainTarget, runtimeSkills.skills, sessionId);
+      const activeTeamProfile = activeOrchestrationProfile(config);
+      const team = activeTeamProfile
+        ? teamRuntimeSpecForProfile(
+            activeTeamProfile.id,
+            mainTarget,
+            runtimeSkills.skills,
+            config,
+            secrets,
+            `session:${sessionId}`,
+          )
+        : undefined;
+      if (activeTeamProfile && !team) throw new TeamConfigError("team_runtime_unavailable");
       const providerAttemptLifecycle = providerAttemptLifecycleFor({
         generationSnapshot: runtimeGenerationSnapshot,
         sessionId,
@@ -2458,6 +2713,7 @@ export async function startGateway({
         apiKey: mainTarget.apiKey,
         providerCredentials: mainTarget.credentials,
         model: mainTarget.model,
+        ...(mainTarget.limits ? { modelLimits: { ...mainTarget.limits } } : {}),
         providerAttemptLifecycle,
         ...(workerProvider ? { workerProvider } : {}),
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
@@ -2465,13 +2721,9 @@ export async function startGateway({
         workspace: config.workspace,
         auditLogPath: join(dataDir, "audit.jsonl"),
         sessionId,
-        skills: runtimeSkills.skills.map(skill => ({
-          id: skill.id,
-          name: skill.name,
-          description: skill.description,
-          provenance: skill.provenance === "workspace" ? "project" : skill.provenance,
-          content: skill.content ?? "",
-        })),
+        ...(commandRunner ? { commandRunner } : {}),
+        skills: runtimeSkillsForEngine(runtimeSkills.skills),
+        readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         onSkillUsed: id => skillsStore.recordUsage(id).then(() => undefined).catch(() => undefined),
       };
       const mod = await getEngine();
@@ -2536,6 +2788,18 @@ export async function startGateway({
       if (controllers.get(sessionId) === controller) controllers.delete(sessionId);
       activePromptProviders.delete(sessionId);
       runtimeStatus.delete(sessionId);
+      const activity = runtimeActivity.get(sessionId);
+      if (activity?.active) {
+        const now = Date.now();
+        runtimeActivity.set(sessionId, {
+          ...activity,
+          active: false,
+          phase: controller.signal.aborted ? "interrupted" : "complete",
+          currentTool: undefined,
+          updatedAt: now,
+          completedAt: now,
+        });
+      }
     }
   }
 
@@ -2638,19 +2902,26 @@ export async function startGateway({
             let nextSecrets = normalizeProviderSecrets(secrets);
             const orchestrationExplicit = Object.hasOwn(body, "orchestration");
             const pipelinesExplicit = Object.hasOwn(body, "pipelines");
+            const availableSkillIds = orchestrationExplicit
+              ? new Set((await skillsStore.list()).filter((skill) => skill.enabled).map((skill) => skill.id))
+              : undefined;
             const providersExplicit = Array.isArray(body.providers) && body.providers.length > 0;
             if (providersExplicit) {
             const importedProviders = [];
             const importedIds = new Set();
+            const previousProviders = new Map(config.providers.map((provider) => [provider.id, provider]));
             for (const row of body.providers) {
-              const provider = validateProviderInput(row, { creating: true });
+              const existingProvider = previousProviders.get(typeof row?.id === "string" ? row.id.trim() : "");
+              const provider = validateProviderInput(row, {
+                creating: true,
+                verifyLiveCapabilities: liveCapabilityVerifier(existingProvider),
+              });
               if (importedIds.has(provider.id)) throw new ProviderConfigError("provider_id_conflict");
               importedIds.add(provider.id);
               importedProviders.push(provider);
             }
             const previousActiveProviderId = config.activeProviderId;
             const previousActiveModelId = config.activeModelId;
-            const previousProviders = new Map(config.providers.map((provider) => [provider.id, provider]));
             nextConfig = normalizeGatewayConfig({
               ...nextConfig,
               providers: importedProviders,
@@ -2721,17 +2992,23 @@ export async function startGateway({
             if (typeof body.workspace === "string") {
               nextConfig = { ...nextConfig, workspace: body.workspace };
             }
-            // Engine tuning (permissions/roles/fallbackChain/budgets). Validated
-            // engine-side by resolveEngineConfig (fail-open), so we store as-is.
+            // The engine still performs defensive runtime normalization. User
+            // prompt profiles are additionally strict at this durable boundary
+            // so invalid assignments never become silent runtime fallbacks.
             if (Object.hasOwn(body, "engine")) {
               nextConfig = { ...nextConfig, engine: validateEngineConfigBoundary(body.engine) };
             }
             if (orchestrationExplicit) {
+              const promptProfileIds = promptProfileIdsForEngine(nextConfig.engine);
               nextConfig = {
                 ...nextConfig,
-                orchestration: validateOrchestrationInput(body.orchestration, nextConfig.providers),
+                orchestration: validateOrchestrationInput(body.orchestration, nextConfig.providers, {
+                  promptProfileIds,
+                  skillIds: availableSkillIds,
+                }),
               };
             }
+            validatePromptProfileAssignments(nextConfig.engine, nextConfig.orchestration);
             if (pipelinesExplicit) {
               nextConfig = {
                 ...nextConfig,
@@ -3321,21 +3598,20 @@ export async function startGateway({
               ? { apiKey: body.apiKey }
               : {},
         );
-        if (profile.protocol !== "openai-chat" && profile.protocol !== "openai-responses") {
-          throw new ProviderDiscoveryError("provider_discovery_unsupported");
-        }
         const requiresApiKey = profile.requiresApiKey !== false;
         const credentials = requiresApiKey ? suppliedCredentials : {};
         if (requiresApiKey && !credentials.apiKey) {
           throw new ProviderConfigError("provider_credentials_required");
         }
         const models = await providerDiscovery({
+          providerId: profile.id,
           protocol: profile.protocol,
           baseURL: profile.baseURL,
           headers: profile.headers,
           credentials,
           allowBenchmarkNetwork: profile.allowBenchmarkNetwork === true,
         });
+        rememberDiscoveredCapabilities({ protocol: profile.protocol, baseURL: profile.baseURL, models });
         return sendJson(res, 200, { models, count: models.length });
       }
 
@@ -3353,7 +3629,10 @@ export async function startGateway({
           const body = await readBody(req);
           const snapshot = await mutateConfig(async () => {
             const input = body.provider && typeof body.provider === "object" ? body.provider : body;
-            const provider = validateProviderInput(input, { creating: true });
+            const provider = validateProviderInput(input, {
+              creating: true,
+              verifyLiveCapabilities: liveCapabilityVerifier(undefined),
+            });
             if (config.providers.some((candidate) => candidate.id === provider.id)) {
               throw new ProviderConfigError("provider_id_conflict");
             }
@@ -3485,9 +3764,6 @@ export async function startGateway({
         const currentAccount = currentPool.members.find((account) => account.id === accountId);
         if (!currentAccount) throw new ProviderConfigError("provider_account_not_found");
         if (action === "/discover" && req.method === "POST") {
-          if (existing.protocol !== "openai-chat" && existing.protocol !== "openai-responses") {
-            throw new ProviderDiscoveryError("provider_discovery_unsupported");
-          }
           const credentials = existing.requiresApiKey
             ? getProviderAccountCredentials(secrets, providerId, accountId)
             : {};
@@ -3495,11 +3771,13 @@ export async function startGateway({
             throw new ProviderConfigError("provider_credentials_required");
           }
           const models = await providerDiscovery({
+            providerId,
             protocol: existing.protocol,
             baseURL: existing.baseURL,
             headers: existing.headers,
             credentials,
           });
+          rememberDiscoveredCapabilities({ protocol: existing.protocol, baseURL: existing.baseURL, models });
           return sendJson(res, 200, { models, count: models.length });
         }
         if (!action && req.method === "PATCH") {
@@ -3594,20 +3872,19 @@ export async function startGateway({
           const body = await readBody(req);
           const existing = config.providers.find((provider) => provider.id === providerId);
           if (!existing) return sendJson(res, 404, { code: "provider_not_found", error: "provider_not_found" });
-          if (existing.protocol !== "openai-chat" && existing.protocol !== "openai-responses") {
-            throw new ProviderDiscoveryError("provider_discovery_unsupported");
-          }
           const credentials = existing.requiresApiKey ? secrets.providers[providerId] ?? {} : {};
           if (existing.requiresApiKey && !hasStoredProviderCredentials(existing, credentials)) {
             throw new ProviderConfigError("provider_credentials_required");
           }
           const models = await providerDiscovery({
+            providerId,
             protocol: existing.protocol,
             baseURL: existing.baseURL,
             headers: existing.headers,
             credentials,
             allowBenchmarkNetwork: Boolean(body && typeof body === "object" && !Array.isArray(body) && body.allowBenchmarkNetwork === true),
           });
+          rememberDiscoveredCapabilities({ protocol: existing.protocol, baseURL: existing.baseURL, models });
           return sendJson(res, 200, { models, count: models.length });
         }
         if (action === "/secret") {
@@ -3658,7 +3935,10 @@ export async function startGateway({
             const existing = config.providers.find((provider) => provider.id === providerId);
             if (!existing) throw new ProviderConfigError("provider_not_found");
             const patch = body.provider && typeof body.provider === "object" ? body.provider : body;
-            const updatedProvider = validateProviderInput({ ...existing, ...patch }, { providerId });
+            const updatedProvider = validateProviderInput({ ...existing, ...patch }, {
+              providerId,
+              verifyLiveCapabilities: liveCapabilityVerifier(existing),
+            });
             const suppliedCredentials = body.credentials && typeof body.credentials === "object"
               ? body.credentials
               : typeof body.apiKey === "string"
@@ -3772,7 +4052,7 @@ export async function startGateway({
           await openPath(root.path);
           return sendJson(res, 200, { ok: true });
         }
-        if (req.method === "DELETE") {
+        if (!skillRootMatch[2] && req.method === "DELETE") {
           await skillsStore.removeRoot(rootId);
           return sendJson(res, 200, { roots: await skillsStore.roots() });
         }
@@ -3844,7 +4124,11 @@ export async function startGateway({
 
       if (path === "/api/sessions") {
         if (req.method === "GET") {
-          const sessions = store.sessions.map(s => ({ ...s, status: runtimeStatus.get(s.id) || "idle" }));
+          const sessions = store.sessions.map(s => ({
+            ...s,
+            status: runtimeStatus.get(s.id) || "idle",
+            ...(runtimeActivity.has(s.id) ? { activity: runtimeActivity.get(s.id) } : {}),
+          }));
           return sendJson(res, 200, { sessions });
         }
         if (req.method === "POST") {
@@ -3853,14 +4137,90 @@ export async function startGateway({
         }
       }
 
-      const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(\/messages)?$/);
+      const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(\/messages|\/rewind)?$/);
       if (sessionMatch) {
         const id = decodeURIComponent(sessionMatch[1]);
         if (sessionMatch[2] === "/messages" && req.method === "GET") {
           return sendJson(res, 200, { session_id: id, messages: store.getMessages(id) });
         }
-        if (req.method === "DELETE") { store.removeSession(id); return sendJson(res, 200, { ok: true }); }
-        if (req.method === "PATCH") {
+        if (sessionMatch[2] === "/rewind" && req.method === "POST") {
+          if (controllers.has(id) || sessionReservations.has(id)) {
+            return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+          }
+          const reservationToken = Symbol("rewind");
+          sessionReservations.set(id, reservationToken);
+          try {
+            const body = await readBody(req);
+            const messageId = String(body.messageId ?? "");
+            if (!isSessionMessageId(messageId)) {
+              return sendJson(res, 400, { code: "message_id_invalid", error: "message_id_invalid" });
+            }
+            const plan = store.planRewind(id, messageId);
+            if (!plan) return sendJson(res, 404, { code: "message_not_found", error: "message_not_found" });
+            let restored = { restoredSnapshots: 0, restoredFiles: 0 };
+            let fileTransaction = null;
+            try {
+              if (plan.workspace || plan.snapshotIds.length) {
+                if (!config.workspace || !plan.workspace) {
+                  throw new SessionCheckpointError("checkpoint_workspace_changed");
+                }
+                const currentWorkspace = await realpath(config.workspace)
+                  .catch(() => { throw new SessionCheckpointError("checkpoint_workspace_invalid"); });
+                if (currentWorkspace !== plan.workspace) {
+                  throw new SessionCheckpointError("checkpoint_workspace_changed");
+                }
+              }
+              if (plan.snapshotIds.length) {
+                fileTransaction = await beginSnapshotRestore({
+                  workspace: plan.workspace,
+                  snapshotIds: [...plan.snapshotIds].reverse(),
+                });
+                restored = fileTransaction.result;
+              }
+            } catch (error) {
+              if (error instanceof SessionCheckpointError) {
+                return sendJson(res, 409, { code: error.code, error: error.code });
+              }
+              throw error;
+            }
+            if (!store.commitRewind(plan)) {
+              await fileTransaction?.rollback();
+              return sendJson(res, 409, { code: "session_changed", error: "session_changed" });
+            }
+            try {
+              await store.flush();
+            } catch {
+              const sessionRolledBack = store.rollbackRewind(plan);
+              const compensation = await Promise.allSettled([
+                fileTransaction?.rollback() ?? Promise.resolve(false),
+                sessionRolledBack ? store.flush() : Promise.reject(new Error("session_compensation_failed")),
+              ]);
+              const compensated = sessionRolledBack && compensation.every(result => result.status === "fulfilled");
+              const code = compensated ? "checkpoint_commit_failed" : "checkpoint_compensation_failed";
+              return sendJson(res, 500, { code, error: code });
+            }
+            fileTransaction?.commit();
+            runtimeActivity.delete(id);
+            return sendJson(res, 200, {
+              ok: true,
+              session_id: id,
+              draft: plan.draft,
+              messages: store.getMessages(id),
+              ...restored,
+            });
+          } finally {
+            if (sessionReservations.get(id) === reservationToken) sessionReservations.delete(id);
+          }
+        }
+        if (!sessionMatch[2] && req.method === "DELETE") {
+          if (controllers.has(id) || sessionReservations.has(id)) {
+            return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+          }
+          store.removeSession(id);
+          runtimeActivity.delete(id);
+          return sendJson(res, 200, { ok: true });
+        }
+        if (!sessionMatch[2] && req.method === "PATCH") {
           const body = await readBody(req);
           const current = store.getSession(id);
           if (!current) return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
@@ -3913,9 +4273,17 @@ export async function startGateway({
         const sessionId = String(body.session || "");
         const text = String(body.text || "").trim();
         if (!sessionId || !text) return sendJson(res, 400, { error: "session and text required" });
-        if (controllers.has(sessionId)) return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        const messageId = body.messageId == null || body.messageId === "" ? undefined : String(body.messageId);
+        if (messageId !== undefined && !isSessionMessageId(messageId)) {
+          return sendJson(res, 400, { code: "message_id_invalid", error: "message_id_invalid" });
+        }
+        if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        const reservationToken = Symbol("prompt");
+        sessionReservations.set(sessionId, reservationToken);
         sendJson(res, 200, { status: "streaming" });
-        void runPrompt(sessionId, text, body.modelParams);
+        void runPrompt(sessionId, text, body.modelParams, messageId, reservationToken);
         return;
       }
 
@@ -3990,15 +4358,27 @@ export async function startGateway({
           .flatMap((provider) => provider.models.map((model) => {
           const candidate = knownById.get(model.id);
           const known = candidate && sameModelEndpoint(provider.baseURL, candidate.baseURL) ? candidate : undefined;
+          const capabilities = resolveModelCapabilities({
+            providerId: provider.id,
+            baseURL: provider.baseURL,
+            modelId: model.id,
+            live: model.capabilities,
+          });
+          const hasCapabilities = capabilities.provenance.source !== "unknown";
           return {
             id: model.id,
             name: model.name ?? model.id,
             provider: provider.id,
             providerName: provider.name,
             baseURL: provider.baseURL,
-            limits: known?.limits ?? { contextWindow: 32_000, maxOutput: 4_096 },
+            ...(capabilities.limits ? { limits: capabilities.limits } : {}),
             cost: known?.cost ?? { inputPerM: 0, outputPerM: 0 },
-            caps: known?.caps ?? { tools: true, reasoning: false, streaming: true, vision: false },
+            caps: {
+              ...(known?.caps ?? {}),
+              ...(capabilities.features ?? {}),
+              ...(capabilities.modalities?.input?.includes("image") ? { vision: true } : {}),
+            },
+            ...(hasCapabilities ? { capabilities } : {}),
           };
         }));
         return sendJson(res, 200, {

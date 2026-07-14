@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,24 +42,30 @@ describe("tools — guarded mutations and audit", () => {
     const audit = {
       write: async (record: AuditRecord) => void records.push(record),
     };
+    const commandRunner = { run: vi.fn(async () => "must not run") };
     const guarded = buildTools(ws, cfg, new Map(), {
       audit,
       sessionId: "session-a",
+      commandRunner,
     });
     const command = `node -e "require('node:fs').writeFileSync('command-ran.txt','yes')"`;
     const out = await execFrom(guarded, "run_command", { command }, "call-denied");
     expect(out).toContain("interactive approval");
     expect(out).toContain("nothing was executed");
     expect(await exists(join(ws, "command-ran.txt"))).toBe(false);
+    expect(commandRunner.run).not.toHaveBeenCalled();
     expect(records).toMatchObject([{ sessionId: "session-a", toolCallId: "call-denied", status: "denied" }]);
     expect(JSON.stringify(records)).not.toContain(command);
   });
 
   it("executes an allowed safe command and audits its lifecycle", async () => {
     const records: AuditRecord[] = [];
+    const commandRunner = { run: vi.fn(async () => "(exit code: 0)\nallowed-command") };
     const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
       audit: { write: async (record) => void records.push(record) },
       sessionId: "session-safe",
+      actorId: "main",
+      commandRunner,
     });
 
     const out = await execFrom(
@@ -70,12 +76,39 @@ describe("tools — guarded mutations and audit", () => {
     );
 
     expect(out).toContain("allowed-command");
+    expect(commandRunner.run).toHaveBeenCalledTimes(1);
+    expect(commandRunner.run).toHaveBeenCalledWith(expect.objectContaining({
+      command: `node -e "console.log('allowed-command')"`,
+      cwd: ws,
+      timeoutMs: DEFAULT_ENGINE_CONFIG.commandTimeoutMs,
+      ownerId: "session-safe",
+      actorId: "main",
+      toolCallId: "call-safe",
+    }));
     expect(records.map((record) => record.status)).toEqual(["start", "complete"]);
     expect(records[0]).toMatchObject({
       sessionId: "session-safe",
       toolCallId: "call-safe",
       decision: "allow",
     });
+  });
+
+  it("does not invoke the internal command runner for an explicit deny rule", async () => {
+    const commandRunner = { run: vi.fn(async () => "must not run") };
+    const guarded = buildTools(ws, {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: {
+        ...DEFAULT_ENGINE_CONFIG.permissions,
+        rules: [{ pattern: "^run_command:", action: "deny" as const }],
+      },
+    }, new Map(), {
+      sessionId: "session-denied",
+      commandRunner,
+    });
+
+    const out = await execFrom(guarded, "run_command", { command: "npm test" }, "call-denied-rule");
+    expect(out).toContain("denied by the local permission policy");
+    expect(commandRunner.run).not.toHaveBeenCalled();
   });
 
   it("does not inherit arbitrary parent credentials into agent commands", async () => {
@@ -138,6 +171,26 @@ describe("tools — guarded mutations and audit", () => {
       new Map(),
     );
     expect(await execFrom(ruleDenied, "diagnostics", {})).toContain("denied by the local permission policy");
+  });
+
+  it("routes allowed diagnostics through the same internal command process", async () => {
+    await writeFile(join(ws, "tsconfig.json"), "{}", "utf8");
+    const commandRunner = { run: vi.fn(async () => "(exit code: 0)\nclean") };
+    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+      sessionId: "session-diagnostics",
+      actorId: "main",
+      commandRunner,
+    });
+
+    await execFrom(guarded, "diagnostics", {}, "call-diagnostics");
+    expect(commandRunner.run).toHaveBeenCalledTimes(1);
+    expect(commandRunner.run).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: ws,
+      timeoutMs: 60_000,
+      ownerId: "session-diagnostics",
+      actorId: "main",
+      toolCallId: "call-diagnostics",
+    }));
   });
 
   it("treats a pre-aborted signal as an effect barrier", async () => {

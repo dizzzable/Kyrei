@@ -36,6 +36,7 @@ const MAX_ROLE_DESCRIPTION = 2_000;
 const MAX_ROLE_INSTRUCTIONS = 20_000;
 const MAX_SKILL_ID = 200;
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const PROMPT_PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const CONTROL_CHARACTERS_EXCEPT_LINE_BREAKS = /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/;
 const CAPABILITY_SET = new Set(TEAM_CAPABILITIES);
@@ -136,12 +137,17 @@ function normalizeRole(value, index, ids, providers) {
   const maxChildren = canSpawn
     ? integer(source.maxChildren, { min: 1, max: MAX_ROLE_CHILDREN, fallback: 1 })
     : 0;
+  const promptProfileId = typeof source.promptProfileId === "string"
+    && PROMPT_PROFILE_ID_PATTERN.test(source.promptProfileId.trim())
+    ? source.promptProfileId.trim()
+    : "";
   return {
     role: {
       id,
       name: cleanText(source.name, MAX_ROLE_NAME, id),
       description: cleanText(source.description, MAX_ROLE_DESCRIPTION),
       instructions: cleanText(source.instructions, MAX_ROLE_INSTRUCTIONS, "", { allowLineBreaks: true }),
+      ...(promptProfileId ? { promptProfileId } : {}),
       ...(model ? { model } : {}),
       skillIds: normalizeStringList(source.skillIds, MAX_SKILLS_PER_ROLE, MAX_SKILL_ID),
       capabilities,
@@ -270,12 +276,21 @@ function validateLimits(value) {
   }
 }
 
-function validateRole(value, providers) {
+function validateRole(value, providers, availability = {}) {
   const source = requireObject(value, "team_role_invalid");
   requireId(source.id, "team_role_id_invalid");
   validateOptionalText(source.name, MAX_ROLE_NAME, "team_role_name_invalid", { required: true });
   validateOptionalText(source.description, MAX_ROLE_DESCRIPTION, "team_role_description_invalid");
   validateOptionalText(source.instructions, MAX_ROLE_INSTRUCTIONS, "team_role_instructions_invalid", { allowLineBreaks: true });
+  if (source.promptProfileId !== undefined && (
+    typeof source.promptProfileId !== "string"
+    || !PROMPT_PROFILE_ID_PATTERN.test(source.promptProfileId.trim())
+  )) throw new TeamConfigError("team_role_prompt_profile_invalid");
+  if (
+    source.promptProfileId
+    && availability.promptProfileIds instanceof Set
+    && !availability.promptProfileIds.has(source.promptProfileId.trim())
+  ) throw new TeamConfigError("team_role_prompt_profile_unavailable");
 
   if (source.skillIds !== undefined) {
     if (!Array.isArray(source.skillIds) || source.skillIds.length > MAX_SKILLS_PER_ROLE) {
@@ -283,6 +298,9 @@ function validateRole(value, providers) {
     }
     for (const skillId of source.skillIds) {
       validateOptionalText(skillId, MAX_SKILL_ID, "team_role_skill_invalid", { required: true });
+      if (availability.skillIds instanceof Set && !availability.skillIds.has(skillId.trim())) {
+        throw new TeamConfigError("team_role_skill_unavailable");
+      }
     }
   }
 
@@ -323,7 +341,7 @@ function validateRole(value, providers) {
 }
 
 /** Strict validation for an atomic settings PUT boundary. */
-export function validateOrchestrationInput(value, providers = []) {
+export function validateOrchestrationInput(value, providers = [], availability = {}) {
   const source = requireObject(value, "orchestration_invalid");
   if (!TEAM_MODES.includes(source.defaultMode)) throw new TeamConfigError("orchestration_mode_invalid");
   if (source.activeProfileId !== undefined && typeof source.activeProfileId !== "string") {
@@ -349,7 +367,7 @@ export function validateOrchestrationInput(value, providers = []) {
     }
     const roleIds = new Set();
     for (const rawRole of profileSource.roles) {
-      validateRole(rawRole, Array.isArray(providers) ? providers : []);
+      validateRole(rawRole, Array.isArray(providers) ? providers : [], availability);
       const roleId = rawRole.id.trim();
       if (roleIds.has(roleId)) throw new TeamConfigError("team_role_id_duplicate");
       roleIds.add(roleId);

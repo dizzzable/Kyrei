@@ -219,11 +219,33 @@ export function SkillsSettings({ workspace }: { workspace: string }) {
                 <dl className="mt-4 grid gap-2 text-[10px] sm:grid-cols-2">
                   <div><dt className="text-muted">{t("settings.skills.location")}</dt><dd className="mt-0.5 text-secondary">{provenanceLabel(detail.provenance, t)}</dd></div>
                   <div><dt className="text-muted">{t("settings.skills.usageLabel")}</dt><dd className="mt-0.5 text-secondary">{t("settings.skills.usage", { count: detail.usage })}</dd></div>
+                  <div className="sm:col-span-2"><dt className="text-muted">{t("settings.skills.id")}</dt><dd className="mt-0.5 break-all font-mono text-[9px] text-secondary">{detail.id}</dd></div>
                   <div className="sm:col-span-2"><dt className="text-muted">{t("settings.skills.path")}</dt><dd className="mt-0.5 break-all font-mono text-[9px] text-secondary">{detail.relativePath}</dd></div>
                 </dl>
                 <div className="mt-4">
                   <div className="mb-1.5 text-[10px] font-medium text-muted">{t("settings.skills.content")}</div>
                   <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border-soft bg-bg p-3 font-mono text-[9.5px] leading-4 text-secondary">{detail.content}</pre>
+                </div>
+                <div className="mt-4 rounded-md border border-border-soft bg-bg/45 p-3">
+                  <div className="text-[10px] font-medium text-secondary">{t("settings.skills.linkedDocs")}</div>
+                  <p className="mt-1 text-[9.5px] leading-4 text-muted">{t("settings.skills.linkedDocsHint")}</p>
+                  {detail.references?.length ? (
+                    <ul className="mt-2 max-h-64 space-y-1.5 overflow-y-auto pr-1" aria-label={t("settings.skills.linkedDocs")}>
+                      {detail.references.map((reference) => (
+                        <li key={reference.id} className="min-w-0 rounded border border-border-soft bg-surface/55 px-2.5 py-2">
+                          <div className="flex min-w-0 items-center justify-between gap-2">
+                            <span className="truncate text-[10px] font-medium text-secondary" title={reference.label}>{reference.label}</span>
+                            <span className="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[8.5px] text-muted">
+                              {t(reference.source === "kiro-docs" ? "settings.skills.documentKiro" : "settings.skills.documentLocal")}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate font-mono text-[8.5px] text-faint" title={reference.relativePath}>{reference.relativePath}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-[9.5px] text-faint">{t("settings.skills.noLinkedDocs")}</p>
+                  )}
                 </div>
                 <div className="mt-3 flex items-center justify-between gap-2">
                   {!detail.owned && <span className="text-[9.5px] text-muted">{t("settings.skills.readOnly")}</span>}
@@ -333,6 +355,7 @@ function provenanceLabel(provenance: SkillProvenance, t: ReturnType<typeof useI1
   switch (provenance) {
     case "workspace": return t("settings.skills.workspace");
     case "custom": return t("settings.skills.custom");
+    case "kiro": return t("settings.skills.documentKiro");
     default: return t("settings.skills.global");
   }
 }

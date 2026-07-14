@@ -19,7 +19,9 @@ export function ToolRow({ part }: { part: ToolPart }) {
   const view = buildToolView(part, t);
   const hasDiff = Boolean(view.inlineDiff);
   const expandable = hasDiff || Boolean(view.detail);
-  const [open, setOpen] = useState(hasDiff);
+  // File edits stay compact like Hermes: filename + +/- stats first, full
+  // patch only after the user explicitly expands it.
+  const [open, setOpen] = useState(false);
 
   return (
     <div

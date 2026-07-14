@@ -32,8 +32,8 @@ import {
 } from "@/lib/session-sync";
 import { sessionTitle } from "@/lib/session-search";
 import { applyTheme, getTheme, THEMES, type ThemeId } from "@/lib/theme";
-import type { AppConfig, ChatMessage, GatewayEvent, GatewayStatus, MessagePart, SessionInfo, SubagentRun } from "@/lib/types";
-import { getModelPreset } from "@/store/model-presets";
+import type { AppConfig, ChatMessage, GatewayEvent, GatewayStatus, MessagePart, SessionInfo, StoredChatMessage, SubagentRun } from "@/lib/types";
+import { useModelPreset } from "@/store/model-presets";
 import { togglePinned } from "@/store/sessions-ui";
 import { getUiSettings, notifyTurnComplete } from "@/store/settings";
 
@@ -55,6 +55,7 @@ export function App() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [rewinding, setRewinding] = useState(false);
   const [tokens, setTokens] = useState<number | null>(null);
   const [contextWindow, setContextWindow] = useState<number | null>(null);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
@@ -173,13 +174,16 @@ export function App() {
       }
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 10_000);
+    // Session activity is a live desktop surface (multiple sessions may work
+    // concurrently), so keep it materially fresher than configuration polling.
+    const timer = window.setInterval(() => void refresh(), 2_000);
     return () => { alive = false; window.clearInterval(timer); };
   }, []);
 
   const currentSession = sessions.find((session) => session.id === currentId);
   const currentProviderId = currentSession?.providerId ?? config?.activeProviderId ?? "";
   const currentModelId = currentSession?.modelId ?? config?.activeModelId ?? "";
+  const currentModelPreset = useModelPreset(currentProviderId, currentModelId);
 
   useEffect(() => {
     if (!config) {
@@ -191,10 +195,10 @@ export function App() {
       if (!alive) return;
       const exact = models.find((entry) => entry.id === currentModelId && entry.provider === currentProviderId)
         ?? models.find((entry) => entry.id === currentModelId);
-      setContextWindow(exact?.limits?.contextWindow ?? null);
+      setContextWindow(currentModelPreset.contextWindowOverride ?? exact?.limits?.contextWindow ?? null);
     }).catch(() => { if (alive) setContextWindow(null); });
     return () => { alive = false; };
-  }, [config, currentProviderId, currentModelId]);
+  }, [config, currentProviderId, currentModelId, currentModelPreset.contextWindowOverride]);
 
   useEffect(() => {
     if (!currentId) return;
@@ -208,11 +212,7 @@ export function App() {
     gateway.getMessages(currentId)
       .then((stored) => {
         if (!alive) return;
-        setMessages(stored.map((message, index) => ({
-          id: `history-${index}`,
-          role: message.role,
-          parts: (message.parts?.length ? message.parts : [{ type: "text", text: message.content }]) as MessagePart[],
-        })));
+        setMessages(hydrateStoredMessages(stored));
       })
       .catch((reason) => {
         if (alive) {
@@ -236,6 +236,9 @@ export function App() {
     const handle = (event: GatewayEvent) => {
       const payload = event.payload || {};
       switch (event.type) {
+        case "message.start":
+          updatePending((parts) => parts.length ? parts : [{ type: "reasoning", text: "" }]);
+          break;
         case "message.delta":
           if (payload.text) updatePending((parts) => appendText(parts, payload.text!));
           break;
@@ -253,6 +256,7 @@ export function App() {
             error: payload.error,
             durationS: payload.duration_s,
             inlineDiff: payload.inline_diff,
+            snapshotId: payload.snapshot_id,
           }));
           break;
         case "tool.progress":
@@ -363,21 +367,21 @@ export function App() {
   }, [messages]);
 
   const send = useCallback((text: string) => {
-    if (!currentId) return;
+    if (!currentId || rewinding) return;
+    const userId = `msg-${globalThis.crypto.randomUUID()}`;
     const assistantId = `assistant-${Date.now()}`;
     pendingIdRef.current = assistantId;
     setStartupError(null);
     setMessages((current) => [
       ...current,
-      { id: `user-${Date.now()}`, role: "user", parts: [{ type: "text", text }] },
+      { id: userId, role: "user", parts: [{ type: "text", text }] },
       { id: assistantId, role: "assistant", parts: [], pending: true },
     ]);
     setStreaming(true);
     setTurnStartedAt(Date.now());
-    const preset = config ? getModelPreset(currentProviderId, currentModelId) : {};
     const protocol = config?.providers.find((candidate) => candidate.id === currentProviderId)?.protocol;
-    const modelParams = executableModelParams(protocol, preset);
-    gateway.sendPrompt(currentId, text, modelParams).catch((reason) => {
+    const modelParams = executableModelParams(protocol, currentModelPreset);
+    gateway.sendPrompt(currentId, text, modelParams, userId).catch((reason) => {
       const message = describeError(reason);
       setMessages((current) => current.map((item) => item.id === assistantId
         ? { ...item, parts: [{ type: "text", text: message }], pending: false }
@@ -385,7 +389,31 @@ export function App() {
       setStreaming(false);
       setTurnStartedAt(null);
     });
-  }, [currentId, config, currentProviderId, currentModelId, describeError]);
+  }, [currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
+
+  const rewindToMessage = useCallback(async (messageId: string) => {
+    if (!currentId || streaming || rewinding) return;
+    if (!window.confirm(t("chat.message.rewindConfirm"))) return;
+    setStartupError(null);
+    setRewinding(true);
+    try {
+      const result = await gateway.rewindSession(currentId, messageId);
+      pendingIdRef.current = null;
+      setStreaming(false);
+      setTurnStartedAt(null);
+      setTokens(null);
+      setMessages(hydrateStoredMessages(result.messages));
+      window.dispatchEvent(new CustomEvent("kyrei:set-composer-draft", {
+        detail: { text: result.draft, focus: true },
+      }));
+      const list = await gateway.listSessions();
+      setSessions(list);
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    } finally {
+      setRewinding(false);
+    }
+  }, [currentId, describeError, rewinding, streaming, t]);
 
   const stop = useCallback(() => {
     if (currentId) gateway.cancel(currentId).catch(() => {});
@@ -611,10 +639,15 @@ export function App() {
     <div className="relative h-full w-full">
       <DeveloperRail
         workspace={config?.workspace}
+        sessionId={currentId}
         messages={messages}
         streaming={streaming}
         split={preferences.developerSplit}
         onSplitChange={(developerSplit) => patchShell({ developerSplit })}
+        onWorkspaceOpen={async (workspace) => {
+          const next = await gateway.setConfig({ workspace });
+          setConfig(next);
+        }}
         onClose={toggleDeveloper}
       />
       <ResizeHandle
@@ -690,14 +723,18 @@ export function App() {
             </div>
           ) : (
             <div className="space-y-7 pb-4">
-              {messages.map((message) => <div key={message.id} className="msg-in"><Message message={message} /></div>)}
+              {messages.map((message) => (
+                <div key={message.id} className="msg-in">
+                  <Message message={message} onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined} />
+                </div>
+              ))}
             </div>
           )}
         </div>
       </div>
       <Composer
         streaming={streaming}
-        disabled={!config || !currentId || sessionModelPendingIds.has(currentId)}
+        disabled={!config || !currentId || rewinding || sessionModelPendingIds.has(currentId)}
         sessionId={currentId}
         model={currentModelId}
         provider={currentProviderId}
@@ -787,6 +824,14 @@ function terminalPermission(config: AppConfig | null): string {
   const engine = config?.engine;
   if (!engine || !isRecord(engine.permissions)) return "auto";
   return typeof engine.permissions.terminal === "string" ? engine.permissions.terminal : "auto";
+}
+
+function hydrateStoredMessages(stored: StoredChatMessage[]): ChatMessage[] {
+  return stored.map((message) => ({
+    id: message.id,
+    role: message.role,
+    parts: (message.parts?.length ? message.parts : [{ type: "text", text: message.content }]) as MessagePart[],
+  }));
 }
 
 function useMediaQuery(query: string): boolean {
