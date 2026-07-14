@@ -49,6 +49,10 @@ export interface BuildToolsOptions {
   actorId?: string;
   commandRunner?: CommandRunnerPort;
   sensitiveValues?: readonly string[];
+  /** Signed approvals revalidated by AI SDK for this exact run only. */
+  approvedToolCalls?: Map<string, string>;
+  /** Fired once, immediately before an approved effect is allowed to start. */
+  onApprovalConsumed?: (approvalId: string, toolCallId: string) => void | Promise<void>;
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -63,7 +67,7 @@ function normalizeBuildOptions(options?: BuildToolsOptions | AbortSignal): Build
 
 function blockedResult(decision: Exclude<Decision, "allow">): string {
   return decision === "ask"
-    ? "Tool action requires interactive approval, but interactive approval is not available yet; nothing was executed."
+    ? "Tool action requires interactive approval, but no valid one-shot approval was supplied; nothing was executed."
     : "Tool action was denied by the local permission policy; nothing was executed.";
 }
 
@@ -268,7 +272,17 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
   ): Promise<string> => {
     const started = Date.now();
     const decision = decideAll(cfg.permissions, actions);
-    if (decision !== "allow") {
+    const approvalId = options.approvedToolCalls?.get(toolCallId);
+    const consumeApproval = async (): Promise<void> => {
+      if (!approvalId) return;
+      options.approvedToolCalls?.delete(toolCallId);
+      await options.onApprovalConsumed?.(approvalId, toolCallId);
+    };
+    if (decision === "deny" || (decision === "ask" && !approvalId)) {
+      // A valid receipt can outlive the policy snapshot that requested it.
+      // Consuming a now-denied receipt is safe because no effect starts, and
+      // prevents the session from remaining permanently approval-blocked.
+      await consumeApproval();
       await audit(toolName, toolCallId, {
         decision,
         status: "denied",
@@ -280,6 +294,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
 
     const hookResult = await runPreHooks([secretScanHook], { tool: toolName, args: hookArgs }, true);
     if (!hookResult.allow) {
+      await consumeApproval();
       await audit(toolName, toolCallId, {
         decision: "deny",
         status: "denied",
@@ -289,12 +304,20 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
       return `Tool action was denied by the secret-scan pre-hook; nothing was executed. ${hookResult.reason ?? ""}`.trim();
     }
 
-    await audit(toolName, toolCallId, { decision, status: "start", metadata });
+    if (approvalId) {
+      await consumeApproval();
+    }
+
+    await audit(toolName, toolCallId, {
+      decision: approvalId ? "allow" : decision,
+      status: "start",
+      metadata: approvalId ? { ...metadata, approvalId } : metadata,
+    });
     try {
       if (abortSignal?.aborted) throw abortError();
       const result = await effect();
       await audit(toolName, toolCallId, {
-        decision,
+        decision: approvalId ? "allow" : decision,
         status: "complete",
         metadata,
         durationS: (Date.now() - started) / 1000,
@@ -302,7 +325,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
       return safeClip(result, cfg.maxToolOutput);
     } catch (error) {
       await audit(toolName, toolCallId, {
-        decision,
+        decision: approvalId ? "allow" : decision,
         status: isAbortError(error) ? "interrupted" : "error",
         metadata,
         error: error instanceof Error ? error.name : "ToolExecutionError",

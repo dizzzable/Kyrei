@@ -49,6 +49,7 @@ import { bridgeStream } from "../stream-bridge/bridge.js";
 import { toParts } from "./persist.js";
 import { createAuditLog } from "../security/audit.js";
 import { redact } from "../security/secrets.js";
+import { approvedApprovalId, evaluateToolApproval } from "../security/tool-approval.js";
 
 const MODEL_OVERRIDE_BOUNDS = Object.freeze({
   contextWindow: { min: 256, max: 100_000_000 },
@@ -117,6 +118,15 @@ function sensitiveRuntimeValues(...sources: unknown[]): string[] {
   return [...values];
 }
 
+function redactApprovalArgs(value: unknown, sensitiveValues: readonly string[]): unknown {
+  if (value === undefined) return undefined;
+  try {
+    return JSON.parse(redact(JSON.stringify(value), sensitiveValues));
+  } catch {
+    return "[redacted]";
+  }
+}
+
 export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
   const { config: cfg, warnings } = resolveEngineConfig(opts.config);
   if (warnings.length) console.warn("[kyrei v2] config:", warnings.join("; "));
@@ -140,6 +150,15 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
 
   const workspaceReady = Boolean(opts.workspace) && (await isWorkspaceDir(opts.workspace!));
   const toolMeta = new Map<string, ToolMeta>();
+  const approvedToolCalls = new Map<string, string>();
+  const approvalMeta = new Map<string, { reason: string; args: unknown; name?: string }>();
+  const consumeApprovedCall = async (approvalId: string, toolCallId: string): Promise<void> => {
+    await opts.onApprovalConsumed?.(approvalId, toolCallId);
+    opts.emit({
+      type: "approval.consumed",
+      payload: { approval_id: approvalId, tool_call_id: toolCallId },
+    });
+  };
   const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
   const audit = opts.auditLogPath ? createAuditLog(opts.auditLogPath) : undefined;
   const workspaceTools = workspaceReady
@@ -150,6 +169,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         actorId: "main",
         commandRunner: opts.commandRunner,
         sensitiveValues,
+        approvedToolCalls,
+        onApprovalConsumed: consumeApprovedCall,
       })
     : undefined;
   const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};
@@ -445,6 +466,45 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       ...(instructions ? { instructions } : {}),
       messages: opts.messages,
       ...(callTools ? { tools: callTools, stopWhen: buildStopWhen(cfg) } : {}),
+      ...(callTools && workspaceReady
+        ? {
+            toolApproval: async ({ toolCall, messages }: {
+              toolCall: { toolCallId: string; toolName: string; input: unknown };
+              messages: import("ai").ModelMessage[];
+            }) => {
+              // AI SDK validates the stored request HMAC before invoking this
+              // callback. Correlate that durable receipt before evaluating the
+              // *current* policy so ask→allow/deny changes cannot bypass or
+              // strand its one-shot consumption lifecycle.
+              const approvalId = approvedApprovalId(messages, toolCall.toolCallId);
+              if (approvalId) approvedToolCalls.set(toolCall.toolCallId, approvalId);
+              const evaluation = await evaluateToolApproval({
+                toolName: toolCall.toolName,
+                args: toolCall.input,
+                workspace: opts.workspace!,
+                config: cfg,
+              });
+              if (!evaluation || evaluation.decision === "allow") return "not-applicable" as const;
+              if (evaluation.decision === "deny") {
+                if (approvalId) {
+                  approvedToolCalls.delete(toolCall.toolCallId);
+                  await consumeApprovedCall(approvalId, toolCall.toolCallId);
+                }
+                return { type: "denied" as const, reason: evaluation.reason };
+              }
+              if (!opts.approvalSecret) {
+                return { type: "denied" as const, reason: "approval_signing_unavailable" };
+              }
+              approvalMeta.set(toolCall.toolCallId, {
+                reason: evaluation.reason,
+                args: redactApprovalArgs(evaluation.args, sensitiveValues),
+                name: toolCall.toolName,
+              });
+              return "user-approval" as const;
+            },
+            experimental_toolApprovalSecret: opts.approvalSecret,
+          }
+        : {}),
       ...(callTools && prepareStep ? { prepareStep } : {}),
       ...(providerOptions ? { providerOptions } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
@@ -475,15 +535,17 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       provider: selected.target.providerId,
       model: selected.entry.id,
       maxSteps: cfg.maxSteps,
+      approvalMeta,
     });
   } catch (error) {
     return throwWithProviderAttempts(error, publicAttempts(stream.attempts));
   }
 
   let parts: MessagePart[];
+  let responseMessages: import("ai").ModelMessage[] | undefined;
   try {
-    const responseMessages = await stream.responseMessages;
-    parts = toParts(responseMessages as never, bridged);
+    responseMessages = await stream.responseMessages as import("ai").ModelMessage[];
+    parts = toParts(responseMessages, bridged);
   } catch {
     parts = bridged.parts;
   }
@@ -492,6 +554,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     text: bridged.text,
     parts,
     status: bridged.status,
+    ...(responseMessages?.length ? { responseMessages } : {}),
     attempts: publicAttempts(stream.attempts),
     route: {
       providerId: selected.target.providerId,

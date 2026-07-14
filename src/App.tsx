@@ -16,7 +16,7 @@ import { DeveloperRail } from "@/components/shell/DeveloperRail";
 import { ShellLayout } from "@/components/shell/ShellLayout";
 import { useShellPreferences } from "@/components/shell/shell-preferences";
 import { useI18n } from "@/i18n";
-import { appendReasoning, appendText, toolComplete, toolProgress, toolStart } from "@/lib/chat-messages";
+import { approvalRequest, approvalResolved, appendReasoning, appendText, toolComplete, toolProgress, toolStart } from "@/lib/chat-messages";
 import { GatewayRequestError, gateway } from "@/lib/gateway";
 import { actionForCombo } from "@/store/keybinds";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
@@ -64,6 +64,9 @@ export function App() {
   const [agentRuns, setAgentRuns] = useState<SubagentRun[]>([]);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [sessionModelPendingIds, setSessionModelPendingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const approvalBlocked = messages.some((message) => message.parts.some(
+    (part) => part.type === "approval" && !part.consumedAt,
+  ));
 
   const pendingIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -262,6 +265,32 @@ export function App() {
         case "tool.progress":
           if (payload.text) updatePending((parts) => toolProgress(parts, { toolCallId: payload.tool_call_id, name: payload.name, text: payload.text! }));
           break;
+        case "approval.request":
+          if (payload.approval_id && payload.tool_call_id && payload.name) {
+            updatePending((parts) => approvalRequest(parts, {
+              approvalId: payload.approval_id!,
+              toolCallId: payload.tool_call_id!,
+              name: payload.name!,
+              args: payload.args,
+              reason: payload.reason || "permission_rule_requires_confirmation",
+            }));
+          }
+          break;
+        case "approval.resolved":
+        case "approval.consumed":
+          if (payload.approval_id) {
+            setMessages((current) => current.map((message) => ({
+              ...message,
+              parts: approvalResolved(message.parts, {
+                approvalId: payload.approval_id!,
+                ...(event.type === "approval.resolved" && typeof payload.approved === "boolean"
+                  ? { approved: payload.approved, reason: payload.reason }
+                  : {}),
+                consumed: event.type === "approval.consumed" || payload.consumed === true,
+              }),
+            })));
+          }
+          break;
         case "status.update": {
           const usage = (event.payload as { usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number } }).usage;
           if (usage) {
@@ -315,7 +344,9 @@ export function App() {
           pendingIdRef.current = null;
           setStreaming(false);
           setTurnStartedAt(null);
-          notifyTurnComplete(translationRef.current("shell.notification.turnComplete"));
+          if (payload.status !== "awaiting_approval") {
+            notifyTurnComplete(translationRef.current("shell.notification.turnComplete"));
+          }
           if (payload.text && getUiSettings().autoSpeak) {
             speak(payload.text, { lang: getUiSettings().voiceLang || undefined });
           }
@@ -367,7 +398,7 @@ export function App() {
   }, [messages]);
 
   const send = useCallback((text: string) => {
-    if (!currentId || rewinding) return;
+    if (!currentId || rewinding || approvalBlocked) return;
     const userId = `msg-${globalThis.crypto.randomUUID()}`;
     const assistantId = `assistant-${Date.now()}`;
     pendingIdRef.current = assistantId;
@@ -389,7 +420,7 @@ export function App() {
       setStreaming(false);
       setTurnStartedAt(null);
     });
-  }, [currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
+  }, [approvalBlocked, currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
 
   const rewindToMessage = useCallback(async (messageId: string) => {
     if (!currentId || streaming || rewinding) return;
@@ -414,6 +445,40 @@ export function App() {
       setRewinding(false);
     }
   }, [currentId, describeError, rewinding, streaming, t]);
+
+  const respondToApproval = useCallback(async (approvalId: string, approved: boolean) => {
+    if (!currentId || streaming || rewinding) return;
+    const assistantId = `assistant-approval-${Date.now()}`;
+    pendingIdRef.current = assistantId;
+    setStartupError(null);
+    setMessages((current) => [
+      ...current,
+      { id: assistantId, role: "assistant", parts: [], pending: true },
+    ]);
+    setStreaming(true);
+    setTurnStartedAt(Date.now());
+    try {
+      const result = await gateway.respondToApproval(currentId, approvalId, approved);
+      setMessages((current) => current.map((message) => ({
+        ...message,
+        parts: message.parts.map((part) => part.type === "approval" && part.approvalId === approvalId
+          ? { ...part, ...result.approval }
+          : part),
+      })));
+      if (result.status === "pending") {
+        setMessages((current) => current.filter((message) => message.id !== assistantId));
+        pendingIdRef.current = null;
+        setStreaming(false);
+        setTurnStartedAt(null);
+      }
+    } catch (reason) {
+      setMessages((current) => current.filter((message) => message.id !== assistantId));
+      pendingIdRef.current = null;
+      setStreaming(false);
+      setTurnStartedAt(null);
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, describeError, rewinding, streaming]);
 
   const stop = useCallback(() => {
     if (currentId) gateway.cancel(currentId).catch(() => {});
@@ -725,7 +790,11 @@ export function App() {
             <div className="space-y-7 pb-4">
               {messages.map((message) => (
                 <div key={message.id} className="msg-in">
-                  <Message message={message} onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined} />
+                  <Message
+                    message={message}
+                    onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
+                    onApprovalDecision={message.role === "assistant" && !streaming && !rewinding ? respondToApproval : undefined}
+                  />
                 </div>
               ))}
             </div>
@@ -734,7 +803,7 @@ export function App() {
       </div>
       <Composer
         streaming={streaming}
-        disabled={!config || !currentId || rewinding || sessionModelPendingIds.has(currentId)}
+        disabled={!config || !currentId || rewinding || approvalBlocked || sessionModelPendingIds.has(currentId)}
         sessionId={currentId}
         model={currentModelId}
         provider={currentProviderId}

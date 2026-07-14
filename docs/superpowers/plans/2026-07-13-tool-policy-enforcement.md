@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Kyrei's terminal, review, permission-rule, secret-scan, and audit settings actually govern `run_command`, `write_file`, and `edit_file` without pretending that interactive approval already exists.
+**Goal:** Make Kyrei's terminal, review, permission-rule, secret-scan, and audit settings govern `run_command`, `write_file`, and `edit_file`, then add a durable signed interactive approval lifecycle.
 
-**Architecture:** Add one fail-closed guarded-execution path inside the existing tool builder. `deny` and `ask` never execute effects; explicit allow rules continue to use the current deny-wins policy. Secret scanning runs before mutation, and a single gateway-owned audit sink records denied/start/complete/error decisions with session and tool-call correlation. A later durable approval state machine will resume a new AI SDK run rather than holding an in-memory tool promise.
+**Architecture:** Use one fail-closed guarded-execution path inside the existing tool builder. `deny` never executes; `ask` executes only after AI SDK verifies a gateway-signed exact-call approval. Secret scanning runs again before mutation, durable one-shot consumption is an effect barrier, and a gateway-owned audit sink records denied/start/complete/error decisions with session and tool-call correlation. Continuation is always a new AI SDK run rather than a held in-memory tool promise.
 
 **Tech Stack:** TypeScript 7, AI SDK 7 tools, Node.js filesystem/process APIs, JSONL audit log, Vitest 4
 
@@ -35,7 +35,7 @@
 - [x] Guard `run_command` using its exact command before sandbox/spawn.
 - [x] Guard `write_file` using its exact path and run secret scanning before directory creation or file writes.
 - [x] Parse `edit_file` once, evaluate every source/destination path, secret-scan the original patch, and apply only after every action is allowed.
-- [x] Return a deterministic model-visible tool result for `ask` explaining that interactive approval is not available yet and nothing executed.
+- [x] Return a deterministic model-visible result when `ask` reaches execution without a valid signed one-shot approval; nothing executes.
 - [x] Add `toolCallId` to audit records; keep audit failures from bypassing the policy decision or crashing the tool loop.
 
 ## Task 3: Wire one correlated audit sink through the live runtime
@@ -67,6 +67,20 @@
 
 The independent review expanded the safety boundary before approval: permission config now recovers fail-closed; read/write paths reject live symlink/junction/reparse and Windows alias escapes; diagnostics uses both tool and terminal policies plus the configured sandbox; cancellation is an effect barrier with process-tree termination; and web audit stores only correlated origin/depth/length metadata. The remaining filesystem TOCTOU limitation is explicit in `security/jail.ts`.
 
-## Deferred durable approval lifecycle
+## Durable approval lifecycle completed
 
-Interactive approve/deny is not part of this fail-closed slice. AI SDK 7 emits signed tool-approval messages and expects continuation in a subsequent model request. The next slice must preserve structured model/tool/approval history, persist a session-bound one-shot pending approval with TTL, expose a gateway response endpoint, render approve/deny controls, and resume as a new run. It must not hold a tool `execute()` promise across renderer disconnect, cancellation, or application restart.
+- [x] Use AI SDK 7 HMAC-signed tool-approval requests rather than a synthetic user message.
+- [x] Persist private structured model/tool/approval history while stripping it from every public session response.
+- [x] Persist a session-bound exact-tool-call decision with a 24-hour TTL and reject replay after consumption.
+- [x] Expose a local gateway response endpoint and reserve the session during continuation.
+- [x] Render typed EN/RU allow-once and deny controls inline with the exact protected action.
+- [x] Resume as a new run without holding an in-memory `execute()` promise across renderer disconnect or application restart.
+- [x] Preserve per-turn reasoning and context/output overrides during continuation.
+- [x] Fail expired approvals closed as denials without stranding the session.
+- [x] Atomically consume explicit denials and expirations with their durable decision so a callback-free native denial cannot block later turns.
+- [x] Durably consume the one-shot decision before starting its side effect; persistence failure blocks execution.
+- [x] Preserve that barrier if policy changes while a signed request is pending: relaxed policy still consumes before effect, stricter policy consumes without effect.
+- [x] Verify native AI SDK HMAC correlation rejects tool-call ID, input, and signature tampering and preserves mixed approve/deny batches.
+- [x] Verify the full interaction in Electron with a real guarded command and terminal-backed output.
+
+The approval signing key remains gateway-owned protected state. The public renderer receives only redacted action arguments and decision status; signatures and private model messages never cross the local HTTP boundary.

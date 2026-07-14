@@ -373,6 +373,7 @@ export const enSettings = {
   "settings.about.tagline": "Local AI agent for software projects",
   "settings.about.version": "Version",
   "settings.about.engine": "Engine",
+  "settings.about.engineValue": "Kyrei Engine v2",
   "settings.about.provider": "Provider",
 
   "settings.providers.title": "Providers",

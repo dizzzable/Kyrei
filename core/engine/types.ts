@@ -81,7 +81,7 @@ export type SubagentEvent =
     };
 
 /** Terminal reason for a turn (ACP-like stopReason, see requirements §2.3). */
-export type TurnStatus = "complete" | "interrupted" | "error" | "max_steps";
+export type TurnStatus = "complete" | "interrupted" | "error" | "max_steps" | "awaiting_approval";
 
 /** Events emitted by the engine and relayed by the gateway over SSE. */
 export type KyreiEvent =
@@ -122,6 +122,20 @@ export type KyreiEvent =
       type: "approval.request";
       payload: { approval_id: string; tool_call_id: string; name: string; args: unknown; reason: string };
     }
+  | {
+      type: "approval.resolved";
+      payload: {
+        approval_id: string;
+        tool_call_id: string;
+        approved: boolean;
+        reason?: string;
+        consumed?: boolean;
+      };
+    }
+  | {
+      type: "approval.consumed";
+      payload: { approval_id: string; tool_call_id: string };
+    }
   | { type: "message.complete"; payload: { text: string; status: TurnStatus; usage?: Usage } }
   | { type: "error"; payload: { code?: string; message?: string } };
 
@@ -129,6 +143,20 @@ export type KyreiEvent =
 export type MessagePart =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
+  | {
+      type: "approval";
+      approvalId: string;
+      toolCallId: string;
+      name: string;
+      args?: unknown;
+      reason: string;
+      status: "pending" | "approved" | "denied" | "expired";
+      createdAt?: string;
+      expiresAt?: string;
+      resolvedAt?: string;
+      decisionReason?: string;
+      consumedAt?: string;
+    }
   | {
       type: "tool";
       toolCallId: string;
@@ -139,6 +167,7 @@ export type MessagePart =
       snapshotId?: string;
       error?: string;
       running: boolean;
+      awaitingApproval?: boolean;
       durationS?: number;
     };
 
@@ -452,6 +481,10 @@ export interface RunKyreiChatOpts {
   auditLogPath?: string;
   /** Gateway-owned session correlation for local audit records. */
   sessionId?: string;
+  /** Gateway-owned HMAC key for native one-shot tool approval signatures. */
+  approvalSecret?: string;
+  /** Durable gateway barrier that must complete before an approved effect starts. */
+  onApprovalConsumed?: (approvalId: string, toolCallId: string) => void | Promise<void>;
   /** Optional internal desktop adapter; never accepted from renderer input. */
   commandRunner?: CommandRunnerPort;
   abortSignal?: AbortSignal;
@@ -471,6 +504,8 @@ export interface RunKyreiChatResult {
   parts: MessagePart[];
   status: TurnStatus;
   attempts: ProviderAttemptOutcome[];
+  /** Private structured history required to resume signed tool approvals. */
+  responseMessages?: ModelMessage[];
   route?: {
     providerId: string;
     modelId: string;

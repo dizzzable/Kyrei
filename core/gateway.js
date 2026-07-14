@@ -107,6 +107,55 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+function internalModelMessages(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(message => {
+    if (!message || typeof message !== "object") return [];
+    if ((message.role !== "assistant" && message.role !== "tool") || !Array.isArray(message.content)) return [];
+    return [{ ...message, content: message.content.slice(0, 500) }];
+  }).slice(0, 500);
+}
+
+function publicStoredMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).map(message => {
+    const {
+      modelMessages: _privateModelMessages,
+      approvalModelParams: _privateApprovalModelParams,
+      ...publicMessage
+    } = message ?? {};
+    return publicMessage;
+  });
+}
+
+function normalizedModelParams(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const next = {};
+  if (typeof value.effort === "string" && value.effort.length <= 32) next.effort = value.effort;
+  if (typeof value.fast === "boolean") next.fast = value.fast;
+  if (typeof value.reasoning === "boolean") next.reasoning = value.reasoning;
+  if (typeof value.contextWindowOverride === "number" && Number.isFinite(value.contextWindowOverride)) {
+    next.contextWindowOverride = value.contextWindowOverride;
+  }
+  if (typeof value.maxOutputOverride === "number" && Number.isFinite(value.maxOutputOverride)) {
+    next.maxOutputOverride = value.maxOutputOverride;
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
+function approvalResponses(parts) {
+  if (!Array.isArray(parts)) return [];
+  return parts.flatMap(part => {
+    if (part?.type !== "approval" || part.status === "pending") return [];
+    const approved = part.status === "approved";
+    return [{
+      type: "tool-approval-response",
+      approvalId: part.approvalId,
+      approved,
+      reason: part.decisionReason || (part.status === "expired" ? "approval_expired" : approved ? "user_approved_once" : "user_denied"),
+    }];
+  });
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -465,6 +514,7 @@ export function requestErrorStatus(error) {
       : "";
   if (code === "invalid_json") return 400;
   if (code === "request_body_too_large") return 413;
+  if (code === "approval_decision_invalid") return 400;
   if (code === "secret_storage_unavailable") return 503;
   if (code === "provider_discovery_unauthorized") return 401;
   if (code === "provider_discovery_target_blocked") return 403;
@@ -535,6 +585,11 @@ export function requestErrorStatus(error) {
     || code === "pipeline_completion_gate_failed"
     || code === "provider_primary_account_required"
     || code === "provider_account_limit_reached"
+    || code === "approval_required"
+    || code === "approval_already_consumed"
+    || code === "approval_decision_conflict"
+    || code === "approval_expired"
+    || code === "approval_not_resolved"
   ) return 409;
   if (
     code.startsWith("pipeline_")
@@ -1405,6 +1460,12 @@ export async function startGateway({
     pruneProviderAccountSecrets(normalizeProviderSecrets(loaded.secrets), config.providers),
     config.kiroOrganization,
   );
+  if (!secrets.approvalSigningKey) {
+    secrets = normalizeProviderSecrets({
+      ...secrets,
+      approvalSigningKey: randomBytes(32).toString("base64url"),
+    });
+  }
   const legacyApiKey = typeof rawConfig.apiKey === "string" ? rawConfig.apiKey : "";
   if (legacyApiKey && !secrets.providers[config.activeProviderId]?.apiKey) {
     secrets.providers[config.activeProviderId] = {
@@ -1778,6 +1839,13 @@ export async function startGateway({
         next.phase = payload.error ? "recovering" : "reasoning";
         next.currentTool = undefined;
         break;
+      case "approval.request":
+        next.phase = "awaiting_approval";
+        next.currentTool = typeof payload.name === "string" ? payload.name : undefined;
+        break;
+      case "approval.consumed":
+        next.phase = "tool";
+        break;
       case "message.delta":
         next.phase = "responding";
         next.currentTool = undefined;
@@ -1792,7 +1860,13 @@ export async function startGateway({
       }
       case "message.complete":
         next.active = false;
-        next.phase = payload.status === "interrupted" ? "interrupted" : payload.status === "error" ? "failed" : "complete";
+        next.phase = payload.status === "interrupted"
+          ? "interrupted"
+          : payload.status === "error"
+            ? "failed"
+            : payload.status === "awaiting_approval"
+              ? "awaiting_approval"
+              : "complete";
         next.currentTool = undefined;
         next.completedAt = now;
         break;
@@ -2555,9 +2629,18 @@ export async function startGateway({
   }
 
   function convoFor(sessionId) {
-    return store.getMessages(sessionId)
-      .filter(m => m.role === "user" || m.role === "assistant")
-      .map(m => ({ role: m.role, content: m.content }));
+    return store.getMessages(sessionId).flatMap(message => {
+      if (message.role === "user") return [{ role: "user", content: message.content }];
+      if (message.role !== "assistant") return [];
+      const structured = internalModelMessages(message.modelMessages);
+      const history = structured.length
+        ? structured
+        : [{ role: "assistant", content: message.content }];
+      const responses = approvalResponses(message.parts);
+      return responses.length
+        ? [...history, { role: "tool", content: responses }]
+        : history;
+    });
   }
 
   function createSession({ title = "", source = "chat" } = {}) {
@@ -2588,7 +2671,7 @@ export async function startGateway({
     }
   }
 
-  async function runReservedPrompt(sessionId, text, modelParams, messageId) {
+  async function runReservedPrompt(sessionId, text, modelParams, messageId, { appendUser = true } = {}) {
     if (shutdownController.signal.aborted) {
       return { status: "cancelled", sessionId, error: "gateway-shutdown" };
     }
@@ -2596,27 +2679,30 @@ export async function startGateway({
     if (!session) return { status: "error", sessionId, error: "session-not-found" };
     if (controllers.has(sessionId)) return { status: "error", sessionId, error: "session_busy" };
 
+    const safeModelParams = normalizedModelParams(modelParams);
     const runtimeGenerationSnapshot = new Map(
       config.providers.map((provider) => [provider.id, providerRuntimeGeneration(provider.id)]),
     );
 
-    const safePromptText = redactSensitiveText(text, runtimeSensitiveValues());
-    const promptWorkspace = config.workspace
-      ? await realpath(config.workspace).catch(() => "")
-      : "";
-    store.appendMessage(sessionId, {
-      id: messageId,
-      role: "user",
-      content: safePromptText,
-      ...(promptWorkspace ? { workspace: promptWorkspace } : {}),
-    });
-    if (!session.title) {
-      store.upsertSession({
-        id: sessionId,
-        title: safePromptText.slice(0, 48) + (safePromptText.length > 48 ? "…" : ""),
-        updatedAt: new Date().toISOString(),
+    if (appendUser) {
+      const safePromptText = redactSensitiveText(text, runtimeSensitiveValues());
+      const promptWorkspace = config.workspace
+        ? await realpath(config.workspace).catch(() => "")
+        : "";
+      store.appendMessage(sessionId, {
+        id: messageId,
+        role: "user",
+        content: safePromptText,
+        ...(promptWorkspace ? { workspace: promptWorkspace } : {}),
       });
-      emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
+      if (!session.title) {
+        store.upsertSession({
+          id: sessionId,
+          title: safePromptText.slice(0, 48) + (safePromptText.length > 48 ? "…" : ""),
+          updatedAt: new Date().toISOString(),
+        });
+        emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
+      }
     }
 
     let mainTarget;
@@ -2721,6 +2807,13 @@ export async function startGateway({
         workspace: config.workspace,
         auditLogPath: join(dataDir, "audit.jsonl"),
         sessionId,
+        approvalSecret: secrets.approvalSigningKey,
+        onApprovalConsumed: async (approvalId) => {
+          store.consumeApproval(sessionId, approvalId);
+          // This is an effect barrier, not a debounced UI write: an approved
+          // command may start only after its one-shot consumption is durable.
+          await store.flush();
+        },
         ...(commandRunner ? { commandRunner } : {}),
         skills: runtimeSkillsForEngine(runtimeSkills.skills),
         readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
@@ -2732,18 +2825,39 @@ export async function startGateway({
         ...common,
         abortSignal: controller.signal,
         config: config.engine,
-        ...(modelParams && typeof modelParams === "object" ? { modelParams } : {}),
+        ...(safeModelParams ? { modelParams: safeModelParams } : {}),
       });
       // A provider may resolve despite aborting its transport. Preserve the
       // shutdown boundary and never persist that late result as a success.
       throwIfAborted(controller.signal);
-      const publicResult = redactSensitiveValue(result, runtimeSensitiveValues());
+      // UI parts and structured model history can legitimately share the same
+      // tool input object. Redact them as separate roots: the generic cycle
+      // guard otherwise replaces the second reference with "[CIRCULAR]" and
+      // invalidates the HMAC-bound approval request on continuation.
+      const sensitiveValues = runtimeSensitiveValues();
+      const publicResult = redactSensitiveValue(
+        { ...result, responseMessages: undefined },
+        sensitiveValues,
+      );
+      const privateResponseMessages = redactSensitiveValue(
+        result?.responseMessages,
+        sensitiveValues,
+      );
       const assistantText = typeof publicResult?.text === "string" ? publicResult.text : "";
       const assistantParts = Array.isArray(publicResult?.parts) ? publicResult.parts : [];
+      const assistantModelMessages = internalModelMessages(privateResponseMessages);
       const turnStatus = typeof result?.status === "string" ? result.status : "complete";
-      const successfulTurn = turnStatus === "complete" || turnStatus === "max_steps";
+      const successfulTurn = turnStatus === "complete" || turnStatus === "max_steps" || turnStatus === "awaiting_approval";
       if (successfulTurn || assistantText || assistantParts.length) {
-        store.appendMessage(sessionId, { role: "assistant", content: assistantText, parts: assistantParts });
+        store.appendMessage(sessionId, {
+          role: "assistant",
+          content: assistantText,
+          parts: assistantParts,
+          ...(assistantModelMessages.length ? { modelMessages: assistantModelMessages } : {}),
+          ...(turnStatus === "awaiting_approval" && safeModelParams
+            ? { approvalModelParams: safeModelParams }
+            : {}),
+        });
       }
       const selectedAccountId = typeof result?.route?.accountId === "string" ? result.route.accountId : mainTarget.accountId;
       const selectedProviderId = typeof result?.route?.providerId === "string"
@@ -2770,7 +2884,11 @@ export async function startGateway({
           error: turnStatus === "interrupted" ? "interrupted" : "provider_stream_error",
         };
       }
-      return { status: "success", sessionId, summary: assistantText.slice(0, 4000) };
+      return {
+        status: turnStatus === "awaiting_approval" ? "awaiting_approval" : "success",
+        sessionId,
+        summary: assistantText.slice(0, 4000),
+      };
     } catch (err) {
       // A synchronous throw or a failed engine-bundle import must not become an
       // unhandled rejection (would crash the gateway) — surface it and end turn.
@@ -2794,7 +2912,11 @@ export async function startGateway({
         runtimeActivity.set(sessionId, {
           ...activity,
           active: false,
-          phase: controller.signal.aborted ? "interrupted" : "complete",
+          phase: controller.signal.aborted
+            ? "interrupted"
+            : activity.phase === "awaiting_approval"
+              ? "awaiting_approval"
+              : "complete",
           currentTool: undefined,
           updatedAt: now,
           completedAt: now,
@@ -4137,11 +4259,63 @@ export async function startGateway({
         }
       }
 
+      const approvalMatch = path.match(/^\/api\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
+      if (approvalMatch && req.method === "POST") {
+        const sessionId = decodeURIComponent(approvalMatch[1]);
+        const approvalId = decodeURIComponent(approvalMatch[2]);
+        if (!store.getSession(sessionId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        const reservationToken = Symbol("approval");
+        sessionReservations.set(sessionId, reservationToken);
+        let continuationStarted = false;
+        try {
+          const body = await readBody(req);
+          const resolved = store.resolveApproval(sessionId, approvalId, {
+            approved: body.approved,
+            reason: typeof body.reason === "string" ? body.reason : "",
+          });
+          emitTo(sessionId, {
+            type: "approval.resolved",
+            payload: {
+              approval_id: resolved.approval.approvalId,
+              tool_call_id: resolved.approval.toolCallId,
+              approved: resolved.approval.status === "approved",
+              ...(resolved.approval.decisionReason ? { reason: resolved.approval.decisionReason } : {}),
+              ...(resolved.approval.consumedAt ? { consumed: true } : {}),
+            },
+          });
+          await store.flush();
+          if (!resolved.ready) {
+            return sendJson(res, 200, { status: "pending", approval: resolved.approval });
+          }
+
+          continuationStarted = true;
+          sendJson(res, 200, { status: "streaming", approval: resolved.approval });
+          setImmediate(() => {
+            void runReservedPrompt(sessionId, "", resolved.modelParams, undefined, { appendUser: false })
+              .finally(() => {
+                if (sessionReservations.get(sessionId) === reservationToken) {
+                  sessionReservations.delete(sessionId);
+                }
+              });
+          });
+          return;
+        } finally {
+          if (!continuationStarted && sessionReservations.get(sessionId) === reservationToken) {
+            sessionReservations.delete(sessionId);
+          }
+        }
+      }
+
       const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(\/messages|\/rewind)?$/);
       if (sessionMatch) {
         const id = decodeURIComponent(sessionMatch[1]);
         if (sessionMatch[2] === "/messages" && req.method === "GET") {
-          return sendJson(res, 200, { session_id: id, messages: store.getMessages(id) });
+          return sendJson(res, 200, { session_id: id, messages: publicStoredMessages(store.getMessages(id)) });
         }
         if (sessionMatch[2] === "/rewind" && req.method === "POST") {
           if (controllers.has(id) || sessionReservations.has(id)) {
@@ -4205,7 +4379,7 @@ export async function startGateway({
               ok: true,
               session_id: id,
               draft: plan.draft,
-              messages: store.getMessages(id),
+              messages: publicStoredMessages(store.getMessages(id)),
               ...restored,
             });
           } finally {
@@ -4276,6 +4450,9 @@ export async function startGateway({
         const messageId = body.messageId == null || body.messageId === "" ? undefined : String(body.messageId);
         if (messageId !== undefined && !isSessionMessageId(messageId)) {
           return sendJson(res, 400, { code: "message_id_invalid", error: "message_id_invalid" });
+        }
+        if (store.hasUnconsumedApprovals(sessionId)) {
+          return sendJson(res, 409, { code: "approval_required", error: "approval_required" });
         }
         if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
           return sendJson(res, 409, { code: "session_busy", error: "session_busy" });

@@ -2,7 +2,7 @@
 
 ## Scope
 
-This audit covers only the backend engine/runtime surface assigned to worker-2: `EngineConfig`, orchestration, and memory/runtime behavior. It excludes browser capabilities and UI/settings IA work, because Kyrei must preserve the closed desktop / no-browser constraint and worker-3 owns the settings/UI audit.
+This audit covers only the backend engine/runtime surface assigned to worker-2: `EngineConfig`, orchestration, and memory/runtime behavior. It excludes a user-facing embedded browser and UI/settings IA work. Agent-only search and public-page reading remain permitted through Kyrei's bounded web tools.
 
 ## Evidence reviewed
 
@@ -26,7 +26,7 @@ This audit covers only the backend engine/runtime surface assigned to worker-2: 
 | File-read ceiling | `file_read_max_chars: 1000000` | Yes | `EngineConfig.fileReadMaxChars`, `tools/index.ts` `read_file` | Same capability, different defaults. |
 | Tool output ceilings | `tool_output.max_bytes/max_lines/max_line_length` | Partial | `EngineConfig.maxToolOutput` char cap | Kyrei has one char-based cap only; no line/byte structure. |
 | Personality text | `agent.personalities.*` | Partial | `EngineConfig.personality`, `prompt/system.ts` | Kyrei supports raw personality text but not Hermes-style named catalogs. |
-| Terminal policy | `terminal.backend`, approvals mode elsewhere | Partial | `permissions.terminal`, `permissions.review`, `security/permissions.ts` | Kyrei has good policy primitives, but not Hermes' full approval persistence / session-scoped UX. |
+| Terminal policy | `terminal.backend`, approvals mode elsewhere | Yes | `permissions.terminal`, `security/tool-approval.ts`, `session-store.js`, `ApprovalCard.tsx` | Protected calls use signed one-shot approvals with durable session state and an inline EN/RU decision surface. |
 
 ### 2) Orchestration/runtime behavior
 
@@ -37,7 +37,7 @@ This audit covers only the backend engine/runtime surface assigned to worker-2: 
 | Read-only delegation / swarm | Partial skeleton only | `orchestration/reviewer.ts` has `runReadSwarm()` contract | No live subagent tool/runtime in Kyrei engine yet. |
 | Clean-context review | Partial skeleton only | `reviewDiff()` + tests | Contract exists, but no live invocation in the turn loop. |
 | Provider failover | Yes, simplified | `provider/open-stream.ts`, `provider/provider.test.ts` | Simpler than Hermes: no per-fallback provider/baseURL/key/api-mode objects. |
-| Approval bridge | Partial | `approval.request` event type + `security/permissions.ts` | Gateway lacks a completed Hermes-like approval flow/persistence surface. |
+| Approval bridge | Yes | `security/tool-approval.ts`, `stream-bridge/bridge.ts`, `gateway.js`, `session-store.js`, `ApprovalCard.tsx` | AI SDK signed requests are persisted, resolved through the local gateway, consumed once, and resumed as a new model run. |
 
 ### 3) Memory/runtime context
 
@@ -59,7 +59,7 @@ Why this slice first:
 
 1. The code is already mostly built and tested.
 2. It is backend-only, so it does not conflict with worker-3's settings/UI scope.
-3. It preserves Kyrei's no-browser constraint.
+3. It preserves Kyrei's no user-facing browser constraint.
 4. It closes an actual Hermes parity gap immediately: project instructions and project memory influencing every turn.
 5. It avoids new persistent schema changes.
 
@@ -168,13 +168,14 @@ This is higher risk and should follow, not lead.
    - Kyrei already has `layers.ts`, `writer.ts`, `handoff.ts`, `ltm-bridge.ts`, and SQLite memory ports.
    - The main gap is wiring, not greenfield implementation.
 
-3. **Approval/runtime parity is incomplete**
-   - Kyrei has engine-side permission decisions and an `approval.request` event type.
-   - It does not yet match Hermes' richer approval routing/persistence behavior end-to-end.
+3. **Approval/runtime parity is now implemented for guarded local tools**
+   - Kyrei preserves signed structured model history privately and never exposes approval signatures through the renderer API.
+   - Decisions are exact-tool-call, one-shot, TTL-bound, fail closed on expiry, and resumable after renderer or gateway interruption.
+   - Future parity work can add richer policy presets without changing this lifecycle.
 
-4. **No-browser constraint must stay explicit**
-   - Hermes exposes browser tools and browser-oriented config.
-   - Kyrei parity work for this phase should explicitly exclude browser features.
+4. **The browser boundary must stay explicit**
+   - Kyrei does not expose a general-purpose embedded browser to the user.
+   - Agent-only search and public-page reading may run through bounded tools; local/private addresses remain blocked.
 
 ## Recommended first implementation order
 
