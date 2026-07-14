@@ -1,6 +1,7 @@
 export type TerminalStatus = "running" | "exited" | "failed";
 export type TerminalStream = "stdout" | "stderr";
 export type TerminalKind = "manual" | "agent";
+export type DesktopPlatform = "linux" | "windows" | "macos" | "unknown";
 
 export interface TerminalOutputChunk {
   stream: TerminalStream;
@@ -29,6 +30,7 @@ export type TerminalSessionEvent =
   | { type: "closed"; sessionId: string; ownerId: string };
 
 interface KyreiDesktopBridge {
+  platform?: DesktopPlatform;
   getPathForFile?: (file: File) => string;
   workspace?: {
     choose: (locale: "en" | "ru") => Promise<{ canceled: boolean; path: string }>;
@@ -71,6 +73,10 @@ export const desktopWorkspace = {
     if (!api) throw unavailable();
     return api.validatePath(path);
   },
+};
+
+export const desktopRuntime = {
+  platform: (): DesktopPlatform => bridge()?.platform ?? "unknown",
 };
 
 export const desktopTerminal = {

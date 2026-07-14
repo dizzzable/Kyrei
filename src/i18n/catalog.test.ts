@@ -41,4 +41,11 @@ describe("translation catalog", () => {
     expect(CATALOG.ru["settings.providers.error.secretStorageStep2"]).toContain("вернитесь в «Провайдеры»");
     expect(CATALOG.ru["settings.providers.error.secretStorageNotSaved"]).toContain("открытым текстом");
   });
+
+  it("keeps Linux credential-storage recovery concrete and sandbox-safe", () => {
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep1"]).toContain("not sudo kyrei");
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxArchCommand"]).toContain("pacman -S gnome-keyring");
+    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxStep1"]).toContain("а не sudo kyrei");
+    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxArchCommand"]).toContain("pacman -S gnome-keyring");
+  });
 });

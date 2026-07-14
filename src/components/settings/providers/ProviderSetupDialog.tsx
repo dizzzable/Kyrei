@@ -14,10 +14,12 @@ import {
   Textarea,
 } from "@/components/ui";
 import { GatewayRequestError } from "@/lib/gateway";
+import { desktopRuntime } from "@/lib/desktop";
 import type { ProviderModel, ProviderProtocol } from "@/lib/types";
 import { useI18n, type TranslationKey } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { ModelDiscovery } from "./ModelDiscovery";
+import { secretStorageGuidanceFor } from "./secret-storage-guidance";
 import {
   consumeBenchmarkNetworkPermission,
   mergeDiscoveredModels,
@@ -123,6 +125,8 @@ export function ProviderSetupDialog({
   const benchmarkNetworkAvailable = canUseBenchmarkNetwork(draft);
   const discoverySupported = providerSupportsModelDiscovery(draft.protocol);
   const storageUnavailable = errorKey === "settings.providers.error.secretStorageUnavailable";
+  const desktopPlatform = desktopRuntime.platform();
+  const secretStorageGuidance = secretStorageGuidanceFor(desktopPlatform);
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !unavailable) onCancel(); }}>
@@ -235,9 +239,14 @@ export function ProviderSetupDialog({
                         <p className="text-[11px] font-semibold text-danger">{t("settings.providers.error.secretStorageTitle")}</p>
                         <p className="mt-1 text-[10px] leading-4 text-secondary">{t("settings.providers.error.secretStorageExplanation")}</p>
                         <ol className="mt-2 list-decimal space-y-1 pl-4 text-[10px] leading-4 text-secondary">
-                          <li>{t("settings.providers.error.secretStorageStep1")}</li>
-                          <li>{t("settings.providers.error.secretStorageStep2")}</li>
+                          <li>{t(secretStorageGuidance.step1)}</li>
+                          <li>{t(secretStorageGuidance.step2)}</li>
                         </ol>
+                        {desktopPlatform === "linux" ? (
+                          <code className="mt-2 block w-fit rounded border border-border-soft bg-bg/45 px-2 py-1 font-mono text-[9.5px] text-primary">
+                            {t("settings.providers.error.secretStorageLinuxArchCommand")}
+                          </code>
+                        ) : null}
                         <p className="mt-2 text-[9.5px] leading-4 text-muted">{t("settings.providers.error.secretStorageNotSaved")}</p>
                       </div>
                     </div>

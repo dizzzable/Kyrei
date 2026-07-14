@@ -118,7 +118,14 @@ describe("gateway turn checkpoints", () => {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "Change the file", messageId }),
     });
-    await waitFor(async () => (await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)).messages.length === 2);
+    await waitFor(async () => {
+      const [messages, sessions] = await Promise.all([
+        request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`),
+        request<{ sessions: Array<{ id: string; activity?: { active: boolean; phase: string } }> }>("/api/sessions"),
+      ]);
+      const activity = sessions.sessions.find(candidate => candidate.id === session.id)?.activity;
+      return messages.messages.length === 2 && activity?.active === false && activity.phase === "complete";
+    });
     expect(await readFile(join(workspace, "src", "value.txt"), "utf8")).toBe("changed");
 
     const sessions = await request<{ sessions: Array<{ id: string; activity?: { active: boolean; toolCount: number; phase: string } }> }>("/api/sessions");

@@ -33,6 +33,10 @@
 | Linux x64/arm64 | AppImage и `.deb` |
 | Arch Linux x64 | `.pkg.tar.zst` для `pacman` |
 
+Для Linux и Arch: [`sudo` нужен только для установки, а запуск — обычной
+учётной записью](docs/linux-launch.md). Не используйте `sudo kyrei` и не
+добавляйте `--no-sandbox`.
+
 Каждый релиз содержит `SHA256SUMS.txt`. Пока проект не получил сертификаты
 Microsoft и Apple, Windows- и macOS-сборки публикуются без доверенной подписи и
 нотаризации, поэтому ОС может показать предупреждение.

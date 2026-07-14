@@ -1,5 +1,12 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
+const desktopPlatform = (() => {
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "darwin") return "macos";
+  if (process.platform === "linux") return "linux";
+  return "unknown";
+})();
+
 const CHANNELS = Object.freeze({
   workspaceChoose: "kyrei:workspace:choose",
   workspaceValidate: "kyrei:workspace:validate",
@@ -27,6 +34,7 @@ const dispatchTerminalEvent = (_event, value) => {
 // The renderer talks to the local gateway over HTTP/SSE directly. The bridge
 // exposes only the sandboxed OS file-path resolver used by native file picking.
 contextBridge.exposeInMainWorld("kyrei", {
+  platform: desktopPlatform,
   // webUtils.getPathForFile replaces the removed File.path — the sandboxed way
   // to turn a <input type=file> / drop File into its absolute OS path.
   getPathForFile: (file) => {
