@@ -9,6 +9,7 @@ import { startGateway } from "../core/gateway.js";
 let dataDir = "";
 let workspace = "";
 let server: { port: number; token: string; close(): Promise<void> };
+const GATEWAY_HOOK_TIMEOUT_MS = 30_000;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`http://127.0.0.1:${server.port}${path}`, {
@@ -87,12 +88,12 @@ beforeEach(async () => {
     method: "PUT",
     body: JSON.stringify({ apiKey: "checkpoint-test-key" }),
   });
-});
+}, GATEWAY_HOOK_TIMEOUT_MS);
 
 afterEach(async () => {
   await server.close();
   await rm(dataDir, { recursive: true, force: true });
-});
+}, GATEWAY_HOOK_TIMEOUT_MS);
 
 describe("gateway turn checkpoints", () => {
   it("never treats a nested session action as the session resource", async () => {
