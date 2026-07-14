@@ -10,6 +10,21 @@ export interface ReasoningPart {
   text: string;
 }
 
+export interface ApprovalPart {
+  type: "approval";
+  approvalId: string;
+  toolCallId: string;
+  name: string;
+  args?: unknown;
+  reason: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  createdAt?: string;
+  expiresAt?: string;
+  resolvedAt?: string;
+  decisionReason?: string;
+  consumedAt?: string;
+}
+
 export interface ToolPart {
   type: "tool";
   toolCallId: string;
@@ -21,12 +36,13 @@ export interface ToolPart {
   snapshotId?: string;
   error?: string;
   running: boolean;
+  awaitingApproval?: boolean;
   durationS?: number;
   /** Live progress text streamed while the tool runs (tool.progress). */
   progress?: string;
 }
 
-export type MessagePart = TextPart | ReasoningPart | ToolPart;
+export type MessagePart = TextPart | ReasoningPart | ToolPart | ApprovalPart;
 
 export interface ChatMessage {
   id: string;
@@ -51,7 +67,7 @@ export interface SessionInfo {
   /** Live or most recent runtime activity for this session. */
   activity?: {
     active: boolean;
-    phase: "thinking" | "reasoning" | "tool" | "recovering" | "responding" | "complete" | "failed" | "interrupted";
+    phase: "thinking" | "reasoning" | "tool" | "recovering" | "responding" | "awaiting_approval" | "complete" | "failed" | "interrupted";
     startedAt: number;
     updatedAt: number;
     completedAt?: number;
@@ -611,6 +627,10 @@ export interface GatewayEvent {
     code?: string;
     text?: string;
     tool_call_id?: string;
+    approval_id?: string;
+    approved?: boolean;
+    consumed?: boolean;
+    reason?: string;
     name?: string;
     args?: unknown;
     result?: string;

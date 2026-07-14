@@ -246,7 +246,7 @@ export function TerminalActivity({ ownerId = "workspace", workspace }: TerminalA
             <span>{t("shell.terminal.openFirst")}</span>
           </button>
         ) : (
-          <pre className="m-0 whitespace-pre-wrap break-words font-inherit text-secondary">
+          <pre className="m-0 min-w-max whitespace-pre font-inherit text-secondary">
             {active.output.map((chunk, index) => (
               <span key={`${index}-${chunk.stream}`} className={chunk.stream === "stderr" ? "text-danger" : undefined}>{chunk.text}</span>
             ))}
@@ -257,7 +257,7 @@ export function TerminalActivity({ ownerId = "workspace", workspace }: TerminalA
             )}
           </pre>
         )}
-        {error && <div className="mt-2 whitespace-pre-wrap text-danger">{error}</div>}
+        {error && <pre className="m-0 mt-2 min-w-max whitespace-pre font-inherit text-danger">{error}</pre>}
       </div>
 
       {active?.kind === "manual" && (

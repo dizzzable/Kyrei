@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, ShieldAlert } from "lucide-react";
 import type { ToolPart } from "@/lib/types";
 import { buildToolView } from "@/lib/tool-view";
 import { DisclosureRow } from "@/components/ui";
@@ -8,8 +8,9 @@ import { DiffView } from "./chat/DiffView";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
 
-function StatusGlyph({ status }: { status: "running" | "success" | "error" }) {
+function StatusGlyph({ status }: { status: "running" | "success" | "error" | "approval" }) {
   if (status === "running") return <Loader2 size={13} className="animate-spin text-primary" />;
+  if (status === "approval") return <ShieldAlert size={13} className="text-primary" />;
   if (status === "error") return <AlertCircle size={13} className="text-danger" />;
   return <CheckCircle2 size={13} className="text-success/80" />;
 }
@@ -33,7 +34,9 @@ export function ToolRow({ part }: { part: ToolPart }) {
       <div className={cn(open && "border-b border-border-soft px-2 py-1")}>
         <DisclosureRow open={open} onToggle={expandable ? () => setOpen((o) => !o) : undefined}>
           <span className="grid size-3.5 place-items-center">
-            {view.status === "success" ? (
+            {part.awaitingApproval ? (
+              <StatusGlyph status="approval" />
+            ) : view.status === "success" ? (
               <ToolIcon name={view.icon} className="text-muted" />
             ) : (
               <StatusGlyph status={view.status} />

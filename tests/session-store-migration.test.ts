@@ -15,7 +15,7 @@ describe("session store localization migration", () => {
       messages: { used: [{ role: "user", content: "Keep the explicit title" }] },
     });
 
-    expect(migrated.schemaVersion).toBe(5);
+    expect(migrated.schemaVersion).toBe(6);
     expect(migrated.sessions).toEqual([
       { id: "empty-ru", title: "" },
       { id: "empty-en", title: "" },
@@ -107,5 +107,94 @@ describe("session store localization migration", () => {
       "msg-assistant-0002",
     ]);
     expect(store.rollbackRewind(plan)).toBe(false);
+  });
+
+  it("persists one-shot approval decisions and rejects a consumed replay", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    store.upsertSession({ id: "session", title: "Approval" });
+    store.appendMessage("session", {
+      id: "msg-assistant-approval",
+      role: "assistant",
+      content: "",
+      at: "2026-07-14T10:00:00.000Z",
+      parts: [{
+        type: "approval",
+        approvalId: "approval-12345678",
+        toolCallId: "call-1",
+        name: "run_command",
+        args: { command: "npm test" },
+        reason: "permission_rule_requires_confirmation",
+        status: "pending",
+      }],
+      modelMessages: [{
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "call-1", toolName: "run_command", input: { command: "npm test" } },
+          { type: "tool-approval-request", approvalId: "approval-12345678", toolCallId: "call-1", signature: "signed" },
+        ],
+      }],
+      approvalModelParams: {
+        effort: "high",
+        contextWindowOverride: 96_000,
+      },
+    });
+
+    const resolved = store.resolveApproval("session", "approval-12345678", {
+      approved: true,
+      reason: "Approved for this run",
+      now: "2026-07-14T10:01:00.000Z",
+    });
+    expect(resolved.approval).toMatchObject({ status: "approved" });
+    expect(resolved.approval.consumedAt).toBeUndefined();
+    expect(resolved.ready).toBe(true);
+    expect(resolved.modelParams).toEqual({ effort: "high", contextWindowOverride: 96_000 });
+
+    const consumed = store.consumeApproval(
+      "session",
+      "approval-12345678",
+      "2026-07-14T10:01:01.000Z",
+    );
+    expect(consumed).toMatchObject({ status: "approved", consumedAt: "2026-07-14T10:01:01.000Z" });
+    expect(() => store.resolveApproval("session", "approval-12345678", {
+      approved: true,
+      now: "2026-07-14T10:02:00.000Z",
+    })).toThrowError("approval_already_consumed");
+  });
+
+  it("fails an expired approval closed and keeps the session resumable", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    store.upsertSession({ id: "session", title: "Expired approval" });
+    store.appendMessage("session", {
+      id: "msg-assistant-expired",
+      role: "assistant",
+      content: "",
+      at: "2026-07-14T10:00:00.000Z",
+      parts: [{
+        type: "approval",
+        approvalId: "approval-expired-1",
+        toolCallId: "call-expired-1",
+        name: "run_command",
+        status: "pending",
+        expiresAt: "2026-07-14T10:01:00.000Z",
+      }],
+    });
+
+    const resolved = store.resolveApproval("session", "approval-expired-1", {
+      approved: true,
+      now: "2026-07-14T10:02:00.000Z",
+    });
+
+    expect(resolved).toMatchObject({
+      ready: true,
+      approval: {
+        status: "expired",
+        decisionReason: "approval_expired",
+        consumedAt: expect.any(String),
+      },
+    });
+    expect(store.hasUnconsumedApprovals("session")).toBe(false);
+    expect(store.consumeApproval("session", "approval-expired-1", "2026-07-14T10:02:01.000Z"))
+      .toMatchObject({ status: "expired", consumedAt: "2026-07-14T10:02:00.000Z" });
+    expect(store.hasUnconsumedApprovals("session")).toBe(false);
   });
 });

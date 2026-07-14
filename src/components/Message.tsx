@@ -7,6 +7,7 @@ import { useUiSettings } from "@/store/settings";
 import { Markdown } from "./Markdown";
 import { ToolRow } from "./ToolRow";
 import { ThinkingDisclosure } from "./chat/ThinkingDisclosure";
+import { ApprovalCard } from "./chat/ApprovalCard";
 import { useI18n } from "@/i18n";
 
 function CopyAction({ getText }: { getText: () => string }) {
@@ -27,7 +28,15 @@ function CopyAction({ getText }: { getText: () => string }) {
   );
 }
 
-export const Message = memo(function Message({ message, onRewind }: { message: ChatMessage; onRewind?: (messageId: string) => void }) {
+export const Message = memo(function Message({
+  message,
+  onRewind,
+  onApprovalDecision,
+}: {
+  message: ChatMessage;
+  onRewind?: (messageId: string) => void;
+  onApprovalDecision?: (approvalId: string, approved: boolean) => Promise<void> | void;
+}) {
   const { showReasoning } = useUiSettings();
   const { t } = useI18n();
 
@@ -60,6 +69,7 @@ export const Message = memo(function Message({ message, onRewind }: { message: C
     <div className="assistant-message group min-w-0 pl-4">
       {message.parts.map((part, i) => {
         if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
+        if (part.type === "approval") return <ApprovalCard key={part.approvalId || i} part={part} onDecision={onApprovalDecision} />;
         if (part.type === "reasoning" && showReasoning)
           return <ThinkingDisclosure key={i} text={part.text} pending={message.pending} />;
         if (part.type === "reasoning") return null;

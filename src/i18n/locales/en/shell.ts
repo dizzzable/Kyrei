@@ -17,6 +17,7 @@ export const enShell = {
   "shell.session.phase.tool": "Using a tool",
   "shell.session.phase.recovering": "Recovering",
   "shell.session.phase.responding": "Responding",
+  "shell.session.phase.awaiting_approval": "Waiting for approval",
   "shell.session.phase.complete": "Complete",
   "shell.session.phase.failed": "Failed",
   "shell.session.phase.interrupted": "Interrupted",
