@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +34,7 @@ describe("desktop IPC", () => {
     roots.push(root);
     const workspace = join(root, "project");
     await mkdir(workspace);
+    const canonicalWorkspace = await realpath(workspace);
     const ipcMain = new FakeIpcMain();
     const manager = {
       onEvent: () => () => {},
@@ -58,7 +59,7 @@ describe("desktop IPC", () => {
     const choose = ipcMain.handlers.get(DESKTOP_CHANNELS.workspaceChoose)!;
     const validate = ipcMain.handlers.get(DESKTOP_CHANNELS.workspaceValidate)!;
 
-    await expect(choose({ sender }, "ru")).resolves.toMatchObject({ canceled: false, path: workspace });
+    await expect(choose({ sender }, "ru")).resolves.toMatchObject({ canceled: false, path: canonicalWorkspace });
     expect(showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({
       title: "Открыть рабочую папку",
       buttonLabel: "Открыть",
