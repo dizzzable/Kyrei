@@ -47,14 +47,14 @@
     "dist:arch": "npm run package:prepare && electron-builder --linux pacman --x64"
   },
   "dependencies": {
-    "@ai-sdk/amazon-bedrock": "5.0.17",
-    "@ai-sdk/anthropic": "4.0.12",
-    "@ai-sdk/google": "4.0.12",
-    "@ai-sdk/google-vertex": "5.0.16",
-    "@ai-sdk/openai": "4.0.11",
-    "@ai-sdk/openai-compatible": "3.0.7",
+    "@ai-sdk/amazon-bedrock": "5.0.20",
+    "@ai-sdk/anthropic": "4.0.14",
+    "@ai-sdk/google": "4.0.14",
+    "@ai-sdk/google-vertex": "5.0.18",
+    "@ai-sdk/openai": "4.0.13",
+    "@ai-sdk/openai-compatible": "3.0.9",
     "@vscode/ripgrep": "^1.18.0",
-    "ai": "7.0.22",
+    "ai": "7.0.26",
     "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "fast-glob": "^3.3.3",
@@ -66,7 +66,7 @@
     "remark-math": "^6.0.0",
     "sqlite-vec": "^0.1.9",
     "unist-util-visit-parents": "^6.0.2",
-    "zod": "3.25.76"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
