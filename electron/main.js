@@ -5,6 +5,10 @@ import { startGateway } from "../core/gateway.js";
 import { registerDesktopIpc } from "./desktop-ipc.js";
 import { installDesktopViewportGuard } from "./desktop-viewport-guard.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
+import {
+  createWindowsDpapiSecretsCodec,
+  createWindowsProtectedSecretsCodec,
+} from "./windows-dpapi-secrets.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const appIcon = join(here, "..", "assets", "icon.png");
@@ -41,17 +45,44 @@ async function openPath(path) {
 
 async function createSecretsCodec() {
   if (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text") return undefined;
+  let safeStorageCodec;
   if (await safeStorage.isAsyncEncryptionAvailable()) {
-    return {
+    const codec = {
       encode: async (value) => (await safeStorage.encryptStringAsync(value)).toString("base64"),
       decode: async (value) => (await safeStorage.decryptStringAsync(Buffer.from(value, "base64"))).result,
     };
+    try {
+      const probe = "kyrei-safe-storage-probe";
+      if (await codec.decode(await codec.encode(probe)) === probe) safeStorageCodec = codec;
+    } catch {
+      // On Windows the CurrentUser DPAPI fallback below preserves encrypted
+      // storage even if Electron's wrapper is temporarily unavailable.
+    }
   }
-  if (!safeStorage.isEncryptionAvailable()) return undefined;
-  return {
-    encode: (value) => safeStorage.encryptString(value).toString("base64"),
-    decode: (value) => safeStorage.decryptString(Buffer.from(value, "base64")),
-  };
+  if (!safeStorageCodec && safeStorage.isEncryptionAvailable()) {
+    const codec = {
+      encode: (value) => safeStorage.encryptString(value).toString("base64"),
+      decode: (value) => safeStorage.decryptString(Buffer.from(value, "base64")),
+    };
+    try {
+      const probe = "kyrei-safe-storage-probe";
+      if (await codec.decode(await codec.encode(probe)) === probe) safeStorageCodec = codec;
+    } catch {
+      // Fall through to Windows DPAPI when Electron's probe fails.
+    }
+  }
+  if (process.platform === "win32") {
+    let dpapiCodec;
+    try {
+      dpapiCodec = await createWindowsDpapiSecretsCodec();
+    } catch (error) {
+      console.warn("[kyrei] Windows protected credential storage is unavailable:", error?.code ?? "windows_dpapi_unavailable");
+    }
+    if (safeStorageCodec || dpapiCodec) {
+      return createWindowsProtectedSecretsCodec({ safeStorageCodec, dpapiCodec });
+    }
+  }
+  return safeStorageCodec;
 }
 
 async function createWindow(port, gatewayToken) {
