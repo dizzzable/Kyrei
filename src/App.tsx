@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Code2, FolderCode, Sparkles, TerminalSquare } from "lucide-react";
 
 import { CommandPalette } from "@/components/CommandPalette";
 import { Composer } from "@/components/Composer";
@@ -696,7 +695,6 @@ export function App() {
     setConfig({ ...config, engine: nextEngine });
     gateway.setConfig({ engine: nextEngine }).then(setConfig).catch(() => setConfig(config));
   };
-  const empty = messages.length === 0;
   const developerResizeSide = preferences.swapped ? "left" : "right";
   const activityResizeSide = preferences.swapped ? "right" : "left";
 
@@ -754,51 +752,20 @@ export function App() {
 
   const conversation = (
     <main className="conversation-shell flex h-full min-w-0 flex-1 flex-col">
-      <div ref={scrollRef} className={`conversation-scroll min-h-0 flex-1 ${empty ? "is-empty overflow-hidden" : "overflow-y-auto"}`}>
-        <div className={`mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4 ${empty ? "h-full" : ""}`}>
+      <div ref={scrollRef} className="conversation-scroll min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4">
           {startupError && <div className="mb-4 rounded-md border border-danger/35 bg-danger/8 px-3 py-2 text-[11px] text-danger">{startupError}</div>}
-          {empty ? (
-            <div className="empty-state mx-auto flex h-full min-h-0 max-w-[43rem] flex-col justify-center pb-[3vh]">
-              <div className="mb-6 flex items-center gap-3">
-                <div className="kyrei-mark kyrei-mark-lg" aria-hidden><span>K</span></div>
-                <div>
-                  <div className="eyebrow">{t("shell.empty.eyebrow")}</div>
-                  <div className="mt-1 text-[12px] text-secondary">{t("shell.empty.subtitle")}</div>
-                </div>
+          <div className="space-y-7 pb-4">
+            {messages.map((message) => (
+              <div key={message.id} className="msg-in">
+                <Message
+                  message={message}
+                  onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
+                  onApprovalDecision={message.role === "assistant" && !streaming && !rewinding ? respondToApproval : undefined}
+                />
               </div>
-              <h1 className="max-w-[34rem] text-[clamp(2rem,3.4vw,3rem)] font-medium leading-[1.04] tracking-[-0.045em] text-foreground">
-                {t("shell.empty.titlePrimary")}<br /><span className="text-muted">{t("shell.empty.titleSecondary")}</span>
-              </h1>
-              <p className="mt-5 max-w-lg text-[13px] leading-6 text-secondary">{t("shell.empty.description")}</p>
-              <div className="mt-7 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
-                <StarterPrompt icon={<Code2 size={15} />} title={t("shell.empty.exploreTitle")} text={t("shell.empty.explorePrompt")} onClick={send} />
-                <StarterPrompt icon={<Sparkles size={15} />} title={t("shell.empty.designTitle")} text={t("shell.empty.designPrompt")} onClick={send} />
-                <StarterPrompt icon={<TerminalSquare size={15} />} title={t("shell.empty.debugTitle")} text={t("shell.empty.debugPrompt")} onClick={send} />
-              </div>
-              <div className="mt-5 flex flex-wrap items-center gap-3 text-[10.5px] text-muted">
-                <span className="inline-flex items-center gap-1.5"><FolderCode size={12} aria-hidden />{config?.workspace ? t("shell.empty.workspaceConnected") : t("shell.empty.workspaceMissing")}</span>
-                <span className="h-3 w-px bg-border-soft" aria-hidden />
-                <span>{t("shell.empty.slashHint")}</span>
-              </div>
-              {config && !config.hasKey && (
-                <button onClick={() => openSettings("providers")} className="primary-action mt-6 flex w-fit items-center gap-2 px-3.5 py-2 text-[11px] font-medium">
-                  {t("shell.empty.connectModel")} <ArrowRight size={13} aria-hidden />
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-7 pb-4">
-              {messages.map((message) => (
-                <div key={message.id} className="msg-in">
-                  <Message
-                    message={message}
-                    onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
-                    onApprovalDecision={message.role === "assistant" && !streaming && !rewinding ? respondToApproval : undefined}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
+            ))}
+          </div>
         </div>
       </div>
       <Composer
@@ -915,17 +882,4 @@ function useMediaQuery(query: string): boolean {
   }, [query]);
 
   return matches;
-}
-
-function StarterPrompt({ icon, title, text, onClick }: { icon: React.ReactNode; title: string; text: string; onClick: (text: string) => void }) {
-  return (
-    <button onClick={() => onClick(text)} className="starter-card group text-left">
-      <span className="flex items-center justify-between text-secondary">
-        <span className="starter-icon">{icon}</span>
-        <ArrowRight size={13} className="opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100" aria-hidden />
-      </span>
-      <span className="mt-5 block text-[11.5px] font-medium text-foreground">{title}</span>
-      <span className="mt-1 block text-[10.5px] leading-[1.5] text-muted">{text}</span>
-    </button>
-  );
 }

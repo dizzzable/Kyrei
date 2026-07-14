@@ -31,4 +31,14 @@ describe("translation catalog", () => {
 
     expectTypeOf<"common.cancel">().toMatchTypeOf<TranslationKey>();
   });
+
+  it("keeps the protected-storage failure actionable in both locales", () => {
+    expect(CATALOG.en["settings.providers.error.secretStorageTitle"]).toContain("securely save");
+    expect(CATALOG.en["settings.providers.error.secretStorageStep2"]).toContain("return to Providers");
+    expect(CATALOG.en["settings.providers.error.secretStorageNotSaved"]).toContain("plain text");
+
+    expect(CATALOG.ru["settings.providers.error.secretStorageTitle"]).toContain("безопасно сохранить");
+    expect(CATALOG.ru["settings.providers.error.secretStorageStep2"]).toContain("вернитесь в «Провайдеры»");
+    expect(CATALOG.ru["settings.providers.error.secretStorageNotSaved"]).toContain("открытым текстом");
+  });
 });

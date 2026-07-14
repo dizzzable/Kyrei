@@ -219,11 +219,44 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 .app-shell { background: var(--k-bg); }
 .titlebar, .statusbar { background: var(--k-surface); }
 .sidebar-panel { background: color-mix(in srgb, var(--k-surface) 96%, var(--k-bg)); }
-.conversation-shell { position: relative; background: var(--k-bg); }
-.conversation-shell::before { content: ""; pointer-events: none; position: absolute; inset: 0; opacity: 0.55; background: linear-gradient(180deg, color-mix(in srgb, var(--k-surface) 42%, transparent), transparent 10rem); }
+.conversation-shell {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: #050608;
+}
+.conversation-shell::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: -1.25rem;
+  z-index: -2;
+  background: #050608 url("../assets/chat-peonies.webp") center / cover no-repeat;
+  filter: blur(0.25rem) saturate(0.68) brightness(0.94) contrast(1.04);
+  opacity: 0.92;
+  transform: scale(1.035);
+}
+.conversation-shell::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 50% 12%, color-mix(in srgb, var(--k-primary) 3%, transparent), transparent 46%),
+    linear-gradient(180deg, color-mix(in srgb, var(--k-bg) 22%, transparent), color-mix(in srgb, var(--k-bg) 38%, transparent) 62%, color-mix(in srgb, var(--k-bg) 52%, transparent));
+  box-shadow: inset 0 0 5rem color-mix(in srgb, #000 14%, transparent);
+}
 .conversation-scroll, .composer-area { position: relative; z-index: 1; }
-.composer-area { background: linear-gradient(to top, var(--k-bg) 50%, transparent); }
-.composer-card { background: var(--k-surface); box-shadow: inset 0 1px color-mix(in srgb, #fff 3%, transparent); }
+.conversation-scroll {
+  background: color-mix(in srgb, var(--k-bg) 20%, transparent);
+  backdrop-filter: blur(0.625rem) saturate(0.88);
+}
+.composer-area {
+  background: linear-gradient(to top, color-mix(in srgb, var(--k-bg) 90%, transparent) 18%, color-mix(in srgb, var(--k-bg) 60%, transparent) 74%, transparent);
+  backdrop-filter: blur(0.875rem) saturate(0.9);
+}
+.composer-card { background: color-mix(in srgb, var(--k-surface) 82%, transparent); backdrop-filter: blur(1.5rem) saturate(1.08); box-shadow: inset 0 1px color-mix(in srgb, #fff 3%, transparent); }
 .composer-card:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--k-primary) 14%, transparent); }
 .composer-tool, .shell-button { border-radius: 7px; }
 .send-button { box-shadow: none; }
@@ -236,15 +269,22 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 .online-pill { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid var(--k-border-soft); border-radius: 999px; padding: 0.15rem 0.4rem; font: 500 8px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--k-muted); }
 .online-pill span { width: 5px; height: 5px; border-radius: 50%; background: var(--k-success); box-shadow: 0 0 7px var(--k-success); }
 .model-status { border: 1px solid var(--k-border-soft); border-radius: 999px; padding: 0.2rem 0.5rem; background: color-mix(in srgb, var(--k-bg) 45%, transparent); }
-.kyrei-mark { position: relative; display: grid; flex: none; place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--k-primary) 26%, var(--k-border)); border-radius: 7px; background: color-mix(in srgb, var(--k-primary) 9%, var(--k-surface)); color: var(--k-primary); box-shadow: none; font-family: var(--font-mono); font-weight: 700; }
-.kyrei-mark::after { content: ""; position: absolute; width: 140%; height: 1px; background: currentColor; opacity: 0.45; transform: rotate(-48deg); }
-.kyrei-mark-sm { width: 21px; height: 21px; border-radius: 6px; font-size: 10px; }
-.kyrei-mark-md { width: 30px; height: 30px; font-size: 12px; }
-.kyrei-mark-lg { width: 44px; height: 44px; border-radius: 12px; font-size: 17px; }
-.eyebrow { font: 600 9px/1 var(--font-mono); text-transform: uppercase; letter-spacing: 0.16em; color: var(--k-primary); }
-.starter-card { min-height: 7.75rem; border: 1px solid var(--k-border-soft); border-radius: 8px; padding: 0.85rem; background: color-mix(in srgb, var(--k-surface) 68%, transparent); transition: border-color 140ms ease, background 140ms ease; }
-.starter-card:hover { border-color: color-mix(in srgb, var(--k-primary) 26%, var(--k-border)); background: var(--k-surface); }
-.starter-icon { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border-radius: 7px; color: var(--k-primary); background: color-mix(in srgb, var(--k-primary) 10%, transparent); }
+.kyrei-mark { position: relative; isolation: isolate; display: grid; flex: none; place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--k-primary) 72%, var(--k-border)); background: var(--k-primary); color: var(--k-bg); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--k-foreground) 24%, transparent), 0 7px 18px color-mix(in srgb, #000 24%, transparent); }
+.kyrei-mark::before { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(145deg, color-mix(in srgb, #fff 22%, transparent), transparent 48%, color-mix(in srgb, #000 13%, transparent)); pointer-events: none; }
+.kyrei-mark > svg { width: 72%; height: 72%; overflow: visible; }
+.kyrei-mark-sm { width: 21px; height: 21px; border-radius: 6px; }
+.kyrei-mark-md { width: 30px; height: 30px; border-radius: 8px; }
+.kyrei-mark-lg { width: 44px; height: 44px; border-radius: 12px; }
+.kyrei-mark-xl { width: 48px; height: 48px; border-radius: 13px; }
+[data-theme="light"] .conversation-shell::before {
+  filter: blur(0.25rem) saturate(0.42) brightness(1.16);
+  opacity: 0.3;
+}
+[data-theme="light"] .conversation-shell::after {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--k-bg) 68%, transparent), color-mix(in srgb, var(--k-bg) 82%, transparent));
+  box-shadow: inset 0 0 5rem color-mix(in srgb, var(--k-bg) 34%, transparent);
+}
+[data-theme="light"] .conversation-scroll { background: color-mix(in srgb, var(--k-bg) 66%, transparent); }
 
 /* Desktop shell: Hermes information architecture on Linear's surface ladder. */
 .shell-titlebar {
@@ -406,8 +446,6 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 }
 
 @media (max-width: 760px) {
-  .empty-state { min-height: auto; padding-top: 12vh; padding-bottom: 2rem; }
-  .conversation-shell::before { background-size: 32px 32px; }
   .model-status { display: none; }
   .composer-card {
     grid-template-columns: minmax(0, 1fr) repeat(5, max-content);
@@ -416,17 +454,6 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
   .composer-card > textarea {
     grid-column: 1 / -1;
     grid-row: 1;
-  }
-}
-
-@media (max-height: 700px) {
-  .conversation-scroll.is-empty { overflow-y: auto; }
-  .conversation-scroll.is-empty .empty-state {
-    height: auto;
-    min-height: min-content;
-    justify-content: flex-start;
-    padding-top: 24px;
-    padding-bottom: 24px;
   }
 }
 
