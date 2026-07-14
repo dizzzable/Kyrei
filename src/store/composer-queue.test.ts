@@ -46,6 +46,17 @@ describe("composer-queue", () => {
       attachments[0]!.label = "mutated";
       expect(entry.attachments[0]!.label).toBe("a.ts");
     });
+
+    it("keeps explicit Skill selections with a queued prompt", () => {
+      const entry = enqueueQueuedPrompt(SID, {
+        text: "review this",
+        attachments: [],
+        skillIds: ["skill_0123456789abcdef01234567", "skill_0123456789abcdef01234567"],
+      })!;
+
+      expect(entry.skillIds).toEqual(["skill_0123456789abcdef01234567"]);
+      expect(dequeueQueuedPrompt(SID)?.skillIds).toEqual(["skill_0123456789abcdef01234567"]);
+    });
   });
 
   describe("dequeue", () => {

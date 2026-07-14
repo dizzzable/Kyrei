@@ -36,8 +36,19 @@ export interface SubagentEventMetadata {
   confidence?: number;
   cost_usd?: number;
   evidence?: string[];
+  /** Source receipts minted only by successful Team web_fetch calls. */
+  sources?: Array<{
+    id: string;
+    requested_url: string;
+    final_url: string;
+    title: string;
+    content_digest: string;
+    fetched_at: string;
+  }>;
   files_read?: string[];
   files_written?: string[];
+  /** Child finished operationally but did not produce a trustworthy conclusion. */
+  incomplete?: boolean;
   input_tokens?: number;
   model?: string;
   output_tokens?: number;
@@ -81,7 +92,7 @@ export type SubagentEvent =
     };
 
 /** Terminal reason for a turn (ACP-like stopReason, see requirements §2.3). */
-export type TurnStatus = "complete" | "interrupted" | "error" | "max_steps";
+export type TurnStatus = "complete" | "interrupted" | "error" | "max_steps" | "awaiting_approval";
 
 /** Events emitted by the engine and relayed by the gateway over SSE. */
 export type KyreiEvent =
@@ -122,6 +133,20 @@ export type KyreiEvent =
       type: "approval.request";
       payload: { approval_id: string; tool_call_id: string; name: string; args: unknown; reason: string };
     }
+  | {
+      type: "approval.resolved";
+      payload: {
+        approval_id: string;
+        tool_call_id: string;
+        approved: boolean;
+        reason?: string;
+        consumed?: boolean;
+      };
+    }
+  | {
+      type: "approval.consumed";
+      payload: { approval_id: string; tool_call_id: string };
+    }
   | { type: "message.complete"; payload: { text: string; status: TurnStatus; usage?: Usage } }
   | { type: "error"; payload: { code?: string; message?: string } };
 
@@ -129,6 +154,20 @@ export type KyreiEvent =
 export type MessagePart =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
+  | {
+      type: "approval";
+      approvalId: string;
+      toolCallId: string;
+      name: string;
+      args?: unknown;
+      reason: string;
+      status: "pending" | "approved" | "denied" | "expired";
+      createdAt?: string;
+      expiresAt?: string;
+      resolvedAt?: string;
+      decisionReason?: string;
+      consumedAt?: string;
+    }
   | {
       type: "tool";
       toolCallId: string;
@@ -139,6 +178,7 @@ export type MessagePart =
       snapshotId?: string;
       error?: string;
       running: boolean;
+      awaitingApproval?: boolean;
       durationS?: number;
     };
 
@@ -167,6 +207,8 @@ export interface DelegationConfig {
   maxParallel: number;
   /** Maximum model/tool loop steps available to each read-only child. */
   maxSteps: number;
+  /** Hard wall-clock limit for one read-only child, including every model/tool step. */
+  timeoutMs: number;
 }
 
 /** User-authored behaviour profile. It is advisory and always subordinate to Kyrei policy. */
@@ -220,6 +262,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     maxTasks: 3,
     maxParallel: 3,
     maxSteps: 8,
+    timeoutMs: 90_000,
   },
   memory: {
     gbrain: {
@@ -452,6 +495,10 @@ export interface RunKyreiChatOpts {
   auditLogPath?: string;
   /** Gateway-owned session correlation for local audit records. */
   sessionId?: string;
+  /** Gateway-owned HMAC key for native one-shot tool approval signatures. */
+  approvalSecret?: string;
+  /** Durable gateway barrier that must complete before an approved effect starts. */
+  onApprovalConsumed?: (approvalId: string, toolCallId: string) => void | Promise<void>;
   /** Optional internal desktop adapter; never accepted from renderer input. */
   commandRunner?: CommandRunnerPort;
   abortSignal?: AbortSignal;
@@ -460,6 +507,8 @@ export interface RunKyreiChatOpts {
   modelParams?: ModelParams;
   /** User-enabled Agent Skills, prevalidated and bounded by the local gateway. */
   skills?: RuntimeSkill[];
+  /** Skills explicitly selected for this user turn. They must be read before relevant task work. */
+  requiredSkillIds?: string[];
   /** Gateway-owned usage recorder; never supplied by the renderer. */
   onSkillUsed?: (id: string) => void | Promise<void>;
   /** Gateway-owned lazy reader; document contents never ride in runtime config. */
@@ -471,6 +520,8 @@ export interface RunKyreiChatResult {
   parts: MessagePart[];
   status: TurnStatus;
   attempts: ProviderAttemptOutcome[];
+  /** Private structured history required to resume signed tool approvals. */
+  responseMessages?: ModelMessage[];
   route?: {
     providerId: string;
     modelId: string;

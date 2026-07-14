@@ -17,7 +17,10 @@ const CAPABILITY_TO_TOOLS: Readonly<Record<AgentCapability, readonly string[]>> 
   web: ["web_search", "web_fetch"],
   "memory.read": ["brain_search", "brain_get", "brain_think", "brain_status"],
   "memory.write": [],
-  "skills.read": ["read_skill"],
+  // A skill is self-contained when it has only SKILL.md. Linked documents are
+  // optional, but when a selected skill exposes them the same read capability
+  // must allow progressive loading instead of leaving a dead instruction.
+  "skills.read": ["search_skills", "read_skill", "read_skill_document", "search_skill_documents"],
   delegate: [],
 };
 

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowUp, Square, Layers3, X, Maximize2, Minimize2, Mic, Plus, FileText, Folder, Image as ImageIcon, Clipboard, MessageSquareText, Volume2, VolumeX } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { ArrowUp, Square, Layers3, X, Maximize2, Minimize2, Mic, Plus, FileText, Folder, Image as ImageIcon, Clipboard, MessageSquareText, Volume2, VolumeX, Puzzle, Check } from "lucide-react";
 import { getSlashCommands, parseSlash, resolveSlashCommand } from "@/lib/slash-commands";
 import { gateway } from "@/lib/gateway";
 import {
@@ -11,6 +11,7 @@ import {
 import { useAtom } from "@/store/atom";
 import { setUiSetting, useUiSettings } from "@/store/settings";
 import { addSnippet, useSnippets } from "@/store/snippets";
+import { stashSessionDraft, takeSessionDraft } from "@/store/composer-draft";
 import { createRecognizer, isSpeechRecognitionSupported, isSpeechSynthesisSupported, type Recognizer } from "@/lib/speech";
 import { ModelPill } from "./composer/ModelPill";
 import {
@@ -27,17 +28,22 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
-import type { ProviderProfile } from "@/lib/types";
+import type { ProviderProfile, SkillInfo } from "@/lib/types";
+
+const MAX_SELECTED_SKILLS = 32;
 
 interface ComposerProps {
   streaming: boolean;
+  stopping?: boolean;
   disabled?: boolean;
   sessionId?: string | null;
   model: string;
   provider: string;
   providers?: readonly ProviderProfile[];
   hasWorkspace?: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, skillIds?: string[]) => void;
+  /** Team role skills are configured in Team settings to keep assignments explicit. */
+  skillsSelectable?: boolean;
   onStop: () => void;
   onCommand: (name: string, arg?: string) => void;
   onModelChange: (providerId: string, modelId: string) => void;
@@ -52,6 +58,7 @@ interface MentionState {
 
 export function Composer({
   streaming,
+  stopping = false,
   disabled,
   sessionId,
   model,
@@ -62,8 +69,9 @@ export function Composer({
   onStop,
   onCommand,
   onModelChange,
+  skillsSelectable = true,
 }: ComposerProps) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(() => takeSessionDraft(sessionId).text);
   const [sel, setSel] = useState(0);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -71,6 +79,8 @@ export function Composer({
   const { sendOnEnter, voiceInput, voiceLang, autoSpeak } = useUiSettings();
   const [listening, setListening] = useState(false);
   const [slashDismissed, setSlashDismissed] = useState(false);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const snippets = useSnippets(t);
   const recognizer = useRef<Recognizer | null>(null);
   const dictationBase = useRef("");
@@ -80,6 +90,19 @@ export function Composer({
   const history = useRef<string[]>([]);
   const browse = useRef<number | null>(null);
   const draining = useRef(false);
+  const activeDraftScope = useRef(sessionId);
+  const valueRef = useRef(value);
+  const busy = streaming || stopping;
+  const enabledSkills = useMemo(
+    () => skills.filter((skill) => skill.enabled).sort((left, right) => left.name.localeCompare(right.name)),
+    [skills],
+  );
+
+  const updateDraft = useCallback((text: string) => {
+    valueRef.current = text;
+    setValue(text);
+    stashSessionDraft(activeDraftScope.current, text, []);
+  }, []);
 
   const queues = useAtom($queuedPromptsBySession);
   const queued = sessionId ? queues[sessionId] ?? [] : [];
@@ -94,10 +117,34 @@ export function Composer({
 
   useEffect(() => { setSel(0); setSlashDismissed(false); }, [value]);
   useEffect(() => {
+    if (!skillsSelectable) setSelectedSkillIds([]);
+  }, [skillsSelectable]);
+  useEffect(() => {
+    let active = true;
+    void gateway.listSkills()
+      .then((result) => { if (active) setSkills(result.skills); })
+      .catch(() => { if (active) setSkills([]); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (activeDraftScope.current === sessionId) return;
+    stashSessionDraft(activeDraftScope.current, valueRef.current, []);
+    const restored = takeSessionDraft(sessionId).text;
+    activeDraftScope.current = sessionId;
+    valueRef.current = restored;
+    setValue(restored);
+    setExpanded(restored.includes("\n"));
+    setSelectedSkillIds([]);
+    browse.current = null;
+  }, [sessionId]);
+  useEffect(() => () => {
+    stashSessionDraft(activeDraftScope.current, valueRef.current, []);
+  }, []);
+  useEffect(() => {
     const restoreDraft = (event: Event) => {
       const detail = (event as CustomEvent<{ text?: unknown; focus?: boolean }>).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
-      setValue(text);
+      updateDraft(text);
       setExpanded(text.includes("\n"));
       browse.current = null;
       window.requestAnimationFrame(() => {
@@ -110,7 +157,7 @@ export function Composer({
     };
     window.addEventListener("kyrei:set-composer-draft", restoreDraft);
     return () => window.removeEventListener("kyrei:set-composer-draft", restoreDraft);
-  }, []);
+  }, [updateDraft]);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -121,12 +168,12 @@ export function Composer({
 
   // Auto-drain the queue one prompt at a time whenever the session goes idle.
   useEffect(() => {
-    if (streaming || !sessionId || queued.length === 0 || draining.current) return;
+    if (busy || !sessionId || queued.length === 0 || draining.current) return;
     draining.current = true;
     const head = dequeueQueuedPrompt(sessionId);
     draining.current = false;
-    if (head) onSend(head.text);
-  }, [streaming, sessionId, queued.length, onSend]);
+    if (head) onSend(head.text, head.skillIds);
+  }, [busy, sessionId, queued.length, onSend]);
 
   const submit = () => {
     const text = value.trim();
@@ -137,20 +184,27 @@ export function Composer({
       const command = resolveSlashCommand(name);
       if (command) {
         onCommand(command.id, arg || undefined);
-        setValue("");
+        updateDraft("");
         return;
       }
     }
-    if (streaming) {
+    if (busy) {
       // Busy → queue for the next turn instead of dropping the message.
-      if (sessionId) enqueueQueuedPrompt(sessionId, { text, attachments: [] });
-      setValue("");
+      if (sessionId) enqueueQueuedPrompt(sessionId, { text, attachments: [], skillIds: selectedSkillIds });
+      updateDraft("");
+      setSelectedSkillIds([]);
       return;
     }
     if (history.current[history.current.length - 1] !== text) history.current.push(text);
     browse.current = null;
-    onSend(text);
-    setValue("");
+    onSend(text, selectedSkillIds);
+    updateDraft("");
+    setSelectedSkillIds([]);
+  };
+  const toggleSkill = (id: string) => {
+    setSelectedSkillIds((current) => current.includes(id)
+      ? current.filter((candidate) => candidate !== id)
+      : current.length >= MAX_SELECTED_SKILLS ? current : [...current, id]);
   };
   const toggleDictation = () => {
     if (listening) {
@@ -164,9 +218,9 @@ export function Composer({
       onResult: (transcript, isFinal) => {
         if (isFinal) {
           dictationBase.current = (dictationBase.current + transcript).replace(/\s*$/, "") + " ";
-          setValue(dictationBase.current);
+          updateDraft(dictationBase.current);
         } else {
-          setValue(dictationBase.current + transcript);
+          updateDraft(dictationBase.current + transcript);
         }
       },
       onEnd: () => setListening(false),
@@ -188,7 +242,7 @@ export function Composer({
     if (!text) return;
     const base = value.replace(/\s*$/, "");
     const next = base ? `${base} ${text}` : text;
-    setValue(next);
+    updateDraft(next);
     requestAnimationFrame(() => {
       const el = ref.current;
       el?.focus();
@@ -236,11 +290,11 @@ export function Composer({
     const c = suggestions[index];
     if (!c) return;
     if (c.arg) {
-      setValue(`/${c.name} `);
+      updateDraft(`/${c.name} `);
       ref.current?.focus();
     } else {
       onCommand(c.name);
-      setValue("");
+      updateDraft("");
     }
   };
 
@@ -266,7 +320,7 @@ export function Composer({
     const caret = ref.current?.selectionStart ?? value.length;
     const ref2 = `@${kind}:${entry.path}${entry.dir ? "/" : ""} `;
     const next = value.slice(0, mention.start) + ref2 + value.slice(caret);
-    setValue(next);
+    updateDraft(next);
     setMention(null);
     ref.current?.focus();
   };
@@ -282,7 +336,7 @@ export function Composer({
     if (suggestions.length > 0) {
       if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => (s + 1) % suggestions.length); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); setSel((s) => (s - 1 + suggestions.length) % suggestions.length); return; }
-      if (e.key === "Tab") { e.preventDefault(); setValue(`/${suggestions[sel].name} `); return; }
+      if (e.key === "Tab") { e.preventDefault(); updateDraft(`/${suggestions[sel].name} `); return; }
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); pickSuggestion(sel); return; }
       if (e.key === "Escape") { e.preventDefault(); setSlashDismissed(true); return; }
     }
@@ -302,12 +356,12 @@ export function Composer({
       if (browse.current === null) { if (value.trim() !== "") return; browse.current = h.length; }
       browse.current = Math.max(0, browse.current - 1);
       e.preventDefault();
-      setValue(h[browse.current]);
+      updateDraft(h[browse.current]);
     } else if (e.key === "ArrowDown" && browse.current !== null) {
       e.preventDefault();
       browse.current += 1;
-      if (browse.current >= h.length) { browse.current = null; setValue(""); }
-      else setValue(h[browse.current]);
+      if (browse.current >= h.length) { browse.current = null; updateDraft(""); }
+      else updateDraft(h[browse.current]);
     }
   };
 
@@ -383,7 +437,7 @@ export function Composer({
             disabled={disabled}
             data-composer-input
             onChange={(e) => {
-              setValue(e.target.value);
+              updateDraft(e.target.value);
               browse.current = null;
               refreshMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
@@ -442,11 +496,72 @@ export function Composer({
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
                 <DropdownMenuSeparator />
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger className={dropdownMenuRow}>
+                    <Puzzle size={15} /> {t("chat.composer.skills.menu")}
+                    {selectedSkillIds.length > 0 && (
+                      <span className="ml-auto rounded bg-(--ui-row-active) px-1.5 py-0.5 text-[10px] tabular-nums text-secondary">
+                        {selectedSkillIds.length}
+                      </span>
+                    )}
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-72">
+                    {!skillsSelectable ? (
+                      <div className="px-2 py-1.5 text-[12px] leading-snug text-muted">
+                        {t("chat.composer.skills.teamManaged")}
+                      </div>
+                    ) : enabledSkills.length === 0 ? (
+                      <div className="px-2 py-1.5 text-[12px] leading-snug text-muted">
+                        {t("chat.composer.skills.empty")}
+                      </div>
+                    ) : (
+                      enabledSkills.map((skill) => {
+                        const selected = selectedSkillIds.includes(skill.id);
+                        return (
+                          <DropdownMenuItem
+                            key={skill.id}
+                            className={dropdownMenuRow}
+                            disabled={!selected && selectedSkillIds.length >= MAX_SELECTED_SKILLS}
+                            onSelect={(event) => { event.preventDefault(); toggleSkill(skill.id); }}
+                          >
+                            <Check size={14} className={cn("shrink-0", selected ? "opacity-100 text-primary" : "opacity-0")} />
+                            <span className="min-w-0 flex-1 truncate">{skill.name}</span>
+                            {skill.description && <span className="max-w-28 truncate text-[10px] text-muted">{skill.description}</span>}
+                          </DropdownMenuItem>
+                        );
+                      })
+                    )}
+                    {skillsSelectable && enabledSkills.length > 0 && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <div className="px-2 py-1.5 text-[11px] leading-snug text-muted">
+                          {t("chat.composer.skills.hint")}
+                        </div>
+                      </>
+                    )}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                {selectedSkillIds.length > 0 && (
+                  <DropdownMenuItem className={cn(dropdownMenuRow, "text-muted")} onSelect={() => setSelectedSkillIds([])}>
+                    <X size={14} /> {t("chat.composer.skills.clear")}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuSeparator />
                 <div className="px-2 py-1 text-[11px] leading-snug text-muted">
                   {t("chat.composer.contextHint")}
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
+            {selectedSkillIds.length > 0 && (
+              <button
+                onClick={() => setSelectedSkillIds([])}
+                className="flex h-7 items-center gap-1 rounded-md bg-(--ui-row-active) px-1.5 text-[11px] text-secondary transition-colors hover:text-foreground"
+                title={t("chat.composer.skills.clear")}
+                aria-label={t("chat.composer.skills.clear")}
+              >
+                <Puzzle size={13} /> <span className="tabular-nums">{selectedSkillIds.length}</span>
+              </button>
+            )}
             <ModelPill disabled={disabled} model={model} provider={provider} providers={providers} onModelChange={onModelChange} />
             <button
               onClick={() => setExpanded((v) => !v)}
@@ -489,7 +604,7 @@ export function Composer({
               </button>
             )}
             <div className="ml-auto">
-              {streaming ? (
+              {busy ? (
                 <div className="flex items-center gap-1">
                   {value.trim() && (
                     <button
@@ -503,9 +618,11 @@ export function Composer({
                   )}
                   <button
                     onClick={onStop}
+                    disabled={stopping}
                     className="grid size-8 place-items-center rounded-[8px] bg-danger text-white transition-colors hover:brightness-110"
-                    title={t("chat.composer.stop")}
-                    aria-label={t("chat.composer.stop")}
+                    title={stopping ? t("chat.composer.stopping") : t("chat.composer.stop")}
+                    aria-label={stopping ? t("chat.composer.stopping") : t("chat.composer.stop")}
+                    aria-busy={stopping}
                   >
                     <Square size={13} fill="currentColor" />
                   </button>

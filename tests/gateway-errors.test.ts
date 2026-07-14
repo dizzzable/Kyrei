@@ -12,6 +12,9 @@ describe("gateway error status contract", () => {
     ["pipeline_stage_active", 409],
     ["pipeline_runtime_unavailable", 409],
     ["pipeline_id_required", 400],
+    ["gbrain_command_unavailable", 503],
+    ["gbrain_initialization_unavailable", 409],
+    ["gbrain_initialization_failed", 502],
   ])("maps %s to %i", (code, status) => {
     expect(requestErrorStatus(new Error(code))).toBe(status);
   });

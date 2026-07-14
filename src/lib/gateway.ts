@@ -5,6 +5,8 @@ import type {
   CronRun,
   GatewayEvent,
   GatewayStatus,
+  GBrainInitializationResult,
+  GBrainRuntimeStatus,
   KiroCliConnectorStatus,
   KiroCliLoginInput,
   KiroCliLoginSnapshot,
@@ -127,6 +129,9 @@ export const gateway = {
   getStatus: () => json<GatewayStatus>("/api/status"),
 
   getConfig: () => json<AppConfig>("/api/config"),
+  getGBrainStatus: () => json<GBrainRuntimeStatus>("/api/memory/gbrain"),
+  initializeGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/initialize", { method: "POST" }),
+  installGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/install", { method: "POST" }),
   setConfig: (patch: Partial<{
     provider: string;
     apiKey: string;
@@ -371,10 +376,31 @@ export const gateway = {
       `/api/sessions/${encodeURIComponent(id)}/messages`,
     ).then(r => r.messages),
 
-  sendPrompt: (session: string, text: string, modelParams?: ModelParams, messageId?: string) =>
+  respondToApproval: (session: string, approvalId: string, approved: boolean, reason?: string) =>
+    json<{ status: "pending" | "streaming"; approval: import("./types").ApprovalPart }>(
+      `/api/sessions/${encodeURIComponent(session)}/approvals/${encodeURIComponent(approvalId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ approved, ...(reason ? { reason } : {}) }),
+      },
+    ),
+
+  sendPrompt: (
+    session: string,
+    text: string,
+    modelParams?: ModelParams,
+    messageId?: string,
+    skillIds?: string[],
+  ) =>
     json<{ status: string }>("/api/prompt", {
       method: "POST",
-      body: JSON.stringify({ session, text, ...(modelParams ? { modelParams } : {}), ...(messageId ? { messageId } : {}) }),
+      body: JSON.stringify({
+        session,
+        text,
+        ...(modelParams ? { modelParams } : {}),
+        ...(messageId ? { messageId } : {}),
+        ...(skillIds?.length ? { skillIds } : {}),
+      }),
     }),
   rewindSession: (session: string, messageId: string) =>
     json<{
@@ -388,7 +414,11 @@ export const gateway = {
       method: "POST",
       body: JSON.stringify({ messageId }),
     }),
-  cancel: (session: string) => json<{ ok: boolean }>("/api/cancel", { method: "POST", body: JSON.stringify({ session }) }),
+  cancel: (session: string) => json<{
+    ok: boolean;
+    status: "idle" | "interrupted" | "cancelled" | "timeout";
+    message_id?: string;
+  }>("/api/cancel", { method: "POST", body: JSON.stringify({ session }) }),
 
   listFiles: (path = "") =>
     json<{ root: string; path: string; entries: { name: string; path: string; dir: boolean }[] }>(

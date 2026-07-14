@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
-import { basename, dirname, join, resolve, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, relative } from "node:path";
 import { SessionStore, isSessionMessageId } from "./session-store.js";
 import { beginSnapshotRestore, SessionCheckpointError } from "./session-checkpoints.js";
 import { SkillsStore } from "./skills-store.js";
@@ -15,8 +15,10 @@ import { WorkspaceLeaseStore } from "./workspace-lease-store.js";
 import { observeWorkspace } from "./workspace-evidence.js";
 import { redactSensitiveText, redactSensitiveValue } from "./secret-redaction.js";
 import {
+  MAX_TEAM_PROFILE_SKILLS,
   TeamConfigError,
   normalizeOrchestration,
+  teamProfileSkillIds,
   validateOrchestrationInput,
 } from "./team-config.js";
 import {
@@ -66,6 +68,13 @@ import {
   validateProviderInput,
 } from "./provider-config.js";
 
+// A regular chat can expose many enabled skills, but a user-selected set is
+// intentionally bounded so one accidental multi-select cannot spend an entire
+// turn loading instructions before any useful work begins. Team profiles have
+// their own larger, role-partitioned capacity in team-config.js.
+const MAX_PROMPT_SKILLS = 32;
+const PROMPT_SKILL_ID_RE = /^skill_[a-f0-9]{24}$/;
+
 /**
  * Kyrei gateway — local HTTP server that the renderer talks to.
  *
@@ -107,20 +116,243 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+function internalModelMessages(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(message => {
+    if (!message || typeof message !== "object") return [];
+    if ((message.role !== "assistant" && message.role !== "tool") || !Array.isArray(message.content)) return [];
+    return [{ ...message, content: message.content.slice(0, 500) }];
+  }).slice(0, 500);
+}
+
+function publicStoredMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).map(message => {
+    const {
+      modelMessages: _privateModelMessages,
+      approvalModelParams: _privateApprovalModelParams,
+      ...publicMessage
+    } = message ?? {};
+    return publicMessage;
+  });
+}
+
+function appendTurnStreamPart(parts, type, text) {
+  if (typeof text !== "string" || !text) return parts;
+  const next = [...parts];
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    const part = next[index];
+    if (part?.type === type) {
+      next[index] = { ...part, text: `${part.text ?? ""}${text}` };
+      return next;
+    }
+    if (part?.type !== "text" && part?.type !== "reasoning") break;
+  }
+  next.push({ type, text });
+  return next;
+}
+
+function turnToolIndex(parts, payload) {
+  const toolCallId = typeof payload?.tool_call_id === "string" ? payload.tool_call_id : "";
+  if (toolCallId) return parts.findIndex(part => part?.type === "tool" && part.toolCallId === toolCallId);
+  const name = typeof payload?.name === "string" ? payload.name : "";
+  if (!name) return -1;
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (part?.type === "tool" && part.name === name && part.running === true) return index;
+  }
+  return -1;
+}
+
+function foldTurnDraftEvent(parts, event) {
+  const payload = event?.payload ?? {};
+  if (event?.type === "message.delta") return appendTurnStreamPart(parts, "text", payload.text);
+  if (event?.type === "reasoning.delta") return appendTurnStreamPart(parts, "reasoning", payload.text);
+  if (event?.type === "tool.start") {
+    const index = turnToolIndex(parts, payload);
+    const tool = {
+      type: "tool",
+      toolCallId: typeof payload.tool_call_id === "string" && payload.tool_call_id
+        ? payload.tool_call_id
+        : `tool-${parts.length}`,
+      name: typeof payload.name === "string" && payload.name ? payload.name : "tool",
+      args: payload.args,
+      running: true,
+    };
+    if (index < 0) return [...parts, tool];
+    const next = [...parts];
+    next[index] = { ...next[index], ...tool };
+    return next;
+  }
+  if (event?.type === "tool.progress") {
+    const index = turnToolIndex(parts, payload);
+    if (index < 0 || typeof payload.text !== "string" || !payload.text) return parts;
+    const next = [...parts];
+    next[index] = { ...next[index], progress: payload.text };
+    return next;
+  }
+  if (event?.type === "tool.complete") {
+    const index = turnToolIndex(parts, payload);
+    const completed = {
+      type: "tool",
+      toolCallId: typeof payload.tool_call_id === "string" && payload.tool_call_id
+        ? payload.tool_call_id
+        : `tool-${parts.length}`,
+      name: typeof payload.name === "string" && payload.name ? payload.name : "tool",
+      running: false,
+      ...(payload.result !== undefined ? { result: payload.result } : {}),
+      ...(payload.error !== undefined ? { error: payload.error } : {}),
+      ...(payload.duration_s !== undefined ? { durationS: payload.duration_s } : {}),
+      ...(payload.inline_diff !== undefined ? { inlineDiff: payload.inline_diff } : {}),
+      ...(payload.snapshot_id !== undefined ? { snapshotId: payload.snapshot_id } : {}),
+    };
+    if (index < 0) return [...parts, completed];
+    const next = [...parts];
+    next[index] = { ...next[index], ...completed, progress: undefined };
+    return next;
+  }
+  if (event?.type === "approval.request") {
+    const approvalId = typeof payload.approval_id === "string" ? payload.approval_id : "";
+    const toolCallId = typeof payload.tool_call_id === "string" ? payload.tool_call_id : "";
+    if (!approvalId || !toolCallId) return parts;
+    const nextApproval = {
+      type: "approval",
+      approvalId,
+      toolCallId,
+      name: typeof payload.name === "string" && payload.name ? payload.name : "tool",
+      ...(payload.args !== undefined ? { args: payload.args } : {}),
+      ...(typeof payload.reason === "string" && payload.reason ? { reason: payload.reason } : {}),
+      status: "pending",
+    };
+    const index = parts.findIndex(part => part?.type === "approval" && part.approvalId === approvalId);
+    if (index < 0) return [...parts, nextApproval];
+    const next = [...parts];
+    next[index] = { ...next[index], ...nextApproval };
+    return next;
+  }
+  if (event?.type === "error" && typeof payload.message === "string" && payload.message.trim()) {
+    return appendTurnStreamPart(parts, "text", payload.message.trim());
+  }
+  return parts;
+}
+
+function interruptedTurnParts(parts) {
+  return parts.map(part => part?.type === "tool" && part.running === true
+    ? {
+        ...part,
+        running: false,
+        error: typeof part.error === "string" && part.error ? part.error : "tool_interrupted",
+        progress: undefined,
+      }
+    : part);
+}
+
+function textFromTurnParts(parts) {
+  return parts
+    .filter(part => part?.type === "text" && typeof part.text === "string")
+    .map(part => part.text)
+    .join("");
+}
+
+function meaningfulTurnParts(parts) {
+  return parts.some(part => {
+    if (part?.type === "text" || part?.type === "reasoning") return typeof part.text === "string" && part.text.length > 0;
+    return part?.type === "tool" || part?.type === "approval";
+  });
+}
+
+/**
+ * SSE is the canonical execution trace; a provider's terminal aggregate can
+ * be abbreviated (often text-only). Merge its additional structured details
+ * without dropping streamed reasoning, tool activity, diffs, or approvals.
+ */
+function mergeTerminalTurnParts(streamed, terminal) {
+  if (!Array.isArray(streamed) || streamed.length === 0) return Array.isArray(terminal) ? terminal : [];
+  if (!Array.isArray(terminal) || terminal.length === 0) return streamed;
+  const next = [...streamed];
+  for (const finalPart of terminal) {
+    if (!finalPart || typeof finalPart !== "object") continue;
+    const index = finalPart.type === "tool"
+      ? next.findIndex(part => part?.type === "tool" && part.toolCallId === finalPart.toolCallId)
+      : finalPart.type === "approval"
+        ? next.findIndex(part => part?.type === "approval" && part.approvalId === finalPart.approvalId)
+        : -1;
+    if (index >= 0) {
+      next[index] = { ...next[index], ...finalPart, progress: undefined };
+      continue;
+    }
+    // Do not duplicate a streamed text/reasoning segment with the same
+    // aggregate content. If no stream exists for that channel, retain it.
+    if ((finalPart.type === "text" || finalPart.type === "reasoning")
+      && next.some(part => part?.type === finalPart.type)) continue;
+    next.push(finalPart);
+  }
+  return next;
+}
+
+function normalizedModelParams(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const next = {};
+  if (typeof value.effort === "string" && value.effort.length <= 32) next.effort = value.effort;
+  if (typeof value.fast === "boolean") next.fast = value.fast;
+  if (typeof value.reasoning === "boolean") next.reasoning = value.reasoning;
+  if (typeof value.contextWindowOverride === "number" && Number.isFinite(value.contextWindowOverride)) {
+    next.contextWindowOverride = value.contextWindowOverride;
+  }
+  if (typeof value.maxOutputOverride === "number" && Number.isFinite(value.maxOutputOverride)) {
+    next.maxOutputOverride = value.maxOutputOverride;
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
+function approvalResponses(parts) {
+  if (!Array.isArray(parts)) return [];
+  return parts.flatMap(part => {
+    if (part?.type !== "approval" || part.status === "pending") return [];
+    const approved = part.status === "approved";
+    return [{
+      type: "tool-approval-response",
+      approvalId: part.approvalId,
+      approved,
+      reason: part.decisionReason || (part.status === "expired" ? "approval_expired" : approved ? "user_approved_once" : "user_denied"),
+    }];
+  });
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     let settled = false;
+    const signal = req?.kyreiShutdownSignal;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      req.removeListener("aborted", onRequestAborted);
+      req.removeListener("error", onRequestError);
+      signal?.removeEventListener?.("abort", onGatewayShutdown);
+      callback(value);
+    };
+    const shutdownError = () => {
+      const error = new Error("gateway_shutdown");
+      error.code = "gateway_shutdown";
+      return error;
+    };
+    const onGatewayShutdown = () => finish(reject, shutdownError());
+    const onRequestAborted = () => finish(reject, shutdownError());
+    const onRequestError = (error) => finish(reject, error);
+    if (signal?.aborted) {
+      onGatewayShutdown();
+      return;
+    }
+    signal?.addEventListener?.("abort", onGatewayShutdown, { once: true });
     req.on("data", chunk => {
       if (settled) return;
       const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += value.byteLength;
       if (size > 20_000_000) {
-        settled = true;
         const error = new Error("request_body_too_large");
         error.code = "request_body_too_large";
-        reject(error);
+        finish(reject, error);
         return;
       }
       chunks.push(value);
@@ -128,16 +360,16 @@ function readBody(req) {
     req.on("end", () => {
       if (settled) return;
       try {
-        settled = true;
         const raw = Buffer.concat(chunks, size).toString("utf8");
-        resolve(raw ? JSON.parse(raw) : {});
+        finish(resolve, raw ? JSON.parse(raw) : {});
       } catch {
         const error = new Error("invalid_json");
         error.code = "invalid_json";
-        reject(error);
+        finish(reject, error);
       }
     });
-    req.on("error", reject);
+    req.once("aborted", onRequestAborted);
+    req.once("error", onRequestError);
   });
 }
 
@@ -465,6 +697,21 @@ export function requestErrorStatus(error) {
       : "";
   if (code === "invalid_json") return 400;
   if (code === "request_body_too_large") return 413;
+  if (code === "gateway_shutdown") return 503;
+  if (
+    code === "gbrain_command_unavailable"
+    || code === "gbrain_adapter_unavailable"
+    || code === "gbrain_bun_unavailable"
+  ) return 503;
+  if (code === "gbrain_initialization_unavailable") return 409;
+  if (
+    code === "gbrain_initialization_failed"
+    || code === "gbrain_initialization_unverified"
+    || code === "gbrain_install_failed"
+    || code === "gbrain_install_unverified"
+    || code === "gbrain_global_bin_invalid"
+  ) return 502;
+  if (code === "approval_decision_invalid") return 400;
   if (code === "secret_storage_unavailable") return 503;
   if (code === "provider_discovery_unauthorized") return 401;
   if (code === "provider_discovery_target_blocked") return 403;
@@ -535,6 +782,11 @@ export function requestErrorStatus(error) {
     || code === "pipeline_completion_gate_failed"
     || code === "provider_primary_account_required"
     || code === "provider_account_limit_reached"
+    || code === "approval_required"
+    || code === "approval_already_consumed"
+    || code === "approval_decision_conflict"
+    || code === "approval_expired"
+    || code === "approval_not_resolved"
   ) return 409;
   if (
     code.startsWith("pipeline_")
@@ -745,6 +997,99 @@ function pipelineConflict(code) {
   return error;
 }
 
+/** A public, non-sensitive error used by the optional local GBrain control plane. */
+function gbrainGatewayError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function isPlainRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * The gateway owns the persistent configuration, while the engine owns the
+ * actual GBrain process adapter. Keep this small normalizer here so a stale
+ * or hand-edited public config cannot turn the setup/status endpoint into an
+ * arbitrary process launcher.
+ */
+function configuredGBrainRuntime(engineConfig) {
+  const memory = isPlainRecord(engineConfig?.memory) ? engineConfig.memory : {};
+  const raw = isPlainRecord(memory.gbrain) ? memory.gbrain : {};
+  const mode = raw.mode === "read" || raw.mode === "read-write" ? raw.mode : "off";
+  const command = typeof raw.command === "string" && raw.command.trim() && raw.command.trim().length <= 1_024
+    ? raw.command.trim()
+    : "gbrain";
+  const source = typeof raw.source === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(raw.source.trim())
+    ? raw.source.trim()
+    : undefined;
+  const timeoutMs = Number.isSafeInteger(raw.timeoutMs) && raw.timeoutMs >= 1_000 && raw.timeoutMs <= 3_600_000
+    ? raw.timeoutMs
+    : 180_000;
+  const maxOutputBytes = Number.isSafeInteger(raw.maxOutputBytes) && raw.maxOutputBytes >= 1_000 && raw.maxOutputBytes <= 5_000_000
+    ? raw.maxOutputBytes
+    : 200_000;
+  return { mode, command, ...(source ? { source } : {}), timeoutMs, maxOutputBytes };
+}
+
+function gbrainDoctorState(doctor) {
+  if (!isPlainRecord(doctor)) return { state: "error", doctorStatus: "unknown" };
+  const status = ["ok", "warnings", "error"].includes(doctor.status)
+    ? doctor.status
+    : "unknown";
+  // The CLI intentionally has no stable "initialized" boolean. Its documented
+  // diagnostics do, however, tell us when no local database/config exists. Do
+  // not surface the raw report here: it is untrusted local data and can include
+  // environment-specific paths. The UI only needs a truthful, compact state.
+  let summary = "";
+  try { summary = JSON.stringify(doctor).slice(0, 20_000); } catch { /* malformed result is handled below */ }
+  if (/\b(?:not initialized|no database configured|database (?:is )?(?:missing|not configured)|run\s+gbrain\s+init)\b/i.test(summary)) {
+    return { state: "not_initialized", doctorStatus: status };
+  }
+  if (status === "error" || !summary) return { state: "error", doctorStatus: status };
+  return { state: "ready", doctorStatus: status };
+}
+
+function gbrainFailureState(error) {
+  const message = String(error?.message ?? error ?? "");
+  if (/\b(?:could not start|enoent|not found|spawn)\b/i.test(message)) {
+    return { state: "unavailable", reason: "command_unavailable" };
+  }
+  if (/\b(?:not initialized|no database|database (?:is )?(?:missing|not configured)|run\s+gbrain\s+init)\b/i.test(message)) {
+    return { state: "not_initialized", reason: "not_initialized" };
+  }
+  return { state: "error", reason: "check_failed" };
+}
+
+function validateEnginePermissionRulesBoundary(value) {
+  if (!Array.isArray(value) || value.length > 128) {
+    throw new TypeError("engine_permission_rules_invalid");
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new TypeError("engine_permission_rules_invalid");
+    }
+    const pattern = entry.pattern;
+    const action = entry.action;
+    if (
+      typeof pattern !== "string"
+      || pattern.length < 1
+      || pattern.length > 512
+      || /[\u0000-\u001f\u007f]/.test(pattern)
+      || (action !== "allow" && action !== "ask" && action !== "deny")
+    ) {
+      throw new TypeError("engine_permission_rules_invalid");
+    }
+    try {
+      new RegExp(pattern);
+    } catch {
+      throw new TypeError("engine_permission_rules_invalid");
+    }
+    return { pattern, action };
+  });
+}
+
 function validateEngineConfigBoundary(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("engine_config_invalid");
@@ -756,6 +1101,17 @@ function validateEngineConfigBoundary(value) {
     throw new TypeError("engine_sandbox_invalid");
   }
   const next = { ...value };
+  if (
+    value.permissions
+    && typeof value.permissions === "object"
+    && !Array.isArray(value.permissions)
+    && Object.hasOwn(value.permissions, "rules")
+  ) {
+    next.permissions = {
+      ...value.permissions,
+      rules: validateEnginePermissionRulesBoundary(value.permissions.rules),
+    };
+  }
   const profileIds = new Set();
   if (Object.hasOwn(value, "promptProfiles")) {
     if (!Array.isArray(value.promptProfiles) || value.promptProfiles.length > 64) {
@@ -1315,6 +1671,7 @@ export async function startGateway({
   providerDiscovery = discoverProviderModels,
   sandboxCapabilityProbe = pipelineSandboxCapability,
   runtimeBuildId = process.env.KYREI_BUILD_ID ?? process.env.npm_package_version ?? "development",
+  activeTurnSettleTimeoutMs = 2_000,
 } = {}) {
   if (typeof engineLoader !== "function") throw new TypeError("engine-loader-required");
   if (commandRunner != null && typeof commandRunner.run !== "function") {
@@ -1322,6 +1679,9 @@ export async function startGateway({
   }
   if (typeof providerDiscovery !== "function") throw new TypeError("provider-discovery-required");
   if (typeof sandboxCapabilityProbe !== "function") throw new TypeError("sandbox-capability-probe-required");
+  const turnSettleTimeoutMs = Number.isFinite(activeTurnSettleTimeoutMs)
+    ? Math.min(30_000, Math.max(10, Math.floor(activeTurnSettleTimeoutMs)))
+    : 2_000;
   const kiroApi = createKiroConnectorApi(kiroConnector);
   // The local port is not an authentication boundary: any web page can target
   // loopback. Every API request carries this per-launch capability token.
@@ -1405,6 +1765,12 @@ export async function startGateway({
     pruneProviderAccountSecrets(normalizeProviderSecrets(loaded.secrets), config.providers),
     config.kiroOrganization,
   );
+  if (!secrets.approvalSigningKey) {
+    secrets = normalizeProviderSecrets({
+      ...secrets,
+      approvalSigningKey: randomBytes(32).toString("base64url"),
+    });
+  }
   const legacyApiKey = typeof rawConfig.apiKey === "string" ? rawConfig.apiKey : "";
   if (legacyApiKey && !secrets.providers[config.activeProviderId]?.apiKey) {
     secrets.providers[config.activeProviderId] = {
@@ -1565,17 +1931,54 @@ export async function startGateway({
   const skillsStore = new SkillsStore({ dataDir });
   await skillsStore.load();
   if (config.workspace) await skillsStore.setWorkspace(config.workspace).catch(() => {});
+
+  function normalizePromptSkillIds(value) {
+    if (value == null) return undefined;
+    if (!Array.isArray(value)) throw new TypeError("prompt_skills_invalid");
+
+    const seen = new Set();
+    const ids = [];
+    for (const candidate of value) {
+      if (typeof candidate !== "string" || !PROMPT_SKILL_ID_RE.test(candidate)) {
+        throw new TypeError("prompt_skills_invalid");
+      }
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        ids.push(candidate);
+      }
+    }
+    if (ids.length > MAX_PROMPT_SKILLS) throw new TypeError("prompt_skills_limit_exceeded");
+    return ids.length ? ids : undefined;
+  }
+
+  async function validatePromptSkillIds(value) {
+    const ids = normalizePromptSkillIds(value);
+    if (!ids) return undefined;
+    const available = new Set((await skillsStore.list())
+      .filter((skill) => skill.enabled)
+      .map((skill) => skill.id));
+    if (ids.some((id) => !available.has(id))) throw new TypeError("prompt_skill_unavailable");
+    return ids;
+  }
+
+  function runtimeSkillsForPrompt(skillIds) {
+    return skillIds?.length
+      ? skillsStore.runtimeSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS })
+      : skillsStore.runtimeSkills();
+  }
+
   const buildPipelineRuntimeIdentity = async (definition, configSnapshot = config, secretsSnapshot = secrets) => {
     const profiles = referencedProfilesForDefinition(definition, configSnapshot.orchestration.profiles);
     if (profiles.some((profile) => profile.missing === true || profile.enabled !== true)) {
       throw pipelineConflict("pipeline_runtime_unavailable");
     }
-    const skillIds = [...new Set(profiles.flatMap((profile) => (
-      Array.isArray(profile.roles) ? profile.roles.flatMap((role) => role.skillIds ?? []) : []
-    )))].sort();
+    const skillIds = [...new Set(profiles.flatMap((profile) => teamProfileSkillIds(profile)))].sort();
     let skillIdentity;
     try {
-      skillIdentity = await skillsStore.runtimeIdentity({ ids: skillIds, maxSkills: 256 });
+      skillIdentity = await skillsStore.runtimeIdentity({
+        ids: skillIds,
+        maxSkills: MAX_TEAM_PROFILE_SKILLS,
+      });
     } catch {
       throw pipelineConflict("pipeline_runtime_unavailable");
     }
@@ -1698,18 +2101,196 @@ export async function startGateway({
   // SSE subscribers + per-session AbortControllers, keyed by session id.
   const subscribers = new Map(); // sessionId -> Set<res>
   const controllers = new Map(); // sessionId -> AbortController
+  const activeTurns = new Map(); // sessionId -> controller + durable assistant draft + completion
   const sessionReservations = new Map(); // sessionId -> opaque owner token
   const runtimeStatus = new Map(); // sessionId -> "working" (absent = idle)
   const runtimeActivity = new Map(); // sessionId -> public live/last turn activity
   const activePromptProviders = new Map(); // sessionId -> provider ids whose credentials may be in flight
   const subagentRuns = new Map(); // subagentId -> cross-session runtime summary
   const shutdownController = new AbortController();
+  let gatewayClosing = false;
+  const activeHttpRequests = new Set();
+
+  const gatewayShutdownError = () => {
+    const error = new Error("gateway_shutdown");
+    error.code = "gateway_shutdown";
+    return error;
+  };
+
+  // `readBody` observes this signal while a request is incomplete.  A body can
+  // still finish in the same event-loop turn in which shutdown begins, though,
+  // so every state-changing request needs a second boundary immediately before
+  // it touches SessionStore.  This keeps a late approval/PATCH from scheduling
+  // a new flush after close() has drained the stores.
+  const assertGatewayAcceptingMutations = () => {
+    if (gatewayClosing || shutdownController.signal.aborted) throw gatewayShutdownError();
+  };
+
+  const waitForHttpRequests = async () => {
+    // A handler can cause another short local request while it settles. Keep
+    // draining until no mutation-capable handler remains, then close stores.
+    while (activeHttpRequests.size) {
+      await Promise.allSettled([...activeHttpRequests].map((request) => request.done));
+    }
+  };
 
   // The engine is a built ESM bundle, loaded lazily on first prompt.
   let engine = null;
   const getEngine = async () => {
     if (!engine) engine = await engineLoader();
     return engine;
+  };
+
+  /**
+   * Read the optional local GBrain runtime without enabling its tools. This is
+   * deliberately a health-only operation: it never sends a provider key,
+   * writes personal knowledge, or starts an installer.
+   */
+  const inspectGBrain = async ({ command } = {}) => {
+    const configured = configuredGBrainRuntime(config.engine);
+    const gbrain = typeof command === "string" && command.trim() && command.length <= 1_024
+      ? { ...configured, command: command.trim() }
+      : configured;
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+    }
+    if (typeof mod?.createGBrainClient !== "function") {
+      return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+    }
+    try {
+      // Source scoping is an agent-search preference. A health check must not
+      // become "not ready" simply because a user has not created that source.
+      const client = mod.createGBrainClient({
+        mode: "read",
+        command: gbrain.command,
+        timeoutMs: Math.min(gbrain.timeoutMs, 60_000),
+        maxOutputBytes: gbrain.maxOutputBytes,
+      });
+      const doctor = await client.doctor();
+      return { ...gbrainDoctorState(doctor), mode: gbrain.mode };
+    } catch (error) {
+      return { ...gbrainFailureState(error), mode: gbrain.mode, doctorStatus: "unknown" };
+    }
+  };
+
+  const persistGBrainConfig = async (patch) => mutateConfig(async () => {
+    const currentEngine = isPlainRecord(config.engine) ? config.engine : {};
+    const currentMemory = isPlainRecord(currentEngine.memory) ? currentEngine.memory : {};
+    const nextEngine = validateEngineConfigBoundary({
+      ...currentEngine,
+      memory: {
+        ...currentMemory,
+        gbrain: { ...configuredGBrainRuntime(currentEngine), ...patch },
+      },
+    });
+    const nextConfig = { ...config, engine: nextEngine };
+    await saveConfig(nextConfig, secrets);
+    config = nextConfig;
+    return publicConfig();
+  });
+
+  /**
+   * Explicitly create GBrain's local PGLite store. This endpoint is never
+   * invoked during startup and intentionally does not install a CLI or prompt
+   * for external credentials. A completed health check is required before the
+   * agent's read tools are enabled.
+   */
+  const initializeGBrain = async () => {
+    const before = await inspectGBrain();
+    if (before.state === "ready") {
+      if (before.mode === "read" || before.mode === "read-write") return { status: before, config: publicConfig() };
+      const snapshot = await persistGBrainConfig({ mode: "read" });
+      return { status: { ...before, mode: "read" }, config: snapshot };
+    }
+    if (before.state === "unavailable") throw gbrainGatewayError("gbrain_command_unavailable");
+    if (before.state !== "not_initialized") throw gbrainGatewayError("gbrain_initialization_unavailable");
+
+    const gbrain = configuredGBrainRuntime(config.engine);
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      throw gbrainGatewayError("gbrain_adapter_unavailable");
+    }
+    if (typeof mod?.runGBrainProcess !== "function") throw gbrainGatewayError("gbrain_adapter_unavailable");
+
+    try {
+      await mod.runGBrainProcess(gbrain.command, ["init", "--pglite", "--no-embedding"], {
+        signal: shutdownController.signal,
+        timeoutMs: Math.min(Math.max(gbrain.timeoutMs, 60_000), 300_000),
+        maxOutputBytes: Math.max(gbrain.maxOutputBytes, 200_000),
+      });
+    } catch (error) {
+      const failure = gbrainFailureState(error);
+      if (failure.state === "unavailable") throw gbrainGatewayError("gbrain_command_unavailable");
+      throw gbrainGatewayError("gbrain_initialization_failed");
+    }
+
+    const after = await inspectGBrain();
+    if (after.state !== "ready") throw gbrainGatewayError("gbrain_initialization_unverified");
+    const snapshot = await persistGBrainConfig({ mode: "read" });
+    return { status: { ...after, mode: "read" }, config: snapshot };
+  };
+
+  /**
+   * Explicit recovery path for first-run desktop installs. It is deliberately
+   * tied to a button/API action: no network package operation occurs while the
+   * app starts or merely checks status.
+   */
+  const installAndInitializeGBrain = async () => {
+    const before = await inspectGBrain();
+    if (before.state === "ready" || before.state === "not_initialized") return initializeGBrain();
+    if (before.state !== "unavailable" || before.reason !== "command_unavailable") {
+      throw gbrainGatewayError("gbrain_install_unverified");
+    }
+
+    const gbrain = configuredGBrainRuntime(config.engine);
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      throw gbrainGatewayError("gbrain_adapter_unavailable");
+    }
+    if (typeof mod?.runGBrainProcess !== "function") throw gbrainGatewayError("gbrain_adapter_unavailable");
+    const options = {
+      signal: shutdownController.signal,
+      timeoutMs: Math.min(Math.max(gbrain.timeoutMs, 60_000), 600_000),
+      maxOutputBytes: Math.max(gbrain.maxOutputBytes, 1_000_000),
+    };
+    try {
+      await mod.runGBrainProcess("bun", ["--version"], options);
+    } catch {
+      throw gbrainGatewayError("gbrain_bun_unavailable");
+    }
+    try {
+      await mod.runGBrainProcess("bun", ["install", "-g", "github:garrytan/gbrain"], options);
+    } catch {
+      throw gbrainGatewayError("gbrain_install_failed");
+    }
+
+    // Bun's global bin directory is the durable way to reach the executable
+    // from an Electron process whose PATH was inherited before installation.
+    let globalBin;
+    try {
+      const output = await mod.runGBrainProcess("bun", ["pm", "bin", "-g"], options);
+      globalBin = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) ?? "";
+    } catch {
+      throw gbrainGatewayError("gbrain_global_bin_invalid");
+    }
+    if (!globalBin || globalBin.length > 1_024 || globalBin.includes("\0") || !isAbsolute(globalBin)) {
+      throw gbrainGatewayError("gbrain_global_bin_invalid");
+    }
+    const command = join(globalBin, process.platform === "win32" ? "gbrain.exe" : "gbrain");
+    await persistGBrainConfig({ command });
+
+    const installed = await inspectGBrain();
+    if (installed.state !== "ready" && installed.state !== "not_initialized") {
+      throw gbrainGatewayError("gbrain_install_unverified");
+    }
+    return initializeGBrain();
   };
 
   function trackSubagentEvent(sessionId, event) {
@@ -1766,6 +2347,9 @@ export async function startGateway({
       eventCount: (previous?.eventCount ?? 0) + 1,
     };
     switch (event?.type) {
+      case "message.start":
+        next.messageId = typeof payload.message_id === "string" ? payload.message_id : previous?.messageId;
+        break;
       case "reasoning.delta":
         next.phase = "reasoning";
         break;
@@ -1777,6 +2361,13 @@ export async function startGateway({
       case "tool.complete":
         next.phase = payload.error ? "recovering" : "reasoning";
         next.currentTool = undefined;
+        break;
+      case "approval.request":
+        next.phase = "awaiting_approval";
+        next.currentTool = typeof payload.name === "string" ? payload.name : undefined;
+        break;
+      case "approval.consumed":
+        next.phase = "tool";
         break;
       case "message.delta":
         next.phase = "responding";
@@ -1792,7 +2383,13 @@ export async function startGateway({
       }
       case "message.complete":
         next.active = false;
-        next.phase = payload.status === "interrupted" ? "interrupted" : payload.status === "error" ? "failed" : "complete";
+        next.phase = payload.status === "interrupted"
+          ? "interrupted"
+          : payload.status === "error"
+            ? "failed"
+            : payload.status === "awaiting_approval"
+              ? "awaiting_approval"
+              : "complete";
         next.currentTool = undefined;
         next.completedAt = now;
         break;
@@ -1818,8 +2415,7 @@ export async function startGateway({
     for (const res of set) { try { res.write(frame); } catch { /* dropped */ } }
   }
 
-  function emitTo(sessionId, event) {
-    const publicEvent = publicRuntimeEvent(event);
+  function publishPublicEvent(sessionId, publicEvent) {
     trackSessionActivity(sessionId, publicEvent);
     trackSubagentEvent(sessionId, publicEvent);
     const runId = publicEvent?.payload?.run_id;
@@ -1827,6 +2423,271 @@ export async function startGateway({
       void teamRunStore.append(runId, publicEvent).catch(() => undefined);
     }
     writePublicEvent(sessionId, publicEvent);
+  }
+
+  function emitTo(sessionId, event) {
+    const publicEvent = publicRuntimeEvent(event);
+    publishPublicEvent(sessionId, publicEvent);
+  }
+
+  function updateActiveTurnDraft(turn, publicEvent) {
+    if (!turn.acceptEvents) return;
+    const nextParts = foldTurnDraftEvent(turn.parts, publicEvent);
+    if (nextParts === turn.parts) return;
+    turn.parts = nextParts;
+    createActiveTurnDraft(turn);
+    store.updateMessage(turn.sessionId, turn.draftId, {
+      content: textFromTurnParts(nextParts),
+      parts: nextParts,
+      pending: true,
+      turnStatus: "streaming",
+    });
+  }
+
+  function emitActiveTurnEvent(turn, event) {
+    if (!turn.acceptEvents) return;
+    const publicEvent = publicRuntimeEvent(event);
+    if (publicEvent?.type === "error") {
+      const payload = publicEvent.payload ?? {};
+      turn.errorCode = typeof payload.code === "string" ? payload.code : undefined;
+      turn.errorMessage = typeof payload.message === "string" ? payload.message : undefined;
+    }
+    updateActiveTurnDraft(turn, publicEvent);
+    if (publicEvent?.type === "message.complete") {
+      turn.terminalEvent = publicEvent;
+      return;
+    }
+    publishPublicEvent(turn.sessionId, publicEvent);
+  }
+
+  function createActiveTurnDraft(turn) {
+    if (turn.draftId) {
+      const existing = store.getMessage(turn.sessionId, turn.draftId);
+      if (existing) return existing;
+    }
+    const draft = store.appendMessage(turn.sessionId, {
+      id: turn.draftId || undefined,
+      role: "assistant",
+      content: "",
+      parts: [],
+      pending: true,
+      turnStatus: "streaming",
+    });
+    turn.draftId = draft.id;
+    return draft;
+  }
+
+  function finalizeActiveTurn(turn, {
+    status,
+    text,
+    parts,
+    modelMessages,
+    approvalModelParams,
+  } = {}) {
+    if (turn.finalizePromise) return turn.finalizePromise;
+    turn.acceptEvents = false;
+    turn.finalized = true;
+    const terminalStatus = typeof status === "string" && status ? status : "error";
+    const operation = (async () => {
+      // Some providers expose their whole answer exclusively through SSE and
+      // return an empty aggregate result. Never let that empty aggregate erase
+      // a durable streamed draft at the terminal boundary.
+      const draftParts = mergeTerminalTurnParts(turn.parts, parts);
+      let finalParts = terminalStatus === "interrupted"
+        ? interruptedTurnParts(draftParts)
+        : draftParts;
+      let finalText = typeof text === "string" && text
+        ? text
+        : textFromTurnParts(finalParts);
+      const terminalPayload = turn.terminalEvent?.payload ?? {};
+      const terminalText = typeof terminalPayload.text === "string" ? terminalPayload.text : "";
+      if (!finalText && terminalText) {
+        finalText = terminalText;
+        finalParts = appendTurnStreamPart(finalParts, "text", terminalText);
+      }
+      if (finalText || meaningfulTurnParts(finalParts) || terminalStatus === "awaiting_approval") {
+        createActiveTurnDraft(turn);
+        if (turn.draftId) {
+          store.updateMessage(turn.sessionId, turn.draftId, {
+            content: finalText,
+            parts: finalParts,
+            pending: false,
+            turnStatus: terminalStatus,
+            ...(Array.isArray(modelMessages) && modelMessages.length ? { modelMessages } : {}),
+            ...(approvalModelParams ? { approvalModelParams } : {}),
+            ...(turn.errorCode ? { errorCode: turn.errorCode } : {}),
+            ...(turn.errorMessage ? { errorMessage: turn.errorMessage } : {}),
+          });
+        }
+      } else if (turn.draftId && store.getMessage(turn.sessionId, turn.draftId)) {
+        store.removeMessage(turn.sessionId, turn.draftId);
+      }
+      // A normal terminal SSE frame is a durability acknowledgement: when the
+      // renderer sees it, the exact assistant turn is already restart-safe.
+      // Disk failures are surfaced as a separate, explicit non-durable error
+      // so the turn is released instead of permanently blocking the session.
+      try {
+        await store.flush();
+      } catch {
+        turn.persistenceFailed = true;
+        if (!turn.terminalPublished) {
+          turn.terminalPublished = true;
+          publishPublicEvent(turn.sessionId, {
+            type: "error",
+            payload: { code: "session_persistence_failed" },
+          });
+          publishPublicEvent(turn.sessionId, {
+            type: "message.complete",
+            payload: { text: finalText, status: "error", durable: false },
+          });
+        }
+        return store.getMessage(turn.sessionId, turn.draftId);
+      }
+      if (!turn.terminalPublished) {
+        turn.terminalPublished = true;
+        publishPublicEvent(turn.sessionId, {
+          type: "message.complete",
+          payload: { ...terminalPayload, text: finalText, status: terminalStatus },
+        });
+      }
+      return store.getMessage(turn.sessionId, turn.draftId);
+    })();
+    turn.finalizePromise = operation;
+    return operation;
+  }
+
+  function releaseActiveTurn(turn) {
+    turn.shutdownSignal?.removeEventListener("abort", turn.abortForShutdown);
+    if (activeTurns.get(turn.sessionId) !== turn) return;
+    activeTurns.delete(turn.sessionId);
+    if (controllers.get(turn.sessionId) === turn.controller) controllers.delete(turn.sessionId);
+    // A force-finalized non-cooperative provider must not keep the session
+    // reservation forever. The late promise is fenced by `acceptEvents` and
+    // can no longer mutate history or become the owner of a new turn.
+    sessionReservations.delete(turn.sessionId);
+    activePromptProviders.delete(turn.sessionId);
+    runtimeStatus.delete(turn.sessionId);
+    const now = Date.now();
+    for (const [id, run] of subagentRuns) {
+      if (run.sessionId !== turn.sessionId || (run.status !== "queued" && run.status !== "running")) continue;
+      subagentRuns.set(id, {
+        ...run,
+        status: "interrupted",
+        updatedAt: now,
+        error: run.error ?? "turn_interrupted",
+      });
+    }
+    const activity = runtimeActivity.get(turn.sessionId);
+    if (activity?.active) {
+      runtimeActivity.set(turn.sessionId, {
+        ...activity,
+        active: false,
+        phase: turn.controller.signal.aborted ? "interrupted" : "failed",
+        currentTool: undefined,
+        updatedAt: now,
+        completedAt: now,
+      });
+    }
+  }
+
+  function beginActiveTurn(sessionId) {
+    const controller = new AbortController();
+    const turn = {
+      sessionId,
+      controller,
+      completion: null,
+      // The renderer needs a stable id as soon as the turn starts, while a
+      // durable assistant entry should be created only after real output.
+      // This avoids persisting a misleading blank assistant message for a
+      // provider that has not emitted anything yet.
+      draftId: `msg-${randomBytes(16).toString("base64url")}`,
+      parts: [],
+      errorCode: undefined,
+      errorMessage: undefined,
+      persistenceFailed: false,
+      terminalEvent: null,
+      terminalPublished: false,
+      acceptEvents: true,
+      finalized: false,
+      finalizePromise: null,
+      shutdownSignal: shutdownController.signal,
+      abortForShutdown: null,
+    };
+    turn.abortForShutdown = () => {
+      if (!controller.signal.aborted) controller.abort(new Error("gateway-shutdown"));
+    };
+    shutdownController.signal.addEventListener("abort", turn.abortForShutdown, { once: true });
+    if (shutdownController.signal.aborted) turn.abortForShutdown();
+    activeTurns.set(sessionId, turn);
+    controllers.set(sessionId, controller);
+    runtimeStatus.set(sessionId, "working");
+    runtimeActivity.set(sessionId, {
+      active: true,
+      phase: "thinking",
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      eventCount: 0,
+      toolCount: 0,
+    });
+    return turn;
+  }
+
+  function ownsActiveTurn(turn) {
+    return activeTurns.get(turn.sessionId) === turn
+      && !turn.controller.signal.aborted
+      && !shutdownController.signal.aborted;
+  }
+
+  function assertTurnOwnsSessionMutation(turn) {
+    if (ownsActiveTurn(turn)) return;
+    // An engine transport may ignore AbortSignal and invoke a callback after
+    // its turn was force-finalized.  SessionStore intentionally remains an
+    // in-memory object after close(), so this guard must live at the callback
+    // boundary rather than relying on store.close() to reject the mutation.
+    if (shutdownController.signal.aborted) throw gatewayShutdownError();
+    const error = new Error("turn_interrupted");
+    error.code = "turn_interrupted";
+    throw error;
+  }
+
+  function waitForActiveTurn(turn) {
+    if (!turn?.completion) return Promise.resolve(true);
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(false), turnSettleTimeoutMs);
+      Promise.resolve(turn.completion).then(() => finish(true), () => finish(true));
+    });
+  }
+
+  async function cancelActiveTurn(turn, reason = "operation-aborted") {
+    if (!turn) return null;
+    if (!turn.controller.signal.aborted) turn.controller.abort(new Error(reason));
+    const settled = await waitForActiveTurn(turn);
+    if (!settled) {
+      await finalizeActiveTurn(turn, { status: "interrupted" });
+      releaseActiveTurn(turn);
+    } else if (turn.finalizePromise) {
+      await turn.finalizePromise;
+    }
+    return store.getMessage(turn.sessionId, turn.draftId)?.id || null;
+  }
+
+  // The assistant record becomes visible in memory immediately before the
+  // atomic flush completes. A user can legitimately submit the next prompt in
+  // that narrow interval. Drain only an already-finalizing turn instead of
+  // replying `session_busy`; a still-running provider remains exclusive.
+  async function releaseFinalizedTurn(sessionId) {
+    const turn = activeTurns.get(sessionId);
+    if (!turn?.finalized) return false;
+    await turn.finalizePromise?.catch(() => undefined);
+    releaseActiveTurn(turn);
+    return true;
   }
 
   /** Broadcast one persisted Team event to every session attached to a mission. */
@@ -2111,6 +2972,25 @@ export async function startGateway({
     };
   }
 
+  function enabledTeamProfileForId(profileId, configState = config) {
+    if (typeof profileId !== "string" || !profileId) return undefined;
+    return configState.orchestration?.profiles?.find(
+      (candidate) => candidate.id === profileId && candidate.enabled,
+    );
+  }
+
+  /**
+   * Team roles opt into skills explicitly. Do not let the ordinary chat
+   * default (32 skills) decide which selected role skills make it to the
+   * runtime; the profile is validated against this same aggregate cap.
+   */
+  function runtimeSkillsForTeamProfile(profile) {
+    return skillsStore.runtimeSkills({
+      ids: teamProfileSkillIds(profile),
+      maxSkills: MAX_TEAM_PROFILE_SKILLS,
+    });
+  }
+
   /**
    * Resolve the credential-free profile into an engine-only runtime contract.
    * Role credentials never enter public config, persistence events, or SSE.
@@ -2123,9 +3003,7 @@ export async function startGateway({
     secretState = secrets,
     routingKeyPrefix = "team",
   ) {
-    const profile = configState.orchestration?.profiles?.find(
-      (candidate) => candidate.id === profileId && candidate.enabled,
-    );
+    const profile = enabledTeamProfileForId(profileId, configState);
     if (!profile) return undefined;
     const availableSkills = new Set(
       (Array.isArray(runtimeSkills) ? runtimeSkills : [])
@@ -2445,7 +3323,9 @@ export async function startGateway({
         configSnapshot.activeProviderId,
         configSnapshot.activeModelId,
       );
-      const runtimeSkills = await skillsStore.runtimeSkills();
+      const profile = enabledTeamProfileForId(stage.teamProfileId, configSnapshot);
+      if (!profile) throw new Error("pipeline_department_team_unavailable");
+      const runtimeSkills = await runtimeSkillsForTeamProfile(profile);
       const team = teamRuntimeSpecForProfile(
         stage.teamProfileId,
         mainTarget,
@@ -2555,9 +3435,22 @@ export async function startGateway({
   }
 
   function convoFor(sessionId) {
-    return store.getMessages(sessionId)
-      .filter(m => m.role === "user" || m.role === "assistant")
-      .map(m => ({ role: m.role, content: m.content }));
+    return store.getMessages(sessionId).flatMap(message => {
+      if (message.role === "user") return [{ role: "user", content: message.content }];
+      if (message.role !== "assistant") return [];
+      // The durable draft is a crash-recovery artifact for the current turn,
+      // never prior model context. Feeding it back would duplicate the live
+      // answer and may expose an unfinished tool call to the provider.
+      if (message.pending === true || message.turnStatus === "streaming") return [];
+      const structured = internalModelMessages(message.modelMessages);
+      const history = structured.length
+        ? structured
+        : [{ role: "assistant", content: message.content }];
+      const responses = approvalResponses(message.parts);
+      return responses.length
+        ? [...history, { role: "tool", content: responses }]
+        : history;
+    });
   }
 
   function createSession({ title = "", source = "chat" } = {}) {
@@ -2574,7 +3467,7 @@ export async function startGateway({
     });
   }
 
-  async function runPrompt(sessionId, text, modelParams, messageId, reservationToken) {
+  async function runPrompt(sessionId, text, modelParams, messageId, reservationToken, options = {}) {
     const token = reservationToken ?? Symbol("prompt");
     const existingReservation = sessionReservations.get(sessionId);
     if (controllers.has(sessionId) || (existingReservation && existingReservation !== token)) {
@@ -2582,13 +3475,25 @@ export async function startGateway({
     }
     sessionReservations.set(sessionId, token);
     try {
-      return await runReservedPrompt(sessionId, text, modelParams, messageId);
+      return await runReservedPrompt(sessionId, text, modelParams, messageId, options);
     } finally {
       if (sessionReservations.get(sessionId) === token) sessionReservations.delete(sessionId);
     }
   }
 
-  async function runReservedPrompt(sessionId, text, modelParams, messageId) {
+  function runReservedPrompt(sessionId, text, modelParams, messageId, options = {}) {
+    const completion = executeReservedPrompt(sessionId, text, modelParams, messageId, options);
+    // executeReservedPrompt registers the turn synchronously before its first
+    // await, closing the prompt-response -> controller-registration race.
+    const turn = activeTurns.get(sessionId);
+    if (turn && !turn.completion) turn.completion = completion;
+    return completion;
+  }
+
+  async function executeReservedPrompt(sessionId, text, modelParams, messageId, {
+    appendUser = true,
+    skillIds,
+  } = {}) {
     if (shutdownController.signal.aborted) {
       return { status: "cancelled", sessionId, error: "gateway-shutdown" };
     }
@@ -2596,27 +3501,47 @@ export async function startGateway({
     if (!session) return { status: "error", sessionId, error: "session-not-found" };
     if (controllers.has(sessionId)) return { status: "error", sessionId, error: "session_busy" };
 
+    const turn = beginActiveTurn(sessionId);
+    const { controller } = turn;
+
+    const safeModelParams = normalizedModelParams(modelParams);
     const runtimeGenerationSnapshot = new Map(
       config.providers.map((provider) => [provider.id, providerRuntimeGeneration(provider.id)]),
     );
 
-    const safePromptText = redactSensitiveText(text, runtimeSensitiveValues());
-    const promptWorkspace = config.workspace
-      ? await realpath(config.workspace).catch(() => "")
-      : "";
-    store.appendMessage(sessionId, {
-      id: messageId,
-      role: "user",
-      content: safePromptText,
-      ...(promptWorkspace ? { workspace: promptWorkspace } : {}),
-    });
-    if (!session.title) {
-      store.upsertSession({
-        id: sessionId,
-        title: safePromptText.slice(0, 48) + (safePromptText.length > 48 ? "…" : ""),
-        updatedAt: new Date().toISOString(),
+    let storedUser = null;
+    if (appendUser) {
+      const safePromptText = redactSensitiveText(text, runtimeSensitiveValues());
+      storedUser = store.appendMessage(sessionId, {
+        id: messageId,
+        role: "user",
+        content: safePromptText,
       });
-      emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
+      if (!session.title) {
+        store.upsertSession({
+          id: sessionId,
+          title: safePromptText.slice(0, 48) + (safePromptText.length > 48 ? "…" : ""),
+          updatedAt: new Date().toISOString(),
+        });
+        emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
+      }
+    }
+
+    emitActiveTurnEvent(turn, {
+      type: "message.start",
+      payload: { session_id: sessionId, message_id: turn.draftId },
+    });
+    if (storedUser && config.workspace) {
+      const promptWorkspace = await realpath(config.workspace).catch(() => "");
+      // A force-cancelled or shutdown turn can resume after this filesystem
+      // await. It no longer owns the session and must not mutate a newer turn
+      // or schedule another store write after shutdown.
+      if (!ownsActiveTurn(turn)) {
+        await finalizeActiveTurn(turn, { status: "interrupted" });
+        releaseActiveTurn(turn);
+        return { status: "cancelled", sessionId, error: "interrupted" };
+      }
+      if (promptWorkspace) store.updateMessage(sessionId, storedUser.id, { workspace: promptWorkspace });
     }
 
     let mainTarget;
@@ -2635,8 +3560,9 @@ export async function startGateway({
       );
       mainTarget = mainTargets[0];
     } catch {
-      emitTo(sessionId, { type: "error", payload: { code: "provider_not_configured" } });
-      emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "error" } });
+      emitActiveTurnEvent(turn, { type: "error", payload: { code: "provider_not_configured" } });
+      await finalizeActiveTurn(turn, { status: "error" });
+      releaseActiveTurn(turn);
       return { status: "error", sessionId, error: "provider_not_configured" };
     }
     if (session.providerId !== mainTarget.providerId || session.modelId !== mainTarget.model) {
@@ -2657,32 +3583,20 @@ export async function startGateway({
       });
     }
 
-    const controller = new AbortController();
-    const abortForShutdown = () => controller.abort();
-    shutdownController.signal.addEventListener("abort", abortForShutdown, { once: true });
-    if (shutdownController.signal.aborted) controller.abort();
-    controllers.set(sessionId, controller);
     activePromptProviders.set(sessionId, new Set(config.providers.map((provider) => provider.id)));
-    runtimeStatus.set(sessionId, "working");
-    runtimeActivity.set(sessionId, {
-      active: true,
-      phase: "thinking",
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      eventCount: 0,
-      toolCount: 0,
-    });
-    emitTo(sessionId, { type: "message.start", payload: { session_id: sessionId } });
 
     try {
-      const runtimeSkills = await skillsStore.runtimeSkills().catch(() => ({ skills: [] }));
+      const activeTeamProfile = activeOrchestrationProfile(config);
+      const runtimeSkills = await (activeTeamProfile
+        ? runtimeSkillsForTeamProfile(activeTeamProfile)
+        : runtimeSkillsForPrompt(skillIds)
+      ).catch(() => ({ skills: [] }));
       throwIfAborted(controller.signal);
       const workerProvider = workerRuntimeTarget(sessionId);
       const fallbackProviders = [
         ...mainTargets.slice(1),
         ...fallbackRuntimeTargets(sessionId),
       ];
-      const activeTeamProfile = activeOrchestrationProfile(config);
       const team = activeTeamProfile
         ? teamRuntimeSpecForProfile(
             activeTeamProfile.id,
@@ -2702,7 +3616,7 @@ export async function startGateway({
         signal: controller.signal,
       });
       const common = {
-        emit: event => emitTo(sessionId, event),
+        emit: event => emitActiveTurnEvent(turn, event),
         messages: convoFor(sessionId),
         providerBase: mainTarget.baseURL,
         providerProtocol: mainTarget.protocol,
@@ -2721,8 +3635,17 @@ export async function startGateway({
         workspace: config.workspace,
         auditLogPath: join(dataDir, "audit.jsonl"),
         sessionId,
+        approvalSecret: secrets.approvalSigningKey,
+        onApprovalConsumed: async (approvalId) => {
+          assertTurnOwnsSessionMutation(turn);
+          store.consumeApproval(sessionId, approvalId);
+          // This is an effect barrier, not a debounced UI write: an approved
+          // command may start only after its one-shot consumption is durable.
+          await store.flush();
+        },
         ...(commandRunner ? { commandRunner } : {}),
         skills: runtimeSkillsForEngine(runtimeSkills.skills),
+        ...(skillIds?.length && !activeTeamProfile ? { requiredSkillIds: skillIds } : {}),
         readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         onSkillUsed: id => skillsStore.recordUsage(id).then(() => undefined).catch(() => undefined),
       };
@@ -2732,18 +3655,47 @@ export async function startGateway({
         ...common,
         abortSignal: controller.signal,
         config: config.engine,
-        ...(modelParams && typeof modelParams === "object" ? { modelParams } : {}),
+        ...(safeModelParams ? { modelParams: safeModelParams } : {}),
       });
-      // A provider may resolve despite aborting its transport. Preserve the
-      // shutdown boundary and never persist that late result as a success.
-      throwIfAborted(controller.signal);
-      const publicResult = redactSensitiveValue(result, runtimeSensitiveValues());
+      // UI parts and structured model history can legitimately share the same
+      // tool input object. Redact them as separate roots: the generic cycle
+      // guard otherwise replaces the second reference with "[CIRCULAR]" and
+      // invalidates the HMAC-bound approval request on continuation.
+      const sensitiveValues = runtimeSensitiveValues();
+      const publicResult = redactSensitiveValue(
+        { ...result, responseMessages: undefined },
+        sensitiveValues,
+      );
+      const privateResponseMessages = redactSensitiveValue(
+        result?.responseMessages,
+        sensitiveValues,
+      );
       const assistantText = typeof publicResult?.text === "string" ? publicResult.text : "";
       const assistantParts = Array.isArray(publicResult?.parts) ? publicResult.parts : [];
+      const assistantModelMessages = internalModelMessages(privateResponseMessages);
       const turnStatus = typeof result?.status === "string" ? result.status : "complete";
-      const successfulTurn = turnStatus === "complete" || turnStatus === "max_steps";
-      if (successfulTurn || assistantText || assistantParts.length) {
-        store.appendMessage(sessionId, { role: "assistant", content: assistantText, parts: assistantParts });
+      // A provider may resolve despite aborting its transport. An explicitly
+      // interrupted engine result is useful partial work; every other late
+      // result remains fenced and cannot overwrite the durable cancellation.
+      if (controller.signal.aborted && turnStatus !== "interrupted") {
+        throwIfAborted(controller.signal);
+      }
+      const successfulTurn = turnStatus === "complete" || turnStatus === "max_steps" || turnStatus === "awaiting_approval";
+      await finalizeActiveTurn(turn, {
+        status: turnStatus,
+        text: assistantText,
+        parts: assistantParts,
+        modelMessages: assistantModelMessages,
+        ...(turnStatus === "awaiting_approval" && safeModelParams
+          ? { approvalModelParams: safeModelParams }
+          : {}),
+      });
+      // A non-cooperative provider can resolve after cancellation (including
+      // with an explicit `interrupted` status). Its visible draft was already
+      // finalized above, but it no longer owns this session and must not make
+      // a late metadata write after gateway shutdown or a newer turn starts.
+      if (!ownsActiveTurn(turn)) {
+        return { status: "cancelled", sessionId, error: "interrupted" };
       }
       const selectedAccountId = typeof result?.route?.accountId === "string" ? result.route.accountId : mainTarget.accountId;
       const selectedProviderId = typeof result?.route?.providerId === "string"
@@ -2770,36 +3722,25 @@ export async function startGateway({
           error: turnStatus === "interrupted" ? "interrupted" : "provider_stream_error",
         };
       }
-      return { status: "success", sessionId, summary: assistantText.slice(0, 4000) };
+      return {
+        status: turnStatus === "awaiting_approval" ? "awaiting_approval" : "success",
+        sessionId,
+        summary: assistantText.slice(0, 4000),
+      };
     } catch (err) {
       // A synchronous throw or a failed engine-bundle import must not become an
       // unhandled rejection (would crash the gateway) — surface it and end turn.
       const aborted = controller.signal.aborted || err?.name === "AbortError" || /abort/i.test(String(err?.message || ""));
       const publicError = redactSensitiveText(err?.message || String(err), runtimeSensitiveValues());
       if (aborted) {
-        emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "interrupted" } });
+        await finalizeActiveTurn(turn, { status: "interrupted" });
       } else {
-        emitTo(sessionId, { type: "error", payload: { message: publicError } });
-        emitTo(sessionId, { type: "message.complete", payload: { text: "", status: "error" } });
+        emitActiveTurnEvent(turn, { type: "error", payload: { message: publicError } });
+        await finalizeActiveTurn(turn, { status: "error" });
       }
       return { status: aborted ? "cancelled" : "error", sessionId, error: publicError };
     } finally {
-      shutdownController.signal.removeEventListener("abort", abortForShutdown);
-      if (controllers.get(sessionId) === controller) controllers.delete(sessionId);
-      activePromptProviders.delete(sessionId);
-      runtimeStatus.delete(sessionId);
-      const activity = runtimeActivity.get(sessionId);
-      if (activity?.active) {
-        const now = Date.now();
-        runtimeActivity.set(sessionId, {
-          ...activity,
-          active: false,
-          phase: controller.signal.aborted ? "interrupted" : "complete",
-          currentTool: undefined,
-          updatedAt: now,
-          completedAt: now,
-        });
-      }
+      releaseActiveTurn(turn);
     }
   }
 
@@ -2813,6 +3754,14 @@ export async function startGateway({
   cronScheduler.start();
 
   const server = createServer(async (req, res) => {
+    if (gatewayClosing) return sendJson(res, 503, { code: "gateway_shutdown", error: "gateway_shutdown" });
+    let finishRequest;
+    const activeRequest = {
+      done: new Promise((resolve) => { finishRequest = resolve; }),
+    };
+    activeHttpRequests.add(activeRequest);
+    req.kyreiShutdownSignal = shutdownController.signal;
+    try {
     const url = new URL(req.url, "http://127.0.0.1");
     const path = url.pathname;
     const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
@@ -3058,6 +4007,21 @@ export async function startGateway({
           });
           return sendJson(res, 200, snapshot);
         }
+      }
+
+      // GBrain is an opt-in, local-only memory runtime. Its setup is exposed
+      // separately from the broad engine JSON so users can understand exactly
+      // what will happen before a local database is created.
+      if (path === "/api/memory/gbrain" && req.method === "GET") {
+        return sendJson(res, 200, await inspectGBrain());
+      }
+
+      if (path === "/api/memory/gbrain/initialize" && req.method === "POST") {
+        return sendJson(res, 200, await initializeGBrain());
+      }
+
+      if (path === "/api/memory/gbrain/install" && req.method === "POST") {
+        return sendJson(res, 200, await installAndInitializeGBrain());
       }
 
       if (path === "/api/pipelines") {
@@ -4137,13 +5101,67 @@ export async function startGateway({
         }
       }
 
+      const approvalMatch = path.match(/^\/api\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
+      if (approvalMatch && req.method === "POST") {
+        const sessionId = decodeURIComponent(approvalMatch[1]);
+        const approvalId = decodeURIComponent(approvalMatch[2]);
+        if (!store.getSession(sessionId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        await releaseFinalizedTurn(sessionId);
+        if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        const reservationToken = Symbol("approval");
+        sessionReservations.set(sessionId, reservationToken);
+        let continuationStarted = false;
+        try {
+          const body = await readBody(req);
+          assertGatewayAcceptingMutations();
+          const resolved = store.resolveApproval(sessionId, approvalId, {
+            approved: body.approved,
+            reason: typeof body.reason === "string" ? body.reason : "",
+          });
+          emitTo(sessionId, {
+            type: "approval.resolved",
+            payload: {
+              approval_id: resolved.approval.approvalId,
+              tool_call_id: resolved.approval.toolCallId,
+              approved: resolved.approval.status === "approved",
+              ...(resolved.approval.decisionReason ? { reason: resolved.approval.decisionReason } : {}),
+              ...(resolved.approval.consumedAt ? { consumed: true } : {}),
+            },
+          });
+          await store.flush();
+          assertGatewayAcceptingMutations();
+          if (!resolved.ready) {
+            return sendJson(res, 200, { status: "pending", approval: resolved.approval });
+          }
+
+          continuationStarted = true;
+          sendJson(res, 200, { status: "streaming", approval: resolved.approval });
+          void runReservedPrompt(sessionId, "", resolved.modelParams, undefined, { appendUser: false })
+            .finally(() => {
+              if (sessionReservations.get(sessionId) === reservationToken) {
+                sessionReservations.delete(sessionId);
+              }
+            });
+          return;
+        } finally {
+          if (!continuationStarted && sessionReservations.get(sessionId) === reservationToken) {
+            sessionReservations.delete(sessionId);
+          }
+        }
+      }
+
       const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(\/messages|\/rewind)?$/);
       if (sessionMatch) {
         const id = decodeURIComponent(sessionMatch[1]);
         if (sessionMatch[2] === "/messages" && req.method === "GET") {
-          return sendJson(res, 200, { session_id: id, messages: store.getMessages(id) });
+          return sendJson(res, 200, { session_id: id, messages: publicStoredMessages(store.getMessages(id)) });
         }
         if (sessionMatch[2] === "/rewind" && req.method === "POST") {
+          await releaseFinalizedTurn(id);
           if (controllers.has(id) || sessionReservations.has(id)) {
             return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
           }
@@ -4205,7 +5223,7 @@ export async function startGateway({
               ok: true,
               session_id: id,
               draft: plan.draft,
-              messages: store.getMessages(id),
+              messages: publicStoredMessages(store.getMessages(id)),
               ...restored,
             });
           } finally {
@@ -4213,6 +5231,7 @@ export async function startGateway({
           }
         }
         if (!sessionMatch[2] && req.method === "DELETE") {
+          await releaseFinalizedTurn(id);
           if (controllers.has(id) || sessionReservations.has(id)) {
             return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
           }
@@ -4222,6 +5241,7 @@ export async function startGateway({
         }
         if (!sessionMatch[2] && req.method === "PATCH") {
           const body = await readBody(req);
+          assertGatewayAcceptingMutations();
           const current = store.getSession(id);
           if (!current) return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
           const patch = { id, updatedAt: new Date().toISOString() };
@@ -4273,27 +5293,43 @@ export async function startGateway({
         const sessionId = String(body.session || "");
         const text = String(body.text || "").trim();
         if (!sessionId || !text) return sendJson(res, 400, { error: "session and text required" });
+        let skillIds;
+        try {
+          skillIds = await validatePromptSkillIds(body.skillIds);
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "prompt_skills_invalid";
+          return sendJson(res, 400, { code, error: code });
+        }
         const messageId = body.messageId == null || body.messageId === "" ? undefined : String(body.messageId);
         if (messageId !== undefined && !isSessionMessageId(messageId)) {
           return sendJson(res, 400, { code: "message_id_invalid", error: "message_id_invalid" });
         }
+        if (store.hasUnconsumedApprovals(sessionId)) {
+          return sendJson(res, 409, { code: "approval_required", error: "approval_required" });
+        }
+        await releaseFinalizedTurn(sessionId);
         if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
           return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
         }
         const reservationToken = Symbol("prompt");
         sessionReservations.set(sessionId, reservationToken);
         sendJson(res, 200, { status: "streaming" });
-        void runPrompt(sessionId, text, body.modelParams, messageId, reservationToken);
+        void runPrompt(sessionId, text, body.modelParams, messageId, reservationToken, { skillIds });
         return;
       }
 
       if (req.method === "POST" && path === "/api/cancel") {
         const body = await readBody(req);
-        if (body.session) {
-          const sid = String(body.session);
-          controllers.get(sid)?.abort();
-        }
-        return sendJson(res, 200, { ok: true });
+        const sid = typeof body.session === "string" ? body.session : "";
+        if (!sid) return sendJson(res, 400, { code: "session_required", error: "session_required" });
+        const turn = activeTurns.get(sid);
+        if (!turn) return sendJson(res, 200, { ok: true, status: "idle" });
+        const messageId = await cancelActiveTurn(turn);
+        return sendJson(res, 200, {
+          ok: true,
+          status: "interrupted",
+          ...(messageId ? { message_id: messageId } : {}),
+        });
       }
 
       // ── Workspace file explorer ──────────────────────────────────────
@@ -4429,6 +5465,10 @@ export async function startGateway({
           : "internal_error";
       sendJson(res, status, { code: publicCode, error: publicCode });
     }
+    } finally {
+      activeHttpRequests.delete(activeRequest);
+      finishRequest();
+    }
   });
 
   let closePromise = null;
@@ -4436,15 +5476,25 @@ export async function startGateway({
     if (closePromise) return closePromise;
     // Stop accepting new work immediately, cancel active engine turns and
     // direct Pipeline departments, then flush their durable state.
+    gatewayClosing = true;
     shutdownController.abort();
     server.close();
-    for (const controller of controllers.values()) controller.abort();
     for (const controller of pipelineAdvanceControllers.values()) {
       if (!controller.signal.aborted) controller.abort(new Error("gateway_shutdown"));
     }
     closePromise = (async () => {
       const connectorClose = Promise.resolve(kiroApi.close()).catch(() => undefined);
       const organizationClose = Promise.resolve(kiroOrganizationBroker.close()).catch(() => undefined);
+      // Cooperative providers settle normally; incompatible transports are
+      // fenced after the bounded grace period and their latest public draft is
+      // finalized before SessionStore closes.
+      await Promise.all([...activeTurns.values()].map(turn => (
+        cancelActiveTurn(turn, "gateway-shutdown").catch(() => undefined)
+      )));
+      // A request body can be received in several chunks. It must either
+      // finish while the stores are still open or observe the shutdown signal;
+      // otherwise a late PATCH/approval could mutate state after store.close.
+      await waitForHttpRequests();
       await cronScheduler.stop();
       await configMutationTail;
       await persistence.drain();

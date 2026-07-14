@@ -1,8 +1,52 @@
 import { describe, expect, it } from "vitest";
-import { appendReasoning, appendText, messageText, toolComplete, toolStart } from "@/lib/chat-messages";
+import { approvalRequest, approvalResolved, appendReasoning, appendText, messageText, toolComplete, toolStart } from "@/lib/chat-messages";
 import type { MessagePart, ToolPart } from "@/lib/types";
 
 const tools = (parts: MessagePart[]): ToolPart[] => parts.filter((p): p is ToolPart => p.type === "tool");
+
+describe("approval request lifecycle", () => {
+  it("keeps one stable card while decision and one-shot consumption arrive", () => {
+    const requested = approvalRequest([], {
+      approvalId: "approval-1",
+      toolCallId: "call-1",
+      name: "run_command",
+      args: { command: "npm test" },
+      reason: "permission_rule_requires_confirmation",
+    });
+    const approved = approvalResolved(requested, {
+      approvalId: "approval-1",
+      approved: true,
+      reason: "Approved once",
+    });
+    const consumed = approvalResolved(approved, {
+      approvalId: "approval-1",
+      consumed: true,
+    });
+
+    expect(consumed).toHaveLength(1);
+    expect(consumed[0]).toMatchObject({
+      type: "approval",
+      approvalId: "approval-1",
+      status: "approved",
+      decisionReason: "Approved once",
+      consumedAt: expect.any(String),
+    });
+    const toolAndApproval = approvalRequest(
+      toolStart([], { toolCallId: "call-1", name: "run_command" }),
+      {
+        approvalId: "approval-1",
+        toolCallId: "call-1",
+        name: "run_command",
+        reason: "permission_rule_requires_confirmation",
+      },
+    );
+    expect(toolAndApproval[0]).toMatchObject({
+      type: "tool",
+      running: false,
+      awaitingApproval: true,
+    });
+  });
+});
 
 describe("appendText / appendReasoning coalescing", () => {
   it("coalesces consecutive text deltas into a single text part", () => {

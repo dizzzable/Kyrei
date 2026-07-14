@@ -36,6 +36,11 @@ async function execute(tools: ToolSet, args: unknown): Promise<string> {
   return String(await definition.execute(args, { toolCallId: "skill-test", messages: [] }));
 }
 
+async function search(tools: ToolSet, args: unknown): Promise<string> {
+  const definition = tools["search_skills"] as { execute: (input: unknown, options: unknown) => Promise<unknown> };
+  return String(await definition.execute(args, { toolCallId: "skill-search-test", messages: [] }));
+}
+
 describe("Agent Skills tool", () => {
   it("does not expose a tool when no skills are enabled", () => {
     expect(buildSkillTools([])).toEqual({});
@@ -47,6 +52,26 @@ describe("Agent Skills tool", () => {
 
     await expect(execute(tools, { id: "skill-review" })).resolves.toContain("Check correctness");
     expect(onUsed).toHaveBeenCalledWith("skill-review");
+  });
+
+  it("searches assigned Skill metadata without loading instructions or recording use", async () => {
+    const onUsed = vi.fn();
+    const tools = buildSkillTools([
+      ...skills,
+      {
+        id: "skill-security",
+        name: "Security review",
+        description: "Inspect authentication boundaries",
+        provenance: "global" as const,
+        content: "SECRET_SKILL_INSTRUCTIONS",
+      },
+    ], { onUsed });
+
+    const output = await search(tools, { query: "authentication" });
+    expect(output).toContain("skill-security: Security review");
+    expect(output).not.toContain("SECRET_SKILL_INSTRUCTIONS");
+    expect(onUsed).not.toHaveBeenCalled();
+    await expect(search(tools, { query: "nonexistent-domain" })).resolves.toBe("No assigned Skills matched that query.");
   });
 
   it("never reveals the available documents for an unknown id", async () => {
@@ -119,7 +144,32 @@ describe("Agent Skills tool", () => {
     const noisy = [{ ...skills[0], content: "x".repeat(10_000) }];
     const output = await execute(buildSkillTools(noisy, { maxOutputChars: 800 }), { id: "skill-review" });
     expect(output.length).toBeLessThanOrEqual(800);
-    expect(output).toContain("skill content truncated");
+    expect(output).toContain("Skill instructions truncated");
+  });
+
+  it("preserves the continuation marker when a Skill chunk exactly fills its budget", async () => {
+    const noisy = [{ ...skills[0], content: "x".repeat(10_000) }];
+    const output = await execute(buildSkillTools(noisy, { maxOutputChars: 800 }), { id: "skill-review" });
+    expect(output).toHaveLength(800);
+    expect(output).toContain("Skill instructions truncated; call read_skill with offset");
+    expect(output).not.toContain("skill content truncated");
+  });
+
+  it("continues a long self-contained SKILL.md without requiring linked documents", async () => {
+    const longContent = `BEGIN-${"x".repeat(2_000)}-END`;
+    const tools = buildSkillTools([{ ...skills[0], content: longContent }], { maxOutputChars: 800 });
+    const first = await execute(tools, { id: "skill-review" });
+    const offset = Number(first.match(/offset (\d+)/)?.[1]);
+    expect(first).toContain("Skill instructions truncated");
+    expect(Number.isInteger(offset)).toBe(true);
+    expect(first).toContain("BEGIN-");
+
+    const continued = await execute(tools, { id: "skill-review", offset });
+    expect(continued).toContain("continued at character");
+    const finalOffset = Number(continued.match(/offset (\d+)/)?.[1]);
+    const final = await execute(tools, { id: "skill-review", offset: finalOffset });
+    expect(`${first}\n${continued}\n${final}`).toContain("-END");
+    expect(continued).not.toContain("linked local documents");
   });
 
   it("preserves primary skill content when linked-document metadata exceeds the output budget", async () => {

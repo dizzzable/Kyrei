@@ -10,6 +10,21 @@ export interface ReasoningPart {
   text: string;
 }
 
+export interface ApprovalPart {
+  type: "approval";
+  approvalId: string;
+  toolCallId: string;
+  name: string;
+  args?: unknown;
+  reason: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  createdAt?: string;
+  expiresAt?: string;
+  resolvedAt?: string;
+  decisionReason?: string;
+  consumedAt?: string;
+}
+
 export interface ToolPart {
   type: "tool";
   toolCallId: string;
@@ -21,12 +36,13 @@ export interface ToolPart {
   snapshotId?: string;
   error?: string;
   running: boolean;
+  awaitingApproval?: boolean;
   durationS?: number;
   /** Live progress text streamed while the tool runs (tool.progress). */
   progress?: string;
 }
 
-export type MessagePart = TextPart | ReasoningPart | ToolPart;
+export type MessagePart = TextPart | ReasoningPart | ToolPart | ApprovalPart;
 
 export interface ChatMessage {
   id: string;
@@ -51,11 +67,13 @@ export interface SessionInfo {
   /** Live or most recent runtime activity for this session. */
   activity?: {
     active: boolean;
-    phase: "thinking" | "reasoning" | "tool" | "recovering" | "responding" | "complete" | "failed" | "interrupted";
+    phase: "thinking" | "reasoning" | "tool" | "recovering" | "responding" | "awaiting_approval" | "complete" | "failed" | "interrupted";
     startedAt: number;
     updatedAt: number;
     completedAt?: number;
     currentTool?: string;
+    /** Canonical durable assistant draft for an active turn. */
+    messageId?: string;
     eventCount: number;
     toolCount: number;
     tokens?: number;
@@ -68,6 +86,11 @@ export interface StoredChatMessage {
   content: string;
   parts?: MessagePart[];
   at?: string;
+  pending?: boolean;
+  turnStatus?: "streaming" | "complete" | "max_steps" | "awaiting_approval" | "interrupted" | "error";
+  /** Safe gateway error metadata used to restore a failed turn after restart. */
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 export interface GatewayStatus {
@@ -604,6 +627,21 @@ export interface AppConfig {
   engine?: Record<string, unknown>;
 }
 
+/** Safe, user-facing health state for the optional local GBrain runtime. */
+export interface GBrainRuntimeStatus {
+  state: "ready" | "not_initialized" | "unavailable" | "error";
+  /** Current agent access setting, independent from whether the local store is healthy. */
+  mode: "off" | "read" | "read-write";
+  /** Compact doctor result; no raw local paths or diagnostics are exposed. */
+  doctorStatus: "ok" | "warnings" | "error" | "unknown";
+  reason?: "command_unavailable" | "adapter_unavailable" | "not_initialized" | "check_failed";
+}
+
+export interface GBrainInitializationResult {
+  status: GBrainRuntimeStatus;
+  config: AppConfig;
+}
+
 /** Event frames streamed from the gateway (Server-Sent Events). */
 export interface GatewayEvent {
   type: string;
@@ -611,6 +649,10 @@ export interface GatewayEvent {
     code?: string;
     text?: string;
     tool_call_id?: string;
+    approval_id?: string;
+    approved?: boolean;
+    consumed?: boolean;
+    reason?: string;
     name?: string;
     args?: unknown;
     result?: string;
@@ -619,7 +661,10 @@ export interface GatewayEvent {
     inline_diff?: string;
     snapshot_id?: string;
     status?: string;
+    /** False only when the gateway could not durably flush a terminal turn. */
+    durable?: boolean;
     session_id?: string;
+    message_id?: string;
     provider_id?: string;
     model_id?: string;
     title?: string;

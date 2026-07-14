@@ -138,6 +138,30 @@ export function SkillsSettings({ workspace }: { workspace: string }) {
         <p className="mt-1 text-[10px] text-faint">{t("settings.skills.applyNewTurns")}</p>
       </div>
 
+      <section aria-labelledby="skills-workflow-title" className="rounded-lg border border-border-soft bg-elevated/35 p-3">
+        <div className="flex items-start gap-2.5">
+          <span className="grid size-7 shrink-0 place-items-center rounded-md border border-border-soft bg-bg/60 text-primary">
+            <FileText className="size-3.5" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <h4 id="skills-workflow-title" className="text-[11px] font-semibold text-secondary">{t("settings.skills.workflow.title")}</h4>
+            <p className="mt-0.5 text-[10px] leading-4 text-muted">{t("settings.skills.workflow.standalone")}</p>
+          </div>
+        </div>
+        <ol className="mt-3 grid gap-1.5 text-[10px] leading-4 text-muted md:grid-cols-3">
+          {([
+            "settings.skills.workflow.auto",
+            "settings.skills.workflow.single",
+            "settings.skills.workflow.team",
+          ] as const).map((key, index) => (
+            <li key={key} className="flex min-w-0 gap-1.5">
+              <span className="grid size-4 shrink-0 place-items-center rounded-full bg-bg font-mono text-[8.5px] text-primary">{index + 1}</span>
+              <span>{t(key)}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+
       <section>
         <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
           <div>

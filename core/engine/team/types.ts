@@ -33,6 +33,20 @@ export interface TeamDepartmentMetrics extends TeamArtifactMetrics {
   readonly unmeteredProviderCalls: number;
 }
 
+/**
+ * Inspectable provenance for a page that a Team role actually fetched. The
+ * page body stays out of cross-role artifacts; the digest lets a reviewer
+ * distinguish this receipt from a model-written URL or search snippet.
+ */
+export interface TeamSourceReceipt {
+  readonly id: string;
+  readonly requestedUrl: string;
+  readonly finalUrl: string;
+  readonly title: string;
+  readonly contentDigest: string;
+  readonly fetchedAt: string;
+}
+
 export interface TeamArtifact {
   readonly taskId: string;
   readonly summary: string;
@@ -42,6 +56,8 @@ export interface TeamArtifact {
   readonly validation: readonly string[];
   readonly uncertainties: readonly string[];
   readonly whatWasNotChecked: readonly string[];
+  /** Successful direct web-fetches captured by runtime code, never model text. */
+  readonly sources?: readonly TeamSourceReceipt[];
   readonly metrics?: TeamArtifactMetrics;
 }
 

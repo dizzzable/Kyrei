@@ -600,6 +600,7 @@ export function normalizeProviderSecret(value) {
 
 export function normalizeProviderSecrets(value) {
   const source = object(value);
+  const approvalSigningKey = secretText(source.approvalSigningKey, 512);
   const rawProviders = object(source.providers);
   const rawAccounts = object(source.accounts);
   const providers = {};
@@ -623,6 +624,7 @@ export function normalizeProviderSecrets(value) {
     version: 3,
     providers,
     accounts,
+    ...(approvalSigningKey ? { approvalSigningKey } : {}),
     kiroOrganization: serializeKiroOrganizationSecrets(
       normalizeKiroOrganizationSecrets(source.kiroOrganization),
     ),
@@ -661,6 +663,8 @@ export function deleteProviderAccountCredentials(secretState, providerId, accoun
  */
 export function collectProviderCredentialValues(secretState, providers = []) {
   const values = [];
+  const approvalSigningKey = secretText(object(secretState).approvalSigningKey, 512);
+  if (approvalSigningKey) values.push(approvalSigningKey);
   for (const raw of Object.values(object(object(secretState).providers))) {
     const credential = normalizeProviderSecret(raw);
     for (const field of PROVIDER_CREDENTIAL_VALUE_FIELDS) {

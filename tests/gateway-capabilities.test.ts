@@ -104,6 +104,54 @@ describe("gateway operational capabilities", () => {
     expect((await request<{ skills: unknown[] }>("/api/skills")).skills).toEqual([]);
   });
 
+  it("forwards only explicitly selected standalone Skills for a normal chat turn", async () => {
+    const runKyreiChat = vi.fn(async () => ({
+      text: "done",
+      parts: [],
+      status: "complete",
+      attempts: [],
+    }));
+    engineLoader.mockResolvedValue({ runKyreiChat });
+    const config = await request<{ activeProviderId: string }>("/api/config");
+    await request(`/api/providers/${config.activeProviderId}/secret`, {
+      method: "PUT",
+      body: JSON.stringify({ apiKey: "selected-skill-credential" }),
+    });
+    const selected = await request<{ skill: { id: string } }>("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({ name: "selected", content: "Use the selected workflow." }),
+    });
+    await request("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({ name: "other", content: "Do not inject this skill." }),
+    });
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Apply the chosen skill", skillIds: [selected.skill.id] }),
+    });
+
+    await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+    const options = runKyreiChat.mock.calls[0]?.[0] as {
+      skills: Array<{ id: string }>;
+      requiredSkillIds?: string[];
+    };
+    expect(options.skills.map((skill) => skill.id)).toEqual([selected.skill.id]);
+    expect(options.requiredSkillIds).toEqual([selected.skill.id]);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/prompt`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Kyrei-Gateway-Token": server.token,
+      },
+      body: JSON.stringify({ session: session.id, text: "Invalid skill", skillIds: ["not-a-skill"] }),
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: "prompt_skills_invalid" });
+  });
+
   it("exposes durable Cron CRUD, pause/resume, and run history", async () => {
     const created = await request<{ job: { id: string; name: string; schedule: string; enabled: boolean; nextRunAt: string } }>("/api/cron/jobs", {
       method: "POST",

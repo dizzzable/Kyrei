@@ -27,6 +27,10 @@ export const DEFAULT_TEAM_LIMITS = Object.freeze({
 
 export const MAX_TEAM_PROFILES = 256;
 export const MAX_TEAM_ROLES = 128;
+// Skills are injected into a single team runtime. Keep the public Team
+// configuration within the SkillsStore's hard runtime capacity so selecting a
+// valid profile cannot silently lose a role's requested skill at execution.
+export const MAX_TEAM_PROFILE_SKILLS = 256;
 
 const MAX_SKILLS_PER_ROLE = 128;
 const MAX_ROLE_CHILDREN = 12;
@@ -112,6 +116,22 @@ function normalizeStringList(value, maxItems, maxLength) {
   return result;
 }
 
+/**
+ * Return the distinct skills selected by a profile in stable role/selection
+ * order. This intentionally reflects the runtime contract: a skill selected
+ * by several roles is injected once, while each role keeps its own `skillIds`
+ * assignment for authorization.
+ */
+export function teamProfileSkillIds(profile) {
+  const skillIds = new Set();
+  for (const role of Array.isArray(profile?.roles) ? profile.roles : []) {
+    for (const skillId of Array.isArray(role?.skillIds) ? role.skillIds : []) {
+      if (typeof skillId === "string" && skillId) skillIds.add(skillId);
+    }
+  }
+  return [...skillIds];
+}
+
 function providerModel(value, providers) {
   const source = object(value);
   const providerId = cleanText(source.providerId, 64);
@@ -129,7 +149,13 @@ function normalizeRole(value, index, ids, providers) {
   const id = uniqueId(source.id, `role-${index + 1}`, ids);
   const capabilities = normalizeStringList(source.capabilities, TEAM_CAPABILITIES.length, 64)
     .filter((capability) => CAPABILITY_SET.has(capability));
+  const skillIds = normalizeStringList(source.skillIds, MAX_SKILLS_PER_ROLE, MAX_SKILL_ID);
   if (!capabilities.length) capabilities.push("workspace.read");
+  // A selected Skill without the read capability is a dead assignment: the
+  // role prompt advertises it but the progressive-loading tools are absent.
+  // Skill access is read-only, so normalize legacy/imported profiles to the
+  // same safe contract as the settings UI.
+  if (skillIds.length && !capabilities.includes("skills.read")) capabilities.push("skills.read");
   const requestedModel = source.model !== undefined && source.model !== null;
   const model = requestedModel ? providerModel(source.model, providers) : null;
   const spawnRequested = source.canSpawn === true;
@@ -149,7 +175,7 @@ function normalizeRole(value, index, ids, providers) {
       instructions: cleanText(source.instructions, MAX_ROLE_INSTRUCTIONS, "", { allowLineBreaks: true }),
       ...(promptProfileId ? { promptProfileId } : {}),
       ...(model ? { model } : {}),
-      skillIds: normalizeStringList(source.skillIds, MAX_SKILLS_PER_ROLE, MAX_SKILL_ID),
+      skillIds,
       capabilities,
       canSpawn,
       maxChildren,
@@ -171,16 +197,20 @@ function normalizeProfile(value, index, ids, providers) {
     roles.push(normalized.role);
     invalidModel ||= normalized.invalidModel;
   }
+  const skillLimitExceeded = teamProfileSkillIds({ roles }).length > MAX_TEAM_PROFILE_SKILLS;
   const explicitlyDisabled = source.enabled === false;
   const previousDisabledReason = [
     "profile_disabled",
     "model_reference_unavailable",
     "profile_roles_required",
+    "profile_skills_limit_exceeded",
   ].includes(source.disabledReason)
     ? source.disabledReason
     : "";
   const disabledReason = invalidModel
       ? "model_reference_unavailable"
+    : skillLimitExceeded
+      ? "profile_skills_limit_exceeded"
     : explicitlyDisabled
       ? previousDisabledReason || "profile_disabled"
       : roles.length === 0
@@ -366,11 +396,16 @@ export function validateOrchestrationInput(value, providers = [], availability =
       throw new TeamConfigError("team_profile_roles_invalid");
     }
     const roleIds = new Set();
+    const profileSkillIds = new Set();
     for (const rawRole of profileSource.roles) {
       validateRole(rawRole, Array.isArray(providers) ? providers : [], availability);
       const roleId = rawRole.id.trim();
       if (roleIds.has(roleId)) throw new TeamConfigError("team_role_id_duplicate");
       roleIds.add(roleId);
+      for (const skillId of rawRole.skillIds ?? []) profileSkillIds.add(skillId.trim());
+    }
+    if (profileSkillIds.size > MAX_TEAM_PROFILE_SKILLS) {
+      throw new TeamConfigError("team_profile_skills_limit_exceeded");
     }
     validateLimits(profileSource.limits);
   }

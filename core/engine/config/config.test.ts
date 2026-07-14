@@ -58,14 +58,25 @@ describe("resolveEngineConfig (task 2.6)", () => {
 
   it("validates bounded read-only delegation settings", () => {
     const { config } = resolveEngineConfig({
-      delegation: { enabled: false, maxTasks: 6, maxParallel: 2, maxSteps: 12 },
+      delegation: { enabled: false, maxTasks: 6, maxParallel: 2, maxSteps: 12, timeoutMs: 45_000 },
     });
     expect(config.delegation).toEqual({
       enabled: false,
       maxTasks: 6,
       maxParallel: 2,
       maxSteps: 12,
+      timeoutMs: 45_000,
     });
+  });
+
+  it("rejects delegation timeouts outside the bounded wall-clock range", () => {
+    const tooShort = resolveEngineConfig({ delegation: { timeoutMs: 999 } });
+    const tooLong = resolveEngineConfig({ delegation: { timeoutMs: 300_001 } });
+
+    expect(tooShort.config.delegation).toEqual(DEFAULT_ENGINE_CONFIG.delegation);
+    expect(tooLong.config.delegation).toEqual(DEFAULT_ENGINE_CONFIG.delegation);
+    expect(tooShort.warnings.some((warning) => warning.includes("delegation.timeoutMs"))).toBe(true);
+    expect(tooLong.warnings.some((warning) => warning.includes("delegation.timeoutMs"))).toBe(true);
   });
 
   it("clamps delegation parallelism to the accepted task count", () => {

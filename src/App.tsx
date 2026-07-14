@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Code2, FolderCode, Sparkles, TerminalSquare } from "lucide-react";
 
 import { CommandPalette } from "@/components/CommandPalette";
 import { Composer } from "@/components/Composer";
@@ -16,7 +15,9 @@ import { DeveloperRail } from "@/components/shell/DeveloperRail";
 import { ShellLayout } from "@/components/shell/ShellLayout";
 import { useShellPreferences } from "@/components/shell/shell-preferences";
 import { useI18n } from "@/i18n";
-import { appendReasoning, appendText, toolComplete, toolProgress, toolStart } from "@/lib/chat-messages";
+import type { TranslationKey } from "@/i18n/catalog";
+import type { Translator } from "@/i18n/types";
+import { approvalRequest, approvalResolved, appendReasoning, appendText, toolComplete, toolProgress, toolStart } from "@/lib/chat-messages";
 import { GatewayRequestError, gateway } from "@/lib/gateway";
 import { actionForCombo } from "@/store/keybinds";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
@@ -25,10 +26,15 @@ import { getStored, setStored } from "@/lib/persist";
 import { getSlashCommands } from "@/lib/slash-commands";
 import { cancelSpeech, speak } from "@/lib/speech";
 import {
+  cancelResponseIsTerminal,
+  mergeSessionHydration,
+  pendingAssistantId,
   reconcileCurrentSessionId,
   rollbackSessionModel,
+  runStateForSession,
   shouldApplySessionPoll,
   updateSessionModel,
+  type SessionRunState,
 } from "@/lib/session-sync";
 import { sessionTitle } from "@/lib/session-search";
 import { applyTheme, getTheme, THEMES, type ThemeId } from "@/lib/theme";
@@ -54,7 +60,9 @@ export function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [streaming, setStreaming] = useState(false);
+  const [runState, setRunState] = useState<SessionRunState>("idle");
+  const streaming = runState !== "idle";
+  const stopping = runState === "stopping";
   const [rewinding, setRewinding] = useState(false);
   const [tokens, setTokens] = useState<number | null>(null);
   const [contextWindow, setContextWindow] = useState<number | null>(null);
@@ -64,6 +72,9 @@ export function App() {
   const [agentRuns, setAgentRuns] = useState<SubagentRun[]>([]);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [sessionModelPendingIds, setSessionModelPendingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const approvalBlocked = messages.some((message) => message.parts.some(
+    (part) => part.type === "approval" && !part.consumedAt,
+  ));
 
   const pendingIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -71,6 +82,13 @@ export function App() {
   const sessionMutationRevisionRef = useRef(0);
   const sessionMutationsInFlightRef = useRef(0);
   const sessionModelPendingIdsRef = useRef(new Set<string>());
+  const selectedSessionViewRef = useRef({ id: currentId, revision: 0 });
+  if (selectedSessionViewRef.current.id !== currentId) {
+    selectedSessionViewRef.current = {
+      id: currentId,
+      revision: selectedSessionViewRef.current.revision + 1,
+    };
+  }
 
   const beginSessionMutation = useCallback(() => {
     sessionMutationsInFlightRef.current += 1;
@@ -204,15 +222,27 @@ export function App() {
     if (!currentId) return;
     setStored("kyrei-last-session", currentId);
     let alive = true;
-    pendingIdRef.current = null;
-    setStreaming(false);
-    setTurnStartedAt(null);
+    const active = currentSession?.status === "working";
+    const localPendingId = pendingAssistantId(currentId);
+    const canonicalPendingId = currentSession?.activity?.messageId;
+    pendingIdRef.current = active ? canonicalPendingId ?? localPendingId : null;
+    setRunState(active ? "running" : "idle");
+    setTurnStartedAt(active ? currentSession?.activity?.startedAt ?? Date.now() : null);
     setTokens(null);
+    setMessages([]);
     cancelSpeech();
     gateway.getMessages(currentId)
       .then((stored) => {
         if (!alive) return;
-        setMessages(hydrateStoredMessages(stored));
+        const hydration = mergeSessionHydration(
+          hydrateStoredMessages(stored, translationRef.current),
+          [],
+          localPendingId,
+          active,
+          canonicalPendingId,
+        );
+        pendingIdRef.current = hydration.pendingId;
+        setMessages(hydration.messages);
       })
       .catch((reason) => {
         if (alive) {
@@ -221,10 +251,39 @@ export function App() {
         }
       });
     return () => { alive = false; };
+    // Session status changes are reconciled by the live status effect below;
+    // this hydration intentionally runs only when the selected session changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, describeError]);
 
   useEffect(() => {
+    if (!currentId || !currentSession) return;
+    setRunState((current) => runStateForSession(currentSession.status, current));
+    if (currentSession.status !== "working") return;
+    const syntheticId = pendingAssistantId(currentId);
+    const canonicalId = currentSession.activity?.messageId;
+    const previousId = pendingIdRef.current ?? syntheticId;
+    const nextId = canonicalId ?? previousId;
+    pendingIdRef.current = nextId;
+    setTurnStartedAt((current) => current ?? currentSession.activity?.startedAt ?? Date.now());
+    setMessages((current) => {
+      const existing = current.find((message) => message.id === previousId && message.pending)
+        ?? current.find((message) => message.role === "assistant" && message.pending);
+      if (existing) {
+        return current.map((message) => message === existing ? { ...message, id: nextId, pending: true } : message);
+      }
+      return [...current, {
+        id: nextId,
+        role: "assistant",
+        parts: [{ type: "reasoning", text: "" }],
+        pending: true,
+      }];
+    });
+  }, [currentId, currentSession?.activity?.messageId, currentSession?.activity?.startedAt, currentSession?.status]);
+
+  useEffect(() => {
     if (!currentId) return;
+    let alive = true;
     const updatePending = (transform: (parts: MessagePart[]) => MessagePart[]) => {
       const pendingId = pendingIdRef.current;
       if (!pendingId) return;
@@ -233,12 +292,70 @@ export function App() {
         : message));
     };
 
+    const syncSelectedSession = async () => {
+      try {
+        const [stored, remoteSessions] = await Promise.all([
+          gateway.getMessages(currentId),
+          gateway.listSessions(),
+        ]);
+        if (!alive) return;
+        setSessions(remoteSessions);
+        const remote = remoteSessions.find((session) => session.id === currentId);
+        const active = remote?.status === "working";
+        const localPendingId = pendingIdRef.current ?? pendingAssistantId(currentId);
+        setMessages((current) => {
+          const hydration = mergeSessionHydration(
+            hydrateStoredMessages(stored, translationRef.current),
+            current,
+            localPendingId,
+            active,
+            remote?.activity?.messageId,
+          );
+          pendingIdRef.current = hydration.pendingId;
+          return hydration.messages;
+        });
+        setRunState((current) => runStateForSession(remote?.status, current));
+        setTurnStartedAt(active ? remote?.activity?.startedAt ?? Date.now() : null);
+      } catch (reason) {
+        if (alive) setStartupError(describeError(reason));
+      }
+    };
+
     const handle = (event: GatewayEvent) => {
       const payload = event.payload || {};
       switch (event.type) {
-        case "message.start":
+        case "gateway.ready":
+          void syncSelectedSession();
+          break;
+        case "message.start": {
+          const previousId = pendingIdRef.current ?? pendingAssistantId(currentId);
+          const canonicalId = payload.message_id || previousId;
+          pendingIdRef.current = canonicalId;
+          setRunState("running");
+          setTurnStartedAt((current) => current ?? Date.now());
+          setMessages((current) => {
+            const existing = current.find((message) => message.id === previousId)
+              ?? current.find((message) => message.role === "assistant" && message.pending);
+            if (existing) {
+              return current.map((message) => message === existing
+                ? {
+                    ...message,
+                    id: canonicalId,
+                    pending: true,
+                    parts: message.parts.length ? message.parts : [{ type: "reasoning", text: "" }],
+                  }
+                : message);
+            }
+            return [...current, {
+              id: canonicalId,
+              role: "assistant",
+              parts: [{ type: "reasoning", text: "" }],
+              pending: true,
+            }];
+          });
           updatePending((parts) => parts.length ? parts : [{ type: "reasoning", text: "" }]);
           break;
+        }
         case "message.delta":
           if (payload.text) updatePending((parts) => appendText(parts, payload.text!));
           break;
@@ -261,6 +378,32 @@ export function App() {
           break;
         case "tool.progress":
           if (payload.text) updatePending((parts) => toolProgress(parts, { toolCallId: payload.tool_call_id, name: payload.name, text: payload.text! }));
+          break;
+        case "approval.request":
+          if (payload.approval_id && payload.tool_call_id && payload.name) {
+            updatePending((parts) => approvalRequest(parts, {
+              approvalId: payload.approval_id!,
+              toolCallId: payload.tool_call_id!,
+              name: payload.name!,
+              args: payload.args,
+              reason: payload.reason || "permission_rule_requires_confirmation",
+            }));
+          }
+          break;
+        case "approval.resolved":
+        case "approval.consumed":
+          if (payload.approval_id) {
+            setMessages((current) => current.map((message) => ({
+              ...message,
+              parts: approvalResolved(message.parts, {
+                approvalId: payload.approval_id!,
+                ...(event.type === "approval.resolved" && typeof payload.approved === "boolean"
+                  ? { approved: payload.approved, reason: payload.reason }
+                  : {}),
+                consumed: event.type === "approval.consumed" || payload.consumed === true,
+              }),
+            })));
+          }
           break;
         case "status.update": {
           const usage = (event.payload as { usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number } }).usage;
@@ -312,10 +455,28 @@ export function App() {
           if (pendingId) {
             setMessages((current) => current.map((message) => message.id === pendingId ? { ...message, pending: false } : message));
           }
-          pendingIdRef.current = null;
-          setStreaming(false);
-          setTurnStartedAt(null);
-          notifyTurnComplete(translationRef.current("shell.notification.turnComplete"));
+          // Gateway publishes this frame only after the assistant draft is
+          // flushed. Hydrate that canonical version before releasing queued
+          // input into the now-idle session.
+          const hydrateTerminal = payload.durable === false
+            ? Promise.resolve()
+            : gateway.getMessages(currentId)
+              .then((stored) => {
+                if (alive) setMessages(hydrateStoredMessages(stored, translationRef.current));
+              });
+          void hydrateTerminal
+            .catch((reason) => {
+              if (alive) setStartupError(describeError(reason));
+            })
+            .finally(() => {
+              if (!alive) return;
+              pendingIdRef.current = null;
+              setRunState("idle");
+              setTurnStartedAt(null);
+            });
+          if (payload.status !== "awaiting_approval") {
+            notifyTurnComplete(translationRef.current("shell.notification.turnComplete"));
+          }
           if (payload.text && getUiSettings().autoSpeak) {
             speak(payload.text, { lang: getUiSettings().voiceLang || undefined });
           }
@@ -341,24 +502,27 @@ export function App() {
             ? translate("shell.error.providerNotConfigured")
             : translate("shell.error.prefix", { message: payload.message || translate("shell.error.fallback") });
           updatePending((parts) => appendText(parts, `\n\n${message}`));
-          const pendingId = pendingIdRef.current;
-          if (pendingId) {
-            setMessages((current) => current.map((item) => item.id === pendingId ? { ...item, pending: false } : item));
-          }
-          pendingIdRef.current = null;
-          setStreaming(false);
-          setTurnStartedAt(null);
+          // The following durable message.complete frame owns the transition
+          // to idle. Staying busy here prevents a queued prompt from racing it.
           break;
         }
       }
     };
 
     try {
-      return gateway.subscribe(currentId, handle);
+      const unsubscribe = gateway.subscribe(currentId, handle);
+      return () => {
+        alive = false;
+        unsubscribe();
+      };
     } catch (reason) {
+      alive = false;
       setStartupError(describeError(reason));
       return undefined;
     }
+    // Live messages are intentionally read inside the reconnect callback; the
+    // effect must not resubscribe for every delta.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, describeError]);
 
   useEffect(() => {
@@ -366,10 +530,10 @@ export function App() {
     if (element) element.scrollTop = messages.length === 0 ? 0 : element.scrollHeight;
   }, [messages]);
 
-  const send = useCallback((text: string) => {
-    if (!currentId || rewinding) return;
+  const send = useCallback((text: string, skillIds?: string[]) => {
+    if (!currentId || rewinding || approvalBlocked) return;
     const userId = `msg-${globalThis.crypto.randomUUID()}`;
-    const assistantId = `assistant-${Date.now()}`;
+    const assistantId = pendingAssistantId(currentId);
     pendingIdRef.current = assistantId;
     setStartupError(null);
     setMessages((current) => [
@@ -377,19 +541,20 @@ export function App() {
       { id: userId, role: "user", parts: [{ type: "text", text }] },
       { id: assistantId, role: "assistant", parts: [], pending: true },
     ]);
-    setStreaming(true);
+    setRunState("running");
     setTurnStartedAt(Date.now());
     const protocol = config?.providers.find((candidate) => candidate.id === currentProviderId)?.protocol;
     const modelParams = executableModelParams(protocol, currentModelPreset);
-    gateway.sendPrompt(currentId, text, modelParams, userId).catch((reason) => {
+    gateway.sendPrompt(currentId, text, modelParams, userId, skillIds).catch((reason) => {
       const message = describeError(reason);
       setMessages((current) => current.map((item) => item.id === assistantId
         ? { ...item, parts: [{ type: "text", text: message }], pending: false }
         : item));
-      setStreaming(false);
+      pendingIdRef.current = null;
+      setRunState("idle");
       setTurnStartedAt(null);
     });
-  }, [currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
+  }, [approvalBlocked, currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
 
   const rewindToMessage = useCallback(async (messageId: string) => {
     if (!currentId || streaming || rewinding) return;
@@ -399,10 +564,10 @@ export function App() {
     try {
       const result = await gateway.rewindSession(currentId, messageId);
       pendingIdRef.current = null;
-      setStreaming(false);
+      setRunState("idle");
       setTurnStartedAt(null);
       setTokens(null);
-      setMessages(hydrateStoredMessages(result.messages));
+      setMessages(hydrateStoredMessages(result.messages, translationRef.current));
       window.dispatchEvent(new CustomEvent("kyrei:set-composer-draft", {
         detail: { text: result.draft, focus: true },
       }));
@@ -415,12 +580,86 @@ export function App() {
     }
   }, [currentId, describeError, rewinding, streaming, t]);
 
-  const stop = useCallback(() => {
-    if (currentId) gateway.cancel(currentId).catch(() => {});
+  const respondToApproval = useCallback(async (approvalId: string, approved: boolean) => {
+    if (!currentId || streaming || rewinding) return;
+    const assistantId = `assistant-approval-${Date.now()}`;
+    pendingIdRef.current = assistantId;
+    setStartupError(null);
+    setMessages((current) => [
+      ...current,
+      { id: assistantId, role: "assistant", parts: [], pending: true },
+    ]);
+    setRunState("running");
+    setTurnStartedAt(Date.now());
+    try {
+      const result = await gateway.respondToApproval(currentId, approvalId, approved);
+      setMessages((current) => current.map((message) => ({
+        ...message,
+        parts: message.parts.map((part) => part.type === "approval" && part.approvalId === approvalId
+          ? { ...part, ...result.approval }
+          : part),
+      })));
+      if (result.status === "pending") {
+        setMessages((current) => current.filter((message) => message.id !== assistantId));
+        pendingIdRef.current = null;
+        setRunState("idle");
+        setTurnStartedAt(null);
+      }
+    } catch (reason) {
+      setMessages((current) => current.filter((message) => message.id !== assistantId));
+      pendingIdRef.current = null;
+      setRunState("idle");
+      setTurnStartedAt(null);
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, describeError, rewinding, streaming]);
+
+  const stop = useCallback(async () => {
+    if (!currentId || stopping) return;
+    const sessionId = currentId;
+    const viewRevision = selectedSessionViewRef.current.revision;
+    const ownsSelectedView = () => (
+      selectedSessionViewRef.current.id === sessionId
+      && selectedSessionViewRef.current.revision === viewRevision
+    );
     cancelSpeech();
-    setStreaming(false);
-    setTurnStartedAt(null);
-  }, [currentId]);
+    setStartupError(null);
+    setRunState("stopping");
+    try {
+      const result = await gateway.cancel(sessionId);
+      if (!cancelResponseIsTerminal(result)) throw new Error(`cancel_${result.status || "unconfirmed"}`);
+      const stored = await gateway.getMessages(sessionId);
+      setSessions((current) => current.map((session) => session.id === sessionId
+        ? {
+            ...session,
+            status: "idle",
+            ...(session.activity ? {
+              activity: {
+                ...session.activity,
+                active: false,
+                phase: result.status === "interrupted" ? "interrupted" : session.activity.phase,
+                updatedAt: Date.now(),
+                completedAt: Date.now(),
+              },
+            } : {}),
+          }
+        : session));
+      // The user may select another chat while the gateway drains a long
+      // provider call. Never overwrite that newly selected chat with stale
+      // cancellation state from the previous one.
+      if (!ownsSelectedView()) return;
+      pendingIdRef.current = null;
+      setMessages(hydrateStoredMessages(stored, translationRef.current));
+      setRunState("idle");
+      setTurnStartedAt(null);
+    } catch (reason) {
+      // A failed acknowledgement is not an idle signal. Keep Stop available so
+      // the user can retry, and surface the concrete gateway failure.
+      if (!ownsSelectedView()) return;
+      setRunState("running");
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, describeError, stopping]);
 
   const newSession = useCallback(async () => {
     beginSessionMutation();
@@ -631,7 +870,6 @@ export function App() {
     setConfig({ ...config, engine: nextEngine });
     gateway.setConfig({ engine: nextEngine }).then(setConfig).catch(() => setConfig(config));
   };
-  const empty = messages.length === 0;
   const developerResizeSide = preferences.swapped ? "left" : "right";
   const activityResizeSide = preferences.swapped ? "right" : "left";
 
@@ -689,57 +927,32 @@ export function App() {
 
   const conversation = (
     <main className="conversation-shell flex h-full min-w-0 flex-1 flex-col">
-      <div ref={scrollRef} className={`conversation-scroll min-h-0 flex-1 ${empty ? "is-empty overflow-hidden" : "overflow-y-auto"}`}>
-        <div className={`mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4 ${empty ? "h-full" : ""}`}>
+      <div ref={scrollRef} className="conversation-scroll min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4">
           {startupError && <div className="mb-4 rounded-md border border-danger/35 bg-danger/8 px-3 py-2 text-[11px] text-danger">{startupError}</div>}
-          {empty ? (
-            <div className="empty-state mx-auto flex h-full min-h-0 max-w-[43rem] flex-col justify-center pb-[3vh]">
-              <div className="mb-6 flex items-center gap-3">
-                <div className="kyrei-mark kyrei-mark-lg" aria-hidden><span>K</span></div>
-                <div>
-                  <div className="eyebrow">{t("shell.empty.eyebrow")}</div>
-                  <div className="mt-1 text-[12px] text-secondary">{t("shell.empty.subtitle")}</div>
-                </div>
+          <div className="space-y-7 pb-4">
+            {messages.map((message) => (
+              <div key={message.id} className="msg-in">
+                <Message
+                  message={message}
+                  onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
+                  onApprovalDecision={message.role === "assistant" && !streaming && !rewinding ? respondToApproval : undefined}
+                />
               </div>
-              <h1 className="max-w-[34rem] text-[clamp(2rem,3.4vw,3rem)] font-medium leading-[1.04] tracking-[-0.045em] text-foreground">
-                {t("shell.empty.titlePrimary")}<br /><span className="text-muted">{t("shell.empty.titleSecondary")}</span>
-              </h1>
-              <p className="mt-5 max-w-lg text-[13px] leading-6 text-secondary">{t("shell.empty.description")}</p>
-              <div className="mt-7 grid grid-cols-3 gap-2 max-sm:grid-cols-1">
-                <StarterPrompt icon={<Code2 size={15} />} title={t("shell.empty.exploreTitle")} text={t("shell.empty.explorePrompt")} onClick={send} />
-                <StarterPrompt icon={<Sparkles size={15} />} title={t("shell.empty.designTitle")} text={t("shell.empty.designPrompt")} onClick={send} />
-                <StarterPrompt icon={<TerminalSquare size={15} />} title={t("shell.empty.debugTitle")} text={t("shell.empty.debugPrompt")} onClick={send} />
-              </div>
-              <div className="mt-5 flex flex-wrap items-center gap-3 text-[10.5px] text-muted">
-                <span className="inline-flex items-center gap-1.5"><FolderCode size={12} aria-hidden />{config?.workspace ? t("shell.empty.workspaceConnected") : t("shell.empty.workspaceMissing")}</span>
-                <span className="h-3 w-px bg-border-soft" aria-hidden />
-                <span>{t("shell.empty.slashHint")}</span>
-              </div>
-              {config && !config.hasKey && (
-                <button onClick={() => openSettings("providers")} className="primary-action mt-6 flex w-fit items-center gap-2 px-3.5 py-2 text-[11px] font-medium">
-                  {t("shell.empty.connectModel")} <ArrowRight size={13} aria-hidden />
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-7 pb-4">
-              {messages.map((message) => (
-                <div key={message.id} className="msg-in">
-                  <Message message={message} onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined} />
-                </div>
-              ))}
-            </div>
-          )}
+            ))}
+          </div>
         </div>
       </div>
       <Composer
         streaming={streaming}
-        disabled={!config || !currentId || rewinding || sessionModelPendingIds.has(currentId)}
+        stopping={stopping}
+        disabled={!config || !currentId || rewinding || approvalBlocked || sessionModelPendingIds.has(currentId)}
         sessionId={currentId}
         model={currentModelId}
         provider={currentProviderId}
         providers={config?.providers ?? []}
         hasWorkspace={Boolean(config?.workspace)}
+        skillsSelectable={(config?.orchestration?.defaultMode ?? "single") === "single"}
         onSend={send}
         onStop={stop}
         onCommand={runCommand}
@@ -826,12 +1039,34 @@ function terminalPermission(config: AppConfig | null): string {
   return typeof engine.permissions.terminal === "string" ? engine.permissions.terminal : "auto";
 }
 
-function hydrateStoredMessages(stored: StoredChatMessage[]): ChatMessage[] {
-  return stored.map((message) => ({
-    id: message.id,
-    role: message.role,
-    parts: (message.parts?.length ? message.parts : [{ type: "text", text: message.content }]) as MessagePart[],
-  }));
+function hydrateStoredMessages(
+  stored: StoredChatMessage[],
+  translate?: Translator<TranslationKey>,
+): ChatMessage[] {
+  return stored.map((message) => {
+    const persistedParts = message.parts?.length
+      ? message.parts
+      : message.content
+        ? [{ type: "text", text: message.content }]
+        : [];
+    const errorText = message.errorCode === "provider_not_configured"
+      ? translate?.("shell.error.providerNotConfigured")
+      : message.errorMessage
+        ? translate?.("shell.error.prefix", { message: message.errorMessage })
+        : message.turnStatus === "error"
+          ? translate?.("shell.error.fallback")
+          : undefined;
+    return {
+      id: message.id,
+      role: message.role,
+      parts: (persistedParts.length
+        ? persistedParts
+        : errorText
+          ? [{ type: "text", text: errorText }]
+          : []) as MessagePart[],
+      ...(message.pending ? { pending: true } : {}),
+    };
+  });
 }
 
 function useMediaQuery(query: string): boolean {
@@ -846,17 +1081,4 @@ function useMediaQuery(query: string): boolean {
   }, [query]);
 
   return matches;
-}
-
-function StarterPrompt({ icon, title, text, onClick }: { icon: React.ReactNode; title: string; text: string; onClick: (text: string) => void }) {
-  return (
-    <button onClick={() => onClick(text)} className="starter-card group text-left">
-      <span className="flex items-center justify-between text-secondary">
-        <span className="starter-icon">{icon}</span>
-        <ArrowRight size={13} className="opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100" aria-hidden />
-      </span>
-      <span className="mt-5 block text-[11.5px] font-medium text-foreground">{title}</span>
-      <span className="mt-1 block text-[10.5px] leading-[1.5] text-muted">{text}</span>
-    </button>
-  );
 }

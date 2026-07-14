@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TEAM_LIMITS,
+  MAX_TEAM_PROFILE_SKILLS,
   MAX_TEAM_PROFILES,
   MAX_TEAM_ROLES,
   TEAM_CAPABILITIES,
@@ -117,7 +118,7 @@ describe("team orchestration config", () => {
       id: "custom-role",
       promptProfileId: "research-policy",
       skillIds: ["skill-a", "skill-b"],
-      capabilities: ["workspace.read", "web", "delegate"],
+      capabilities: ["workspace.read", "web", "delegate", "skills.read"],
       canSpawn: true,
       maxChildren: 12,
       model: { providerId: "worker", modelId: "worker-model" },
@@ -232,6 +233,52 @@ describe("team orchestration config", () => {
     const normalized = normalizeOrchestration({ profiles: manyProfiles }, providers);
     expect(normalized.profiles).toHaveLength(MAX_TEAM_PROFILES);
     expect(normalized.profiles[0]?.roles).toHaveLength(MAX_TEAM_ROLES);
+  });
+
+  it("keeps a profile's distinct selected skills within the executable runtime capacity", () => {
+    const selectedSkillIds = Array.from(
+      { length: MAX_TEAM_PROFILE_SKILLS + 1 },
+      (_unused, index) => `selected-skill-${index + 1}`,
+    );
+    const roles = Array.from({ length: 3 }, (_unused, index) => {
+      const offset = index * 128;
+      return {
+        ...profile().roles[0],
+        id: `skill-role-${index + 1}`,
+        name: `Skill role ${index + 1}`,
+        skillIds: selectedSkillIds.slice(offset, offset + 128),
+        capabilities: ["workspace.read"],
+        canSpawn: false,
+        maxChildren: 0,
+      };
+    });
+    const overCapacity = profile({ roles });
+
+    const migrated = normalizeOrchestration({
+      defaultMode: "team",
+      activeProfileId: overCapacity.id,
+      profiles: [overCapacity],
+    }, providers);
+    expect(migrated).toMatchObject({ defaultMode: "single", activeProfileId: overCapacity.id });
+    expect(migrated.profiles[0]).toMatchObject({
+      enabled: false,
+      disabledReason: "profile_skills_limit_exceeded",
+    });
+
+    expect(() => validateOrchestrationInput({
+      defaultMode: "team",
+      activeProfileId: overCapacity.id,
+      profiles: [overCapacity],
+    }, providers)).toThrow("team_profile_skills_limit_exceeded");
+
+    const atCapacity = profile({
+      roles: roles.slice(0, 2),
+    });
+    expect(validateOrchestrationInput({
+      defaultMode: "team",
+      activeProfileId: atCapacity.id,
+      profiles: [atCapacity],
+    }, providers)).toMatchObject({ defaultMode: "team" });
   });
 
   it("strictly validates route input with stable non-localized error codes", () => {

@@ -13,13 +13,14 @@ import { I18nProvider, setLang } from "@/i18n";
 import { resetUiSettings, setUiSetting } from "@/store/settings";
 import { clearQueuedPrompts, enqueueQueuedPrompt } from "@/store/composer-queue";
 
-function renderComposer(options: { sessionId?: string; streaming?: boolean } = {}): string {
+function renderComposer(options: { sessionId?: string; streaming?: boolean; stopping?: boolean } = {}): string {
   return renderToStaticMarkup(
     createElement(
       I18nProvider,
       null,
       createElement(Composer, {
         streaming: options.streaming ?? false,
+        stopping: options.stopping ?? false,
         sessionId: options.sessionId,
         model: "openai/gpt-5",
         provider: "openai",
@@ -79,5 +80,14 @@ describe("Composer localized interaction chrome", () => {
     expect(html).toContain("max-h-[min(14rem,30vh)]");
     expect(html).toContain("queued-11");
     clearQueuedPrompts(sessionId);
+  });
+
+  it("keeps the stop control visible and disabled while cancellation is pending", () => {
+    setLang("en");
+    const html = renderComposer({ streaming: true, stopping: true });
+
+    expect(html).toContain('aria-label="Stopping\u2026"');
+    expect(html).toContain("disabled");
+    expect(html).not.toContain('title="Send"');
   });
 });

@@ -240,6 +240,81 @@ describe("buildTeamDelegateTool", () => {
     expect(peak).toBe(2);
   });
 
+  it("carries validated source receipts through model results and completion events", async () => {
+    const researcher = role("researcher");
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const receipt = {
+      id: "source-7c4d0d",
+      requestedUrl: "https://example.test/research",
+      finalUrl: "https://docs.example.test/final-guide",
+      title: "Official guide",
+      contentDigest: "a".repeat(64),
+      fetchedAt: "2026-07-14T00:00:00.000Z",
+    };
+    const tools = buildTeamDelegateTool({
+      spec: spec([researcher]),
+      emit: (event) => events.push(event as never),
+      executors: [{
+        role: researcher,
+        run: async (context) => ({
+          ...artifact(context.task.id),
+          sources: [
+            receipt,
+            {
+              ...receipt,
+              id: "malformed-digest",
+              contentDigest: "not-a-sha256",
+            },
+            {
+              ...receipt,
+              id: "malformed-url",
+              finalUrl: "javascript:alert(1)",
+            },
+            {
+              ...receipt,
+              id: "non-http-url",
+              finalUrl: "ftp://docs.example.test/final-guide",
+            },
+            {
+              ...receipt,
+              id: "credentialed-url",
+              finalUrl: "https://user:secret@docs.example.test/final-guide",
+            },
+            {
+              ...receipt,
+              id: "private-ip-url",
+              finalUrl: "http://127.0.0.1/private-guide",
+            },
+          ],
+        }),
+      }],
+    });
+    const team = tools.team_delegate as unknown as {
+      execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+    };
+
+    const output = JSON.parse(await team.execute({
+      tasks: [{ id: "research", goal: "Verify source" }],
+    }, { toolCallId: "receipt" }));
+
+    expect(output.tasks[0].sources).toEqual([{
+      id: receipt.id,
+      finalUrl: receipt.finalUrl,
+      title: receipt.title,
+      contentDigest: receipt.contentDigest,
+      fetchedAt: receipt.fetchedAt,
+    }]);
+    const completed = events.find((event) => event.type === "subagent.complete");
+    expect(completed?.payload.sources).toEqual([{
+      id: receipt.id,
+      requested_url: receipt.requestedUrl,
+      final_url: receipt.finalUrl,
+      title: receipt.title,
+      content_digest: receipt.contentDigest,
+      fetched_at: receipt.fetchedAt,
+    }]);
+  });
+
   it("returns valid bounded JSON while keeping full evidence on ledger events", async () => {
     const researcher = role("researcher");
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];

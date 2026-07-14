@@ -9,6 +9,7 @@ afterEach(() => {
 async function renderSettings(
   lang: "en" | "ru",
   initialSection: "model" | "providers" | "workspace" | "skills" | "chat" | "memory" | "appearance" | "notifications" | "keybinds" | "advanced" | "about" = "model",
+  engine: Record<string, unknown> = {},
 ): Promise<string> {
   vi.resetModules();
   vi.stubGlobal("location", { search: "" });
@@ -46,7 +47,7 @@ async function renderSettings(
             requiresApiKey: true,
             hasKey: false,
           }],
-          engine: {},
+          engine,
         },
         onClose: () => undefined,
         onSaved: () => undefined,
@@ -83,6 +84,67 @@ describe("settings localized rendering", () => {
   it("renders locale-owned theme labels", async () => {
     expect(await renderSettings("en", "appearance")).toContain("Dark");
     expect(await renderSettings("ru", "appearance")).toContain("Тёмная");
+  });
+
+  it("explains the local GBrain setup before any agent memory is enabled", async () => {
+    const english = await renderSettings("en", "memory");
+    const russian = await renderSettings("ru", "memory");
+
+    expect(english).toContain("Local GBrain setup");
+    expect(english).toContain("Checking local GBrain…");
+    expect(english).toContain("Check status");
+    expect(russian).toContain("Локальная настройка GBrain");
+    expect(russian).toContain("Проверяю локальный GBrain…");
+    expect(russian).toContain("Проверить статус");
+  });
+
+  it("explains that standalone Skills work and can be selected for one task", async () => {
+    const english = await renderSettings("en", "skills");
+    const russian = await renderSettings("ru", "skills");
+
+    expect(english).toContain("How Skills are used");
+    expect(english).toContain("A single SKILL.md is a complete Skill");
+    expect(english).toContain("Skills for this task");
+    expect(russian).toContain("Как используются skills");
+    expect(russian).toContain("Один файл SKILL.md — полноценный skill");
+    expect(russian).toContain("Skills для этой задачи");
+  });
+
+  it("renders the guided persistent permission editor in both locales", async () => {
+    const english = await renderSettings("en", "workspace");
+    const russian = await renderSettings("ru", "workspace");
+
+    expect(english).toContain("Persistent access rules");
+    expect(english).toContain("Global policies only");
+    expect(english).toContain("Add rule");
+    expect(russian).toContain("Постоянные правила доступа");
+    expect(russian).toContain("Только глобальные политики");
+    expect(russian).toContain("Добавить правило");
+  });
+
+  it("locks guided mutations instead of dropping malformed fail-closed legacy rules", async () => {
+    const html = await renderSettings("en", "workspace", {
+      permissions: {
+        rules: [
+          { pattern: "^run_command:publish$", action: "sometimes" },
+          { pattern: "[", action: "deny" },
+        ],
+      },
+    });
+
+    expect(html).toContain("2 persisted rule entries cannot be represented safely here");
+    expect(html).toContain("Guided changes are locked");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*<svg[^>]*>.*Add rule/s);
+  });
+
+  it("also locks present null permission containers and rule arrays", async () => {
+    const nullPermissions = await renderSettings("en", "workspace", { permissions: null });
+    const nullRules = await renderSettings("en", "workspace", { permissions: { rules: null } });
+
+    expect(nullPermissions).toContain("1 persisted rule entries cannot be represented safely here");
+    expect(nullRules).toContain("1 persisted rule entries cannot be represented safely here");
+    expect(nullPermissions).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*<svg[^>]*>.*Add rule/s);
+    expect(nullRules).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*<svg[^>]*>.*Add rule/s);
   });
 
   it("keeps the official Kiro identity separate from the organization control plane", async () => {

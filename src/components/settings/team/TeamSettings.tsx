@@ -318,6 +318,25 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
             onChange={(limits) => updateActiveProfile((profile) => ({ ...profile, limits }))}
           />
 
+          <section className="rounded-md border border-border-soft bg-bg/30 px-3 py-2.5" aria-labelledby="team-research-workflow-title">
+            <h4 id="team-research-workflow-title" className="text-[10.5px] font-medium text-secondary">{t("settings.team.research.title")}</h4>
+            <p className="mt-0.5 text-[9.5px] leading-4 text-muted">{t("settings.team.research.hint")}</p>
+            <ol className="mt-2 grid gap-1.5 text-[9.5px] leading-4 text-muted md:grid-cols-4">
+              {([
+                "settings.team.research.local",
+                "settings.team.research.discover",
+                "settings.team.research.verify",
+                "settings.team.research.report",
+              ] as const).map((key, index) => (
+                <li key={key} className="flex min-w-0 gap-1.5">
+                  <span className="font-mono text-primary">{index + 1}.</span>
+                  <span>{t(key)}</span>
+                </li>
+              ))}
+            </ol>
+            <p className="mt-2 border-t border-border-soft pt-2 text-[9px] leading-4 text-faint">{t("settings.team.research.economy")}</p>
+          </section>
+
           <div className="space-y-2">
             <div className="flex items-end justify-between gap-3">
               <div>

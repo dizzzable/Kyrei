@@ -1,13 +1,16 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import type { KyreiEvent, RuntimeTeamRole, RuntimeTeamSpec } from "../types.js";
 import { createConcurrencyGate } from "../orchestration/delegate.js";
 import { redact } from "../security/secrets.js";
+import { isPrivateAddress } from "../web/browser.js";
 import { executeTeamTaskGraph } from "./execute.js";
 import type {
   TeamArtifact,
   TeamArtifactMetrics,
+  TeamSourceReceipt,
   TeamTaskExecutionContext,
   TeamTaskResult,
   TeamTaskSpec,
@@ -54,6 +57,22 @@ function compact(value: unknown, max = MAX_ARTIFACT_TEXT): string {
   return typeof value === "string" ? redact(value.trim()).slice(0, max) : "";
 }
 
+function publicWebUrl(value: unknown): string {
+  const candidate = compact(value, 1_000);
+  if (!candidate) return "";
+  try {
+    const url = new URL(candidate);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) return "";
+    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return "";
+    if (isIP(host) && isPrivateAddress(host)) return "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, MAX_ARTIFACT_ITEMS).flatMap((item) => {
@@ -62,7 +81,29 @@ function stringList(value: unknown): string[] {
   });
 }
 
+function sourceReceipts(value: unknown): TeamSourceReceipt[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const receipts: TeamSourceReceipt[] = [];
+  for (const item of value.slice(0, MAX_ARTIFACT_ITEMS)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const source = item as Record<string, unknown>;
+    const id = compact(source.id, 80);
+    const requestedUrl = publicWebUrl(source.requestedUrl);
+    const finalUrl = publicWebUrl(source.finalUrl);
+    const title = compact(source.title, 300);
+    const contentDigest = compact(source.contentDigest, 128).toLowerCase();
+    const fetchedAt = compact(source.fetchedAt, 40);
+    if (!id || seen.has(id) || !requestedUrl || !finalUrl || !title
+      || !/^[a-f0-9]{64}$/u.test(contentDigest) || Number.isNaN(Date.parse(fetchedAt))) continue;
+    seen.add(id);
+    receipts.push({ id, requestedUrl, finalUrl, title, contentDigest, fetchedAt });
+  }
+  return receipts;
+}
+
 function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamArtifact): TeamArtifact {
+  const sources = sourceReceipts(value?.sources);
   return {
     taskId,
     summary: compact(value?.summary) || "No summary returned.",
@@ -81,6 +122,7 @@ function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamAr
     validation: stringList(value?.validation),
     uncertainties: stringList(value?.uncertainties),
     whatWasNotChecked: stringList(value?.whatWasNotChecked),
+    ...(sources.length ? { sources } : {}),
     ...(value?.metrics
       ? {
           metrics: {
@@ -127,6 +169,13 @@ function taskResultForModel(result: TeamTaskResult, summaryChars = 600): Record<
         confidence: result.artifact.confidence,
         provenance: result.artifact.provenance.slice(0, 4).map((item) => compact(item, 200)),
         evidence: result.artifact.evidence.slice(0, 4).map((item) => compact(item, 300)),
+        sources: (result.artifact.sources ?? []).slice(0, 3).map((source) => ({
+          id: source.id,
+          finalUrl: source.finalUrl,
+          title: source.title,
+          contentDigest: source.contentDigest,
+          fetchedAt: source.fetchedAt,
+        })),
         validation: result.artifact.validation.slice(0, 3).map((item) => compact(item, 300)),
         uncertainties: result.artifact.uncertainties.slice(0, 2).map((item) => compact(item, 300)),
         whatWasNotChecked: result.artifact.whatWasNotChecked.slice(0, 2).map((item) => compact(item, 300)),
@@ -165,6 +214,7 @@ function serializeTeamResult(
     }
     const minimal = taskResultForModel(result, 120);
     if ("evidence" in minimal) delete minimal.evidence;
+    if ("sources" in minimal) delete minimal.sources;
     if ("validation" in minimal) delete minimal.validation;
     if ("uncertainties" in minimal) delete minimal.uncertainties;
     if ("whatWasNotChecked" in minimal) delete minimal.whatWasNotChecked;
@@ -345,6 +395,14 @@ export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet
                       .filter((item) => item.startsWith("observed:file:"))
                       .map((item) => item.slice("observed:file:".length)),
                     evidence: [...artifact.evidence],
+                    sources: (artifact.sources ?? []).map((source) => ({
+                      id: source.id,
+                      requested_url: source.requestedUrl,
+                      final_url: source.finalUrl,
+                      title: source.title,
+                      content_digest: source.contentDigest,
+                      fetched_at: source.fetchedAt,
+                    })),
                     provenance: [...artifact.provenance],
                     uncertainties: [...artifact.uncertainties],
                     validation: [...artifact.validation],

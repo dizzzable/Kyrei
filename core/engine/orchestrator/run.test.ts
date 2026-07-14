@@ -119,7 +119,13 @@ vi.mock("./persist.js", () => ({
   toParts: toPartsMock,
 }));
 
-function engineConfig(delegation: Partial<{ enabled: boolean; maxTasks: number; maxParallel: number; maxSteps: number }> = {}) {
+function engineConfig(delegation: Partial<{
+  enabled: boolean;
+  maxTasks: number;
+  maxParallel: number;
+  maxSteps: number;
+  timeoutMs: number;
+}> = {}) {
   return {
     maxSteps: 12,
     commandTimeoutMs: 60_000,
@@ -133,7 +139,7 @@ function engineConfig(delegation: Partial<{ enabled: boolean; maxTasks: number; 
     activePromptProfileId: "",
     promptProfiles: [],
     fileReadMaxChars: 250_000,
-    delegation: { enabled: true, maxTasks: 3, maxParallel: 2, maxSteps: 8, ...delegation },
+    delegation: { enabled: true, maxTasks: 3, maxParallel: 2, maxSteps: 8, timeoutMs: 90_000, ...delegation },
     memory: {
       gbrain: { mode: "off", command: "gbrain", timeoutMs: 180_000, maxOutputBytes: 200_000 },
     },
@@ -191,6 +197,106 @@ describe("runKyreiChat project context wiring", () => {
     const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(streamOptions.instructions).toBe("system prompt");
     expect(streamOptions).not.toHaveProperty("system");
+  });
+
+  it("carries a validated receipt into guarded execution when policy changes from ask to allow", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        permissions: { ...engineConfig().permissions, terminal: "turbo" },
+      },
+      warnings: [],
+    });
+    const onApprovalConsumed = vi.fn(async () => undefined);
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      approvalSecret: "approval-secret",
+      onApprovalConsumed,
+    });
+
+    const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const approval = streamOptions.toolApproval as (input: {
+      toolCall: { toolCallId: string; toolName: string; input: unknown };
+      messages: Array<Record<string, unknown>>;
+    }) => Promise<unknown>;
+    const result = await approval({
+      toolCall: { toolCallId: "call-policy-allow", toolName: "run_command", input: { command: "npm test" } },
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool-approval-request", approvalId: "approval-policy-allow", toolCallId: "call-policy-allow", signature: "validated-by-ai-sdk" }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool-approval-response", approvalId: "approval-policy-allow", approved: true }],
+        },
+      ],
+    });
+
+    expect(result).toBe("not-applicable");
+    const buildOptions = buildToolsMock.mock.calls[0]?.[3] as { approvedToolCalls: Map<string, string> };
+    expect(buildOptions.approvedToolCalls.get("call-policy-allow")).toBe("approval-policy-allow");
+    expect(onApprovalConsumed).not.toHaveBeenCalled();
+  });
+
+  it("durably consumes a validated receipt without execution when policy changes from ask to deny", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        permissions: {
+          ...engineConfig().permissions,
+          rules: [{ pattern: "^run_command:", action: "deny" }],
+        },
+      },
+      warnings: [],
+    });
+    const onApprovalConsumed = vi.fn(async () => undefined);
+    const emit = vi.fn();
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit,
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      approvalSecret: "approval-secret",
+      onApprovalConsumed,
+    });
+
+    const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const approval = streamOptions.toolApproval as (input: {
+      toolCall: { toolCallId: string; toolName: string; input: unknown };
+      messages: Array<Record<string, unknown>>;
+    }) => Promise<unknown>;
+    const result = await approval({
+      toolCall: { toolCallId: "call-policy-deny", toolName: "run_command", input: { command: "npm test" } },
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool-approval-request", approvalId: "approval-policy-deny", toolCallId: "call-policy-deny", signature: "validated-by-ai-sdk" }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool-approval-response", approvalId: "approval-policy-deny", approved: true }],
+        },
+      ],
+    });
+
+    expect(result).toEqual({ type: "denied", reason: "permission_rule_denied" });
+    expect(onApprovalConsumed).toHaveBeenCalledWith("approval-policy-deny", "call-policy-deny");
+    expect(emit).toHaveBeenCalledWith({
+      type: "approval.consumed",
+      payload: { approval_id: "approval-policy-deny", tool_call_id: "call-policy-deny" },
+    });
+    const buildOptions = buildToolsMock.mock.calls[0]?.[3] as { approvedToolCalls: Map<string, string> };
+    expect(buildOptions.approvedToolCalls.has("call-policy-deny")).toBe(false);
   });
 
   it("applies bounded context/output overrides only to the primary candidate", async () => {
@@ -547,7 +653,9 @@ describe("runKyreiChat project context wiring", () => {
 
     const childOptions = generateTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(childOptions["model"]).toBe(parentOptions["model"]);
-    expect(childOptions["abortSignal"]).toBe(controller.signal);
+    expect(childOptions["abortSignal"]).toBeInstanceOf(AbortSignal);
+    expect(childOptions["abortSignal"]).not.toBe(controller.signal);
+    expect((childOptions["abortSignal"] as AbortSignal).aborted).toBe(false);
     expect(Object.keys(childOptions["tools"] as Record<string, unknown>).sort()).toEqual([
       "brain_search",
       "project_map",
@@ -576,6 +684,59 @@ describe("runKyreiChat project context wiring", () => {
       files_written: [],
       summary: "Child evidence",
     });
+  });
+
+  it("turns the configured child timeout into a failed task without aborting the parent", async () => {
+    vi.useFakeTimers();
+    try {
+      resolveEngineConfigMock.mockReturnValueOnce({
+        config: engineConfig({ timeoutMs: 1_000 }),
+        warnings: [],
+      });
+      let providerSignal: AbortSignal | undefined;
+      let resolveLate: ((value: unknown) => void) | undefined;
+      generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
+        providerSignal = options["abortSignal"] as AbortSignal;
+        return new Promise((resolve) => {
+          resolveLate = resolve;
+        });
+      });
+      const parent = new AbortController();
+      const events: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+      const { runKyreiChat } = await import("./run.js");
+      await runKyreiChat({
+        emit: (event: { type: string; payload?: Record<string, unknown> }) => events.push(event),
+        messages: [{ role: "user", content: "hi" }],
+        providerBase: "http://mock",
+        providerProtocol: "openai-chat",
+        apiKey: "key",
+        model: "mock-model",
+        abortSignal: parent.signal,
+      });
+
+      const parentOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
+      const delegate = (parentOptions["tools"] as Record<string, {
+        execute: (input: unknown, options: unknown) => Promise<string>;
+      }>)["delegate_read"]!;
+      const pending = delegate.execute(
+        { tasks: [{ goal: "Inspect a slow endpoint" }] },
+        { toolCallId: "delegate-timeout", messages: [], abortSignal: parent.signal },
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toBe("[1] Failed: Delegated research timed out after 1000ms");
+      expect(parent.signal.aborted).toBe(false);
+      expect(providerSignal?.aborted).toBe(true);
+      expect(events.find((event) => event.type === "subagent.failed")?.payload).toMatchObject({
+        status: "failed",
+        error: "Delegated research timed out after 1000ms",
+      });
+
+      resolveLate?.({ text: "too late", steps: [], toolCalls: [], usage: {} });
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("pins fallback models to the active provider endpoint", async () => {

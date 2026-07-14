@@ -13,12 +13,14 @@ export function SegmentedControl<T extends string>({
   onChange,
   className,
   size = "md",
+  disabled = false,
 }: {
   value: T;
   options: SegmentOption<T>[];
   onChange: (v: T) => void;
   className?: string;
   size?: "sm" | "md";
+  disabled?: boolean;
 }) {
   return (
     <div
@@ -33,10 +35,12 @@ export function SegmentedControl<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            disabled={disabled}
             title={opt.title}
             onClick={() => onChange(opt.value)}
             className={cn(
               "rounded-md font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
+              "disabled:cursor-not-allowed disabled:opacity-45",
               size === "sm" ? "px-2 py-1 text-[11px]" : "px-2.5 py-1 text-xs",
               active ? "bg-elevated text-foreground shadow-sm" : "text-muted hover:text-foreground",
             )}
