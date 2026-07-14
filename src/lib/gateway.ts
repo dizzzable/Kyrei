@@ -371,6 +371,15 @@ export const gateway = {
       `/api/sessions/${encodeURIComponent(id)}/messages`,
     ).then(r => r.messages),
 
+  respondToApproval: (session: string, approvalId: string, approved: boolean, reason?: string) =>
+    json<{ status: "pending" | "streaming"; approval: import("./types").ApprovalPart }>(
+      `/api/sessions/${encodeURIComponent(session)}/approvals/${encodeURIComponent(approvalId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ approved, ...(reason ? { reason } : {}) }),
+      },
+    ),
+
   sendPrompt: (session: string, text: string, modelParams?: ModelParams, messageId?: string) =>
     json<{ status: string }>("/api/prompt", {
       method: "POST",

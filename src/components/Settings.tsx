@@ -700,7 +700,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                   </div>
                   <div className="divide-y divide-border-soft text-[13px]">
                     <div className="flex justify-between py-2"><span className="text-muted">{t("settings.about.version")}</span><span>{__APP_VERSION__}</span></div>
-                    <div className="flex justify-between py-2"><span className="text-muted">{t("settings.about.engine")}</span><span>Kyrei Engine v2</span></div>
+                    <div className="flex justify-between py-2"><span className="text-muted">{t("settings.about.engine")}</span><span>{t("settings.about.engineValue")}</span></div>
                     <div className="flex justify-between py-2"><span className="text-muted">{t("settings.about.provider")}</span><span className="truncate">{provider || "—"}</span></div>
                   </div>
                 </div>

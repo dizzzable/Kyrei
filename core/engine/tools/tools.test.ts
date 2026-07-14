@@ -58,6 +58,127 @@ describe("tools — guarded mutations and audit", () => {
     expect(JSON.stringify(records)).not.toContain(command);
   });
 
+  it("consumes an exact signed approval once before executing the guarded effect", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: {
+        ...DEFAULT_ENGINE_CONFIG.permissions,
+        terminal: "off" as const,
+      },
+    };
+    const approvedToolCalls = new Map([["call-approved", "approval-1"]]);
+    const lifecycle: string[] = [];
+    const commandRunner = { run: vi.fn(async () => {
+      lifecycle.push("effect");
+      return "approved command";
+    }) };
+    const guarded = buildTools(ws, cfg, new Map(), {
+      sessionId: "session-approved",
+      commandRunner,
+      approvedToolCalls,
+      onApprovalConsumed: async (approvalId) => {
+        await Promise.resolve();
+        lifecycle.push(`consumed:${approvalId}`);
+      },
+    });
+
+    await expect(execFrom(
+      guarded,
+      "run_command",
+      { command: "npm test" },
+      "call-approved",
+    )).resolves.toContain("approved command");
+    expect(commandRunner.run).toHaveBeenCalledTimes(1);
+    expect(lifecycle).toEqual(["consumed:approval-1", "effect"]);
+    expect(approvedToolCalls.has("call-approved")).toBe(false);
+
+    await expect(execFrom(
+      guarded,
+      "run_command",
+      { command: "npm test" },
+      "call-approved",
+    )).resolves.toContain("interactive approval");
+    expect(commandRunner.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start an approved effect when durable consumption fails", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: { ...DEFAULT_ENGINE_CONFIG.permissions, terminal: "off" as const },
+    };
+    const commandRunner = { run: vi.fn(async () => "must not run") };
+    const guarded = buildTools(ws, cfg, new Map(), {
+      commandRunner,
+      approvedToolCalls: new Map([["call-approved", "approval-1"]]),
+      onApprovalConsumed: async () => { throw new Error("durable state unavailable"); },
+    });
+
+    await expect(execFrom(
+      guarded,
+      "run_command",
+      { command: "npm test" },
+      "call-approved",
+    )).rejects.toThrow("durable state unavailable");
+    expect(commandRunner.run).not.toHaveBeenCalled();
+  });
+
+  it("keeps the durable approval barrier when policy changes from ask to allow", async () => {
+    const lifecycle: string[] = [];
+    const approvedToolCalls = new Map([["call-now-allowed", "approval-policy-allow"]]);
+    const commandRunner = { run: vi.fn(async () => {
+      lifecycle.push("effect");
+      return "allowed after policy change";
+    }) };
+    const guarded = buildTools(ws, {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: { ...DEFAULT_ENGINE_CONFIG.permissions, terminal: "turbo" as const },
+    }, new Map(), {
+      sessionId: "session-policy-allow",
+      commandRunner,
+      approvedToolCalls,
+      onApprovalConsumed: async (approvalId) => {
+        lifecycle.push(`consumed:${approvalId}`);
+      },
+    });
+
+    await expect(execFrom(
+      guarded,
+      "run_command",
+      { command: "npm test" },
+      "call-now-allowed",
+    )).resolves.toContain("allowed after policy change");
+    expect(lifecycle).toEqual(["consumed:approval-policy-allow", "effect"]);
+    expect(approvedToolCalls.has("call-now-allowed")).toBe(false);
+  });
+
+  it("consumes an approved receipt without an effect when policy changes from ask to deny", async () => {
+    const approvedToolCalls = new Map([["call-now-denied", "approval-policy-deny"]]);
+    const onApprovalConsumed = vi.fn(async () => undefined);
+    const commandRunner = { run: vi.fn(async () => "must not run") };
+    const guarded = buildTools(ws, {
+      ...DEFAULT_ENGINE_CONFIG,
+      permissions: {
+        ...DEFAULT_ENGINE_CONFIG.permissions,
+        rules: [{ pattern: "^run_command:", action: "deny" as const }],
+      },
+    }, new Map(), {
+      sessionId: "session-policy-deny",
+      commandRunner,
+      approvedToolCalls,
+      onApprovalConsumed,
+    });
+
+    await expect(execFrom(
+      guarded,
+      "run_command",
+      { command: "npm test" },
+      "call-now-denied",
+    )).resolves.toContain("denied by the local permission policy");
+    expect(onApprovalConsumed).toHaveBeenCalledWith("approval-policy-deny", "call-now-denied");
+    expect(commandRunner.run).not.toHaveBeenCalled();
+    expect(approvedToolCalls.has("call-now-denied")).toBe(false);
+  });
+
   it("executes an allowed safe command and audits its lifecycle", async () => {
     const records: AuditRecord[] = [];
     const commandRunner = { run: vi.fn(async () => "(exit code: 0)\nallowed-command") };

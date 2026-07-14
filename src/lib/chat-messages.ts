@@ -1,4 +1,4 @@
-import type { MessagePart, ToolPart } from "@/lib/types";
+import type { ApprovalPart, MessagePart, ToolPart } from "@/lib/types";
 
 /**
  * Pure reducers that fold a gateway event's delta into a message's parts.
@@ -35,6 +35,58 @@ export function appendText(parts: MessagePart[], delta: string): MessagePart[] {
 
 export function appendReasoning(parts: MessagePart[], delta: string): MessagePart[] {
   return appendStream(parts, "reasoning", delta);
+}
+
+export function approvalRequest(
+  parts: MessagePart[],
+  info: {
+    approvalId: string;
+    toolCallId: string;
+    name: string;
+    args?: unknown;
+    reason: string;
+  },
+): MessagePart[] {
+  const withPausedTool = parts.map(part => part.type === "tool" && part.toolCallId === info.toolCallId
+    ? { ...part, running: false, awaitingApproval: true }
+    : part);
+  const index = withPausedTool.findIndex(part => part.type === "approval" && part.approvalId === info.approvalId);
+  const approval: ApprovalPart = {
+    type: "approval",
+    approvalId: info.approvalId,
+    toolCallId: info.toolCallId,
+    name: info.name,
+    args: info.args,
+    reason: info.reason,
+    status: "pending",
+  };
+  if (index < 0) return [...withPausedTool, approval];
+  const next = [...withPausedTool];
+  next[index] = { ...(withPausedTool[index] as ApprovalPart), ...approval };
+  return next;
+}
+
+export function approvalResolved(
+  parts: MessagePart[],
+  info: {
+    approvalId: string;
+    approved?: boolean;
+    reason?: string;
+    consumed?: boolean;
+  },
+): MessagePart[] {
+  const index = parts.findIndex(part => part.type === "approval" && part.approvalId === info.approvalId);
+  if (index < 0) return parts;
+  const current = parts[index] as ApprovalPart;
+  const next = [...parts];
+  next[index] = {
+    ...current,
+    ...(typeof info.approved === "boolean" ? { status: info.approved ? "approved" : "denied" } : {}),
+    ...(info.reason ? { decisionReason: info.reason } : {}),
+    ...(typeof info.approved === "boolean" ? { resolvedAt: current.resolvedAt ?? new Date().toISOString() } : {}),
+    ...(info.consumed ? { consumedAt: current.consumedAt ?? new Date().toISOString() } : {}),
+  };
+  return next;
 }
 
 /**

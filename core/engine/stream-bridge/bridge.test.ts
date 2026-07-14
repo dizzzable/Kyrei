@@ -54,6 +54,74 @@ async function* parts(list: unknown[]): AsyncIterable<unknown> {
 }
 
 describe("stream-bridge (synthetic parts)", () => {
+  it("emits and persists a user approval request as an awaiting-approval turn", async () => {
+    const events: KyreiEvent[] = [];
+    const result = await bridgeStream(
+      parts([
+        { type: "start" },
+        { type: "tool-call", toolCallId: "call-approval", toolName: "run_command", input: { command: "curl example.com" } },
+        {
+          type: "tool-approval-request",
+          approvalId: "approval-1",
+          toolCall: { toolCallId: "call-approval", toolName: "run_command", input: { command: "curl example.com" } },
+        },
+        { type: "finish", finishReason: "tool-calls" },
+      ]),
+      (event) => events.push(event),
+      ctx({
+        approvalMeta: new Map([["call-approval", {
+          reason: "permission_rule_requires_confirmation",
+          args: { command: "curl example.com" },
+        }]]),
+      }),
+    );
+
+    expect(events).toContainEqual({
+      type: "approval.request",
+      payload: {
+        approval_id: "approval-1",
+        tool_call_id: "call-approval",
+        name: "run_command",
+        args: { command: "curl example.com" },
+        reason: "permission_rule_requires_confirmation",
+      },
+    });
+    expect(result.status).toBe("awaiting_approval");
+    expect(result.parts).toContainEqual(expect.objectContaining({
+      type: "approval",
+      approvalId: "approval-1",
+      toolCallId: "call-approval",
+      status: "pending",
+    }));
+  });
+
+  it("reconstructs a resumed approved tool when the continuation starts with its result", async () => {
+    const events: KyreiEvent[] = [];
+    const result = await bridgeStream(
+      parts([
+        { type: "tool-result", toolCallId: "call-approved", toolName: "run_command", output: "tests passed" },
+        { type: "text-delta", text: "Done" },
+        { type: "finish", finishReason: "stop" },
+      ]),
+      (event) => events.push(event),
+      ctx({
+        approvalMeta: new Map([["call-approved", {
+          name: "run_command",
+          reason: "permission_rule_requires_confirmation",
+          args: { command: "npm test" },
+        }]]),
+      }),
+    );
+
+    expect(events.filter(event => event.type === "tool.start")).toHaveLength(1);
+    expect(events.filter(event => event.type === "tool.complete")).toHaveLength(1);
+    expect(result.parts).toContainEqual(expect.objectContaining({
+      type: "tool",
+      toolCallId: "call-approved",
+      result: "tests passed",
+    }));
+  });
+
   it("emits tool lifecycle with stable id, diff, and automatic snapshot metadata", async () => {
     const toolMeta = new Map<string, ToolMeta>([["call_1", { inlineDiff: "+new line", snapshotId: "snapshot-1" }]]);
     const events: KyreiEvent[] = [];

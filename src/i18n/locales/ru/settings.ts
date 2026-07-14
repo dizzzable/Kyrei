@@ -374,6 +374,7 @@ export const ruSettings = {
   "settings.about.tagline": "Локальный ИИ-агент для программных проектов",
   "settings.about.version": "Версия",
   "settings.about.engine": "Движок",
+  "settings.about.engineValue": "Kyrei Engine v2",
   "settings.about.provider": "Провайдер",
 
   "settings.providers.title": "Провайдеры",

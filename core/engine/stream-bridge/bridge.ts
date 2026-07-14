@@ -20,6 +20,7 @@ export interface BridgeCtx {
   provider: string;
   model: string;
   maxSteps?: number;
+  approvalMeta?: Map<string, { reason: string; args: unknown; name?: string }>;
 }
 
 export interface BridgeResult {
@@ -74,6 +75,21 @@ function finalizeToolPart(st: BridgeState, t: ToolInFlight): void {
     running: false,
     durationS: (Date.now() - t.startedAt) / 1000,
   });
+}
+
+function ensureTool(
+  st: BridgeState,
+  id: string,
+  name: string,
+  args: unknown,
+  emit: (event: KyreiEvent) => void,
+): ToolInFlight {
+  const existing = st.tools.get(id);
+  if (existing) return existing;
+  const tool = { id, name: name || "tool", args, startedAt: Date.now() };
+  st.tools.set(id, tool);
+  emit({ type: "tool.start", payload: { tool_call_id: id, name: tool.name, args } });
+  return tool;
 }
 
 export async function bridgeStream(
@@ -147,44 +163,125 @@ export async function bridgeStream(
         break;
       }
 
+      case "tool-approval-request": {
+        if (part["isAutomatic"] === true) break;
+        const toolCall = part["toolCall"] && typeof part["toolCall"] === "object"
+          ? part["toolCall"] as Record<string, unknown>
+          : {};
+        const id = String(toolCall["toolCallId"] ?? part["toolCallId"] ?? "");
+        const approvalId = String(part["approvalId"] ?? "");
+        const current = st.tools.get(id);
+        const name = String(toolCall["toolName"] ?? current?.name ?? "");
+        const metadata = ctx.approvalMeta?.get(id);
+        const args = metadata?.args ?? toolCall["input"] ?? current?.args;
+        const reason = metadata?.reason ?? "permission_rule_requires_confirmation";
+        if (!id || !approvalId) break;
+        st.pendingApprovals += 1;
+        st.parts.push({
+          type: "approval",
+          approvalId,
+          toolCallId: id,
+          name,
+          args,
+          reason,
+          status: "pending",
+        });
+        emit({
+          type: "approval.request",
+          payload: {
+            approval_id: approvalId,
+            tool_call_id: id,
+            name,
+            args,
+            reason,
+          },
+        });
+        break;
+      }
+
+      case "tool-approval-response": {
+        if (part["approved"] !== false) break;
+        const toolCall = part["toolCall"] && typeof part["toolCall"] === "object"
+          ? part["toolCall"] as Record<string, unknown>
+          : {};
+        const id = String(toolCall["toolCallId"] ?? part["toolCallId"] ?? "");
+        const current = st.tools.get(id);
+        if (current) current.error = String(part["reason"] ?? "permission_rule_denied");
+        break;
+      }
+
+      case "tool-output-denied": {
+        const id = String(part["toolCallId"] ?? "");
+        const metadata = ctx.approvalMeta?.get(id);
+        const current = ensureTool(
+          st,
+          id,
+          String(part["toolName"] ?? metadata?.name ?? "tool"),
+          metadata?.args,
+          emit,
+        );
+        current.error ??= "permission_rule_denied";
+        finalizeToolPart(st, current);
+        emit({
+          type: "tool.complete",
+          payload: {
+            tool_call_id: id,
+            name: current.name,
+            error: current.error,
+            duration_s: (Date.now() - current.startedAt) / 1000,
+          },
+        });
+        break;
+      }
+
       case "tool-result": {
         const id = String(part["toolCallId"] ?? part["id"] ?? "");
-        const t = st.tools.get(id);
+        const metadata = ctx.approvalMeta?.get(id);
+        const t = ensureTool(
+          st,
+          id,
+          String(part["toolName"] ?? metadata?.name ?? "tool"),
+          metadata?.args,
+          emit,
+        );
         const result = outputToText(part["output"] ?? part["result"]);
         const inlineDiff = ctx.toolMeta.get(id)?.inlineDiff;
         const snapshotId = ctx.toolMeta.get(id)?.snapshotId;
-        if (t) {
-          t.result = result;
-          t.inlineDiff = inlineDiff;
-          t.snapshotId = snapshotId;
-          finalizeToolPart(st, t);
-          emit({
-            type: "tool.complete",
-            payload: {
-              tool_call_id: id,
-              name: t.name,
-              result,
-              inline_diff: inlineDiff,
-              snapshot_id: snapshotId,
-              duration_s: (Date.now() - t.startedAt) / 1000,
-            },
-          });
-        }
+        t.result = result;
+        t.inlineDiff = inlineDiff;
+        t.snapshotId = snapshotId;
+        finalizeToolPart(st, t);
+        emit({
+          type: "tool.complete",
+          payload: {
+            tool_call_id: id,
+            name: t.name,
+            result,
+            inline_diff: inlineDiff,
+            snapshot_id: snapshotId,
+            duration_s: (Date.now() - t.startedAt) / 1000,
+          },
+        });
         break;
       }
 
       case "tool-error": {
         const id = String(part["toolCallId"] ?? part["id"] ?? "");
-        const t = st.tools.get(id);
+        const metadata = ctx.approvalMeta?.get(id);
+        const t = ensureTool(
+          st,
+          id,
+          String(part["toolName"] ?? metadata?.name ?? "tool"),
+          metadata?.args,
+          emit,
+        );
         const message = errMsg(part["error"]);
-        if (t) {
-          t.error = message;
-          finalizeToolPart(st, t);
-          emit({
-            type: "tool.complete",
-            payload: { tool_call_id: id, name: t.name, error: message, duration_s: (Date.now() - t.startedAt) / 1000 },
-          });
-        }
+        t.error = message;
+        finalizeToolPart(st, t);
+        emit({
+          type: "tool.complete",
+          payload: { tool_call_id: id, name: t.name, error: message, duration_s: (Date.now() - t.startedAt) / 1000 },
+        });
         break; // tool-error != stream error; model self-heals.
       }
 

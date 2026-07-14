@@ -20,10 +20,20 @@ export interface BridgeState {
   errored: boolean;
   stepCount: number;
   finished: boolean;
+  pendingApprovals: number;
 }
 
 export function initState(): BridgeState {
-  return { text: "", parts: [], tools: new Map(), aborted: false, errored: false, stepCount: 0, finished: false };
+  return {
+    text: "",
+    parts: [],
+    tools: new Map(),
+    aborted: false,
+    errored: false,
+    stepCount: 0,
+    finished: false,
+    pendingApprovals: 0,
+  };
 }
 
 export function pushText(st: BridgeState, delta: string): void {

@@ -18,6 +18,7 @@ export const ruShell = {
   "shell.session.phase.tool": "Использует инструмент",
   "shell.session.phase.recovering": "Исправляет ошибку",
   "shell.session.phase.responding": "Формирует ответ",
+  "shell.session.phase.awaiting_approval": "Ждёт разрешения",
   "shell.session.phase.complete": "Завершено",
   "shell.session.phase.failed": "Ошибка",
   "shell.session.phase.interrupted": "Остановлено",

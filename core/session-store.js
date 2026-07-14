@@ -11,8 +11,17 @@ import { randomUUID } from "node:crypto";
  * on-disk format can evolve without breaking older installs.
  */
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
+const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_ID_RE = /^msg-[a-zA-Z0-9_-]{8,80}$/;
+
+export class SessionApprovalError extends Error {
+  constructor(code) {
+    super(code);
+    this.name = "SessionApprovalError";
+    this.code = code;
+  }
+}
 
 export function isSessionMessageId(value) {
   return typeof value === "string" && MESSAGE_ID_RE.test(value);
@@ -26,9 +35,63 @@ function normalizedMessageId(value, sessionId, index) {
 
 function normalizeStoredMessage(value, sessionId, index) {
   const source = value && typeof value === "object" ? value : {};
+  const at = typeof source.at === "string" && Number.isFinite(Date.parse(source.at))
+    ? source.at
+    : new Date().toISOString();
+  const parts = Array.isArray(source.parts)
+    ? source.parts.map(part => normalizeApprovalPart(part, at))
+    : source.parts;
   return {
     ...source,
     id: normalizedMessageId(source.id, sessionId, index),
+    at,
+    ...(Array.isArray(parts) ? { parts } : {}),
+  };
+}
+
+function approvalIdentifier(value) {
+  return typeof value === "string" && value.trim().length >= 8 && value.trim().length <= 200
+    ? value.trim()
+    : "";
+}
+
+function approvalTimestamp(value, fallback) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : fallback;
+}
+
+function normalizeApprovalPart(value, messageAt) {
+  if (!value || typeof value !== "object" || value.type !== "approval") return value;
+  const approvalId = approvalIdentifier(value.approvalId);
+  const toolCallId = approvalIdentifier(value.toolCallId);
+  if (!approvalId || !toolCallId) return value;
+  const createdAt = approvalTimestamp(value.createdAt, messageAt);
+  const expiresAt = approvalTimestamp(
+    value.expiresAt,
+    new Date(Date.parse(createdAt) + APPROVAL_TTL_MS).toISOString(),
+  );
+  const status = ["pending", "approved", "denied", "expired"].includes(value.status)
+    ? value.status
+    : "pending";
+  const resolvedAt = value.resolvedAt
+    ? approvalTimestamp(value.resolvedAt, createdAt)
+    : undefined;
+  const consumedAt = value.consumedAt
+    ? approvalTimestamp(value.consumedAt, resolvedAt ?? createdAt)
+    : status === "denied" || status === "expired"
+      ? resolvedAt ?? createdAt
+      : undefined;
+  return {
+    ...value,
+    approvalId,
+    toolCallId,
+    name: typeof value.name === "string" ? value.name.slice(0, 160) : "tool",
+    reason: typeof value.reason === "string" ? value.reason.slice(0, 500) : "permission_rule_requires_confirmation",
+    status,
+    createdAt,
+    expiresAt,
+    ...(resolvedAt ? { resolvedAt } : {}),
+    ...(consumedAt ? { consumedAt } : {}),
+    ...(typeof value.decisionReason === "string" ? { decisionReason: value.decisionReason.slice(0, 500) } : {}),
   };
 }
 
@@ -153,7 +216,17 @@ export class SessionStore {
       ? message.id
       : nextMessageId();
     const id = list.some(candidate => candidate.id === requestedId) ? nextMessageId() : requestedId;
-    const stored = { ...message, id, at: message.at ?? new Date().toISOString() };
+    const at = typeof message?.at === "string" && Number.isFinite(Date.parse(message.at))
+      ? message.at
+      : new Date().toISOString();
+    const stored = {
+      ...message,
+      id,
+      at,
+      ...(Array.isArray(message?.parts)
+        ? { parts: message.parts.map(part => normalizeApprovalPart(part, at)) }
+        : {}),
+    };
     list.push(stored);
     if (list.length > this.maxMessages) list.splice(0, list.length - this.maxMessages);
     this.touch();
@@ -162,6 +235,99 @@ export class SessionStore {
 
   getMessages(sessionId) {
     return this.state.messages[sessionId] ?? [];
+  }
+
+  findApproval(sessionId, approvalId) {
+    const list = this.state.messages[sessionId] ?? [];
+    for (let messageIndex = list.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const message = list[messageIndex];
+      if (!Array.isArray(message?.parts)) continue;
+      const partIndex = message.parts.findIndex(part => part?.type === "approval" && part.approvalId === approvalId);
+      if (partIndex >= 0) return { message, messageIndex, partIndex, approval: message.parts[partIndex] };
+    }
+    return null;
+  }
+
+  getApproval(sessionId, approvalId) {
+    return this.findApproval(sessionId, approvalId)?.approval ?? null;
+  }
+
+  hasUnconsumedApprovals(sessionId) {
+    return (this.state.messages[sessionId] ?? []).some(message => Array.isArray(message?.parts)
+      && message.parts.some(part => part?.type === "approval" && !part.consumedAt));
+  }
+
+  resolveApproval(sessionId, approvalId, { approved, reason = "", now = new Date().toISOString() } = {}) {
+    if (typeof approved !== "boolean") throw new SessionApprovalError("approval_decision_invalid");
+    const found = this.findApproval(sessionId, approvalId);
+    if (!found) throw new SessionApprovalError("approval_not_found");
+    const decisionAt = approvalTimestamp(now, new Date().toISOString());
+    const current = found.approval;
+    if (current.consumedAt) throw new SessionApprovalError("approval_already_consumed");
+    const expired = current.status === "expired"
+      || Date.parse(current.expiresAt) <= Date.parse(decisionAt);
+    // A denial has no side effect to guard, so its durable decision is also
+    // its one-shot consumption point. This lets a signed continuation (or a
+    // later user turn after a crash) carry the denial without stranding the
+    // session behind an effect callback that will never run.
+    if (expired) {
+      const approval = {
+        ...current,
+        status: "expired",
+        resolvedAt: current.resolvedAt ?? decisionAt,
+        decisionReason: "approval_expired",
+        consumedAt: current.consumedAt ?? decisionAt,
+      };
+      found.message.parts[found.partIndex] = approval;
+      const ready = found.message.parts
+        .filter(part => part?.type === "approval")
+        .every(part => part.status !== "pending");
+      this.touch();
+      return {
+        approval,
+        messageId: found.message.id,
+        ready,
+        modelParams: found.message.approvalModelParams,
+      };
+    }
+    const status = approved ? "approved" : "denied";
+    if (current.status !== "pending" && current.status !== status) {
+      throw new SessionApprovalError("approval_decision_conflict");
+    }
+    const approval = {
+      ...current,
+      status,
+      resolvedAt: current.resolvedAt ?? decisionAt,
+      ...(!approved ? { consumedAt: current.consumedAt ?? decisionAt } : {}),
+      ...(reason ? { decisionReason: String(reason).slice(0, 500) } : {}),
+    };
+    found.message.parts[found.partIndex] = approval;
+    const ready = found.message.parts
+      .filter(part => part?.type === "approval")
+      .every(part => part.status !== "pending");
+    this.touch();
+    return {
+      approval,
+      messageId: found.message.id,
+      ready,
+      modelParams: found.message.approvalModelParams,
+    };
+  }
+
+  consumeApproval(sessionId, approvalId, now = new Date().toISOString()) {
+    const found = this.findApproval(sessionId, approvalId);
+    if (!found) throw new SessionApprovalError("approval_not_found");
+    if (found.approval.consumedAt) return found.approval;
+    if (found.approval.status !== "approved" && found.approval.status !== "denied" && found.approval.status !== "expired") {
+      throw new SessionApprovalError("approval_not_resolved");
+    }
+    const approval = {
+      ...found.approval,
+      consumedAt: approvalTimestamp(now, new Date().toISOString()),
+    };
+    found.message.parts[found.partIndex] = approval;
+    this.touch();
+    return approval;
   }
 
   planRewind(sessionId, messageId) {
