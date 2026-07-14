@@ -15,6 +15,8 @@ export interface QueuedPromptEntry {
   id: string;
   text: string;
   attachments: ComposerAttachment[];
+  /** Explicit per-turn Agent Skills selected in the composer. */
+  skillIds: string[];
   queuedAt: number;
 }
 
@@ -48,6 +50,8 @@ const queueFor = (sid: string) => $queuedPromptsBySession.get()[sid] ?? [];
 const nextId = () => `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 const cloneAttachments = (attachments: ComposerAttachment[]) => attachments.map((a) => ({ ...a }));
+const cloneSkillIds = (skillIds: readonly string[] | undefined) => [...new Set(skillIds ?? [])]
+  .filter((id) => typeof id === "string" && id.length > 0);
 
 export const getQueuedPrompts = (key: string | null | undefined): QueuedPromptEntry[] => {
   const sid = sidOf(key);
@@ -57,7 +61,7 @@ export const getQueuedPrompts = (key: string | null | undefined): QueuedPromptEn
 
 export const enqueueQueuedPrompt = (
   key: string | null | undefined,
-  payload: { text: string; attachments: ComposerAttachment[] },
+  payload: { text: string; attachments: ComposerAttachment[]; skillIds?: readonly string[] },
 ): null | QueuedPromptEntry => {
   const sid = sidOf(key);
 
@@ -69,6 +73,7 @@ export const enqueueQueuedPrompt = (
     id: nextId(),
     text: payload.text,
     attachments: cloneAttachments(payload.attachments),
+    skillIds: cloneSkillIds(payload.skillIds),
     queuedAt: Date.now(),
   };
 

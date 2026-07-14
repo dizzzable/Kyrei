@@ -260,6 +260,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
     hasDelegation: delegationEnabled,
     skills: opts.skills?.map(({ id, name, description }) => ({ id, name, description })),
+    requiredSkillIds: opts.requiredSkillIds,
     team: opts.team && teamExecutors.length
       ? {
           name: opts.team.name,
@@ -437,6 +438,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         tools: childTools,
         maxSteps: cfg.delegation.maxSteps,
         maxRetries: cfg.apiMaxRetries,
+        timeoutMs: cfg.delegation.timeoutMs,
         cost: workerEntry?.cost ?? entry.cost,
         providerOptions: explicitWorkerProviderOptions ?? providerOptions,
         workspace: workspaceReady ? opts.workspace : undefined,

@@ -86,6 +86,30 @@ describe("settings localized rendering", () => {
     expect(await renderSettings("ru", "appearance")).toContain("Тёмная");
   });
 
+  it("explains the local GBrain setup before any agent memory is enabled", async () => {
+    const english = await renderSettings("en", "memory");
+    const russian = await renderSettings("ru", "memory");
+
+    expect(english).toContain("Local GBrain setup");
+    expect(english).toContain("Checking local GBrain…");
+    expect(english).toContain("Check status");
+    expect(russian).toContain("Локальная настройка GBrain");
+    expect(russian).toContain("Проверяю локальный GBrain…");
+    expect(russian).toContain("Проверить статус");
+  });
+
+  it("explains that standalone Skills work and can be selected for one task", async () => {
+    const english = await renderSettings("en", "skills");
+    const russian = await renderSettings("ru", "skills");
+
+    expect(english).toContain("How Skills are used");
+    expect(english).toContain("A single SKILL.md is a complete Skill");
+    expect(english).toContain("Skills for this task");
+    expect(russian).toContain("Как используются skills");
+    expect(russian).toContain("Один файл SKILL.md — полноценный skill");
+    expect(russian).toContain("Skills для этой задачи");
+  });
+
   it("renders the guided persistent permission editor in both locales", async () => {
     const english = await renderSettings("en", "workspace");
     const russian = await renderSettings("ru", "workspace");

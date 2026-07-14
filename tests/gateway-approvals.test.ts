@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
+import { request as nodeRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +33,61 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   throw new Error("timed out");
+}
+
+async function sessionMessages(sessionId: string): Promise<Array<Record<string, any>>> {
+  return (await request<{ messages: Array<Record<string, any>> }>(`/api/sessions/${sessionId}/messages`)).messages;
+}
+
+async function waitForPendingApproval(sessionId: string): Promise<void> {
+  await waitFor(async () => {
+    const last = (await sessionMessages(sessionId)).at(-1);
+    return last?.role === "assistant"
+      && last?.pending !== true
+      && last?.turnStatus === "awaiting_approval"
+      && Array.isArray(last.parts)
+      && last.parts.some((part: Record<string, unknown>) => (
+        part.type === "approval" && part.approvalId === APPROVAL_ID && part.status === "pending"
+      ));
+  });
+}
+
+async function waitForSettledMessageCount(sessionId: string, count: number): Promise<void> {
+  await waitFor(async () => {
+    const messages = await sessionMessages(sessionId);
+    return messages.length === count && messages.at(-1)?.pending !== true;
+  });
+}
+
+function startPartialJsonRequest(path: string, payload: string) {
+  const data = Buffer.from(payload, "utf8");
+  const splitAt = Math.max(1, data.byteLength - 2);
+  const request = nodeRequest({
+    hostname: "127.0.0.1",
+    port: server.port,
+    path,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": data.byteLength,
+      "X-Kyrei-Gateway-Token": server.token,
+    },
+  });
+  // Shutdown intentionally terminates this request before its body is valid.
+  request.on("error", () => undefined);
+  request.write(data.subarray(0, splitAt));
+  return {
+    finish() {
+      try {
+        request.end(data.subarray(splitAt));
+      } catch {
+        // The shutdown response can already have closed the socket.
+      }
+    },
+    destroy() {
+      request.destroy();
+    },
+  };
 }
 
 beforeEach(async () => {
@@ -153,9 +209,7 @@ describe("gateway interactive tool approvals", () => {
         modelParams: { effort: "high", contextWindowOverride: 96_000 },
       }),
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 2);
+    await waitForPendingApproval(session.id);
 
     const pending = await request<{ messages: Array<Record<string, any>> }>(`/api/sessions/${session.id}/messages`);
     expect(pending.messages[1]?.parts).toContainEqual(expect.objectContaining({
@@ -173,9 +227,7 @@ describe("gateway interactive tool approvals", () => {
       { method: "POST", body: JSON.stringify({ approved: true, reason: "User approved once" }) },
     );
     expect(response.status).toBe("streaming");
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 3);
+    await waitForSettledMessageCount(session.id, 3);
 
     const resumedMessages = runKyreiChat.mock.calls[1]?.[0].messages;
     expect(JSON.stringify(resumedMessages)).not.toContain("[CIRCULAR]");
@@ -230,9 +282,7 @@ describe("gateway interactive tool approvals", () => {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "Run after restart" }),
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 2);
+    await waitForPendingApproval(session.id);
     const signingKeyBeforeRestart = runKyreiChat.mock.calls[0]?.[0].approvalSecret;
 
     await server.close();
@@ -247,9 +297,7 @@ describe("gateway interactive tool approvals", () => {
       { method: "POST", body: JSON.stringify({ approved: true }) },
     );
     expect(response.status).toBe("streaming");
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 3);
+    await waitForSettledMessageCount(session.id, 3);
 
     expect(runKyreiChat.mock.calls[1]?.[0].approvalSecret).toBe(signingKeyBeforeRestart);
     expect(runKyreiChat.mock.calls[1]?.[0].messages.at(-1)).toMatchObject({
@@ -268,15 +316,51 @@ describe("gateway interactive tool approvals", () => {
     }));
   });
 
+  it("does not resolve an approval whose request body is interrupted by gateway shutdown", async () => {
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Wait for an explicit decision" }),
+    });
+    await waitForPendingApproval(session.id);
+
+    const payload = JSON.stringify({ approved: true, reason: "must not apply after close" });
+    const partial = startPartialJsonRequest(
+      `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
+      payload,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(Promise.race([
+      server.close().then(() => "closed"),
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 500)),
+    ])).resolves.toBe("closed");
+    // A delayed final chunk from an already accepted connection must not
+    // resolve the approval after close() has returned.
+    partial.finish();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    partial.destroy();
+
+    server = await startGateway({
+      dataDir,
+      preferredPort: 0,
+      engineLoader: async () => ({ runKyreiChat }),
+    });
+    const restored = await sessionMessages(session.id);
+    const approval = restored[1]?.parts?.find((part: Record<string, unknown>) => (
+      part.type === "approval" && part.approvalId === APPROVAL_ID
+    ));
+    expect(approval).toMatchObject({ status: "pending" });
+    expect(approval).not.toHaveProperty("consumedAt");
+    expect(runKyreiChat).toHaveBeenCalledTimes(1);
+  });
+
   it("unblocks later prompts when a newly restrictive policy consumes an approved receipt without an effect", async () => {
     const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
     await request("/api/prompt", {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "Request an action before policy changes" }),
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 2);
+    await waitForPendingApproval(session.id);
 
     runKyreiChat.mockImplementationOnce(async (options: Record<string, any>) => {
       expect(options.messages.at(-1)).toMatchObject({
@@ -298,9 +382,7 @@ describe("gateway interactive tool approvals", () => {
       `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
       { method: "POST", body: JSON.stringify({ approved: true }) },
     );
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 3);
+    await waitForSettledMessageCount(session.id, 3);
     const stored = await request<{ messages: Array<Record<string, any>> }>(`/api/sessions/${session.id}/messages`);
     expect(stored.messages[1]?.parts).toContainEqual(expect.objectContaining({
       approvalId: APPROVAL_ID,
@@ -325,9 +407,7 @@ describe("gateway interactive tool approvals", () => {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "Do not run this command" }),
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 2);
+    await waitForPendingApproval(session.id);
 
     const response = await request<{ status: string; approval: Record<string, unknown> }>(
       `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
@@ -337,9 +417,7 @@ describe("gateway interactive tool approvals", () => {
       status: "streaming",
       approval: { status: "denied", consumedAt: expect.any(String) },
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 3);
+    await waitForSettledMessageCount(session.id, 3);
     expect(runKyreiChat.mock.calls[1]?.[0].messages.at(-1)).toEqual({
       role: "tool",
       content: [{
@@ -368,9 +446,7 @@ describe("gateway interactive tool approvals", () => {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "Run only if approval is fresh" }),
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 2);
+    await waitForPendingApproval(session.id);
 
     const response = await request<{ status: string; approval: Record<string, unknown> }>(
       `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
@@ -384,9 +460,7 @@ describe("gateway interactive tool approvals", () => {
         consumedAt: expect.any(String),
       },
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 3);
+    await waitForSettledMessageCount(session.id, 3);
     expect(runKyreiChat.mock.calls[1]?.[0].messages.at(-1)).toEqual({
       role: "tool",
       content: [{
@@ -449,9 +523,7 @@ describe("gateway interactive tool approvals", () => {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "Run the safe subset" }),
     });
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 2);
+    await waitForPendingApproval(session.id);
 
     const first = await request<{ status: string; approval: Record<string, unknown> }>(
       `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
@@ -476,9 +548,7 @@ describe("gateway interactive tool approvals", () => {
       { method: "POST", body: JSON.stringify({ approved: true }) },
     );
     expect(second.status).toBe("streaming");
-    await waitFor(async () => (
-      await request<{ messages: unknown[] }>(`/api/sessions/${session.id}/messages`)
-    ).messages.length === 3);
+    await waitForSettledMessageCount(session.id, 3);
 
     const stored = await request<{ messages: Array<Record<string, any>> }>(`/api/sessions/${session.id}/messages`);
     expect(stored.messages[1]?.parts).toEqual(expect.arrayContaining([

@@ -1,12 +1,81 @@
 import { describe, expect, it } from "vitest";
 import {
+  cancelResponseIsTerminal,
+  mergeSessionHydration,
+  pendingAssistantId,
   reconcileCurrentSessionId,
   rollbackSessionModel,
+  runStateForSession,
   shouldApplySessionPoll,
   updateSessionModel,
 } from "./session-sync";
 
 describe("session synchronization", () => {
+  it("keeps a stopping turn busy until the gateway confirms a terminal state", () => {
+    expect(runStateForSession("working", "stopping")).toBe("stopping");
+    expect(runStateForSession("working", "idle")).toBe("running");
+    expect(runStateForSession("idle", "stopping")).toBe("idle");
+  });
+
+  it("accepts only explicit terminal cancel acknowledgements", () => {
+    expect(cancelResponseIsTerminal({ ok: true, cancelled: true })).toBe(true);
+    expect(cancelResponseIsTerminal({ ok: true, cancelled: false, status: "cancelled" })).toBe(true);
+    expect(cancelResponseIsTerminal({ ok: true, cancelled: false, status: "idle" })).toBe(true);
+    expect(cancelResponseIsTerminal({ ok: true, cancelled: false, status: "interrupted" })).toBe(true);
+    expect(cancelResponseIsTerminal({ ok: true })).toBe(false);
+    expect(cancelResponseIsTerminal({ ok: true, cancelled: false, status: "timeout" })).toBe(false);
+  });
+
+  it("merges durable hydration without dropping live deltas from a restored active turn", () => {
+    const pendingId = pendingAssistantId("session-a");
+    const durable = [{ id: "user-1", role: "user" as const, parts: [{ type: "text" as const, text: "question" }] }];
+    const live = [{
+      id: pendingId,
+      role: "assistant" as const,
+      parts: [{ type: "reasoning" as const, text: "live delta" }],
+      pending: true,
+    }];
+
+    expect(mergeSessionHydration(durable, live, pendingId, true)).toEqual({
+      messages: [durable[0], live[0]],
+      pendingId,
+    });
+    expect(mergeSessionHydration(durable, [], pendingId, true)).toEqual({
+      messages: [
+        durable[0],
+        { id: pendingId, role: "assistant", parts: [{ type: "reasoning", text: "" }], pending: true },
+      ],
+      pendingId,
+    });
+    expect(mergeSessionHydration(durable, live, pendingId, false)).toEqual({
+      messages: durable,
+      pendingId: null,
+    });
+  });
+
+  it("replaces a synthetic pending row with the canonical durable draft id", () => {
+    const syntheticId = pendingAssistantId("session-a");
+    const canonicalId = "msg-canonical";
+    const durable = [
+      { id: "user-1", role: "user" as const, parts: [{ type: "text" as const, text: "question" }] },
+      { id: canonicalId, role: "assistant" as const, parts: [], pending: true },
+    ];
+    const live = [{
+      id: syntheticId,
+      role: "assistant" as const,
+      parts: [{ type: "reasoning" as const, text: "newer live delta" }],
+      pending: true,
+    }];
+
+    expect(mergeSessionHydration(durable, live, syntheticId, true, canonicalId)).toEqual({
+      messages: [
+        durable[0],
+        { ...durable[1], parts: live[0].parts },
+      ],
+      pendingId: canonicalId,
+    });
+  });
+
   it("rejects an older overlapping poll", () => {
     expect(shouldApplySessionPoll({
       requestId: 4,

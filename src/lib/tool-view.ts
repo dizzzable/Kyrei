@@ -53,6 +53,10 @@ const TOOL_META: Record<string, ToolMeta> = {
   brain_capture: { labelKey: "chat.tool.brainCapture", icon: "brain", tone: "agent" },
   project_map: { labelKey: "chat.tool.projectMap", icon: "network", tone: "agent" },
   project_impact: { labelKey: "chat.tool.projectImpact", icon: "network", tone: "agent" },
+  search_skills: { labelKey: "chat.tool.searchSkills", icon: "search", tone: "search" },
+  read_skill: { labelKey: "chat.tool.readSkill", icon: "book-open", tone: "agent" },
+  read_skill_document: { labelKey: "chat.tool.readSkillDocument", icon: "file-text", tone: "agent" },
+  search_skill_documents: { labelKey: "chat.tool.searchSkillDocuments", icon: "search", tone: "search" },
 };
 
 const FILE_EDIT = new Set(["write_file", "edit_file"]);
@@ -78,7 +82,7 @@ export function buildToolView(part: ToolPart, t: ChatTranslator): ToolView {
 
   const subtitle =
     argString(part.args, ["path", "file", "filepath"]) ||
-    argString(part.args, ["command", "query", "pattern", "search_term", "url", "slug", "question"]);
+    argString(part.args, ["command", "query", "pattern", "search_term", "url", "slug", "question", "documentId", "skillId", "id"]);
 
   const errorText = part.error || extractToolErrorMessage(part.result);
   const detail = status === "error" ? errorText : (isFileEdit ? "" : formatToolResultSummary(part.result, t));

@@ -72,6 +72,8 @@ export interface SessionInfo {
     updatedAt: number;
     completedAt?: number;
     currentTool?: string;
+    /** Canonical durable assistant draft for an active turn. */
+    messageId?: string;
     eventCount: number;
     toolCount: number;
     tokens?: number;
@@ -84,6 +86,11 @@ export interface StoredChatMessage {
   content: string;
   parts?: MessagePart[];
   at?: string;
+  pending?: boolean;
+  turnStatus?: "streaming" | "complete" | "max_steps" | "awaiting_approval" | "interrupted" | "error";
+  /** Safe gateway error metadata used to restore a failed turn after restart. */
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 export interface GatewayStatus {
@@ -620,6 +627,21 @@ export interface AppConfig {
   engine?: Record<string, unknown>;
 }
 
+/** Safe, user-facing health state for the optional local GBrain runtime. */
+export interface GBrainRuntimeStatus {
+  state: "ready" | "not_initialized" | "unavailable" | "error";
+  /** Current agent access setting, independent from whether the local store is healthy. */
+  mode: "off" | "read" | "read-write";
+  /** Compact doctor result; no raw local paths or diagnostics are exposed. */
+  doctorStatus: "ok" | "warnings" | "error" | "unknown";
+  reason?: "command_unavailable" | "adapter_unavailable" | "not_initialized" | "check_failed";
+}
+
+export interface GBrainInitializationResult {
+  status: GBrainRuntimeStatus;
+  config: AppConfig;
+}
+
 /** Event frames streamed from the gateway (Server-Sent Events). */
 export interface GatewayEvent {
   type: string;
@@ -639,7 +661,10 @@ export interface GatewayEvent {
     inline_diff?: string;
     snapshot_id?: string;
     status?: string;
+    /** False only when the gateway could not durably flush a terminal turn. */
+    durable?: boolean;
     session_id?: string;
+    message_id?: string;
     provider_id?: string;
     model_id?: string;
     title?: string;

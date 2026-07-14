@@ -12,10 +12,21 @@ describe("selectTeamRoleTools", () => {
         web_fetch: { name: "fetch" },
         brain_search: { name: "brain" },
         brain_capture: { name: "capture" },
+        search_skills: { name: "skill catalog" },
         read_skill: { name: "skill" },
+        read_skill_document: { name: "skill doc" },
+        search_skill_documents: { name: "skill search" },
       } as never,
     );
 
-    expect(Object.keys(selected).sort()).toEqual(["brain_search", "read_file", "read_skill", "web_fetch"]);
+    expect(Object.keys(selected).sort()).toEqual([
+      "brain_search",
+      "read_file",
+      "read_skill",
+      "read_skill_document",
+      "search_skill_documents",
+      "search_skills",
+      "web_fetch",
+    ]);
   });
 });

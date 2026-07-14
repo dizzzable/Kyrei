@@ -142,6 +142,7 @@ const DelegationConfigSchema = z.object({
   maxTasks: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxTasks),
   maxParallel: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxParallel),
   maxSteps: z.number().int().min(1).max(24).default(DEFAULT_ENGINE_CONFIG.delegation.maxSteps),
+  timeoutMs: z.number().int().min(1_000).max(300_000).default(DEFAULT_ENGINE_CONFIG.delegation.timeoutMs),
 });
 
 const PromptProfileIdSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);

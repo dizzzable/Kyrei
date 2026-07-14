@@ -17,6 +17,8 @@ export interface DelegateTaskMetadata {
   providerCalls?: number;
   filesRead?: readonly string[];
   filesWritten?: readonly string[];
+  /** A bounded child completed its work but has no factual conclusion to use as evidence. */
+  incomplete?: boolean;
 }
 
 export interface DelegateTaskResult extends DelegateTaskMetadata {
@@ -260,6 +262,7 @@ function mergeMetadata(
     providerCalls: nonNegativeInteger(incoming.providerCalls) ?? nonNegativeInteger(current.providerCalls),
     filesRead: mergeFiles(current.filesRead, incoming.filesRead),
     filesWritten: mergeFiles(current.filesWritten, incoming.filesWritten),
+    incomplete: incoming.incomplete ?? current.incomplete,
   };
 }
 
@@ -274,6 +277,7 @@ function eventMetadata(metadata: DelegateTaskMetadata): DelegateEventMetadata {
     provider_calls: nonNegativeInteger(metadata.providerCalls),
     files_read: metadata.filesRead ? [...metadata.filesRead] : undefined,
     files_written: metadata.filesWritten ? [...metadata.filesWritten] : undefined,
+    incomplete: metadata.incomplete,
   };
 }
 

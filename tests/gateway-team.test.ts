@@ -283,6 +283,18 @@ describe("gateway Team orchestration", () => {
         content: "Verify every factual claim.",
       }),
     });
+    const selectedSkillIds = [enabled.skill.id];
+    for (let index = 0; index < 32; index += 1) {
+      const created = await request<{ skill: { id: string } }>("/api/skills", {
+        method: "POST",
+        body: JSON.stringify({
+          name: `team-selected-${index + 1}`,
+          description: "Selected by the Team profile",
+          content: "Use the assigned workflow.",
+        }),
+      });
+      selectedSkillIds.push(created.skill.id);
+    }
     const disabled = await request<{ skill: { id: string } }>("/api/skills", {
       method: "POST",
       body: JSON.stringify({
@@ -323,7 +335,7 @@ describe("gateway Team orchestration", () => {
             id: "specialist",
             name: "Specialist",
             model: { providerId: "worker-provider", modelId: "worker-model" },
-            skillIds: [enabled.skill.id],
+            skillIds: selectedSkillIds,
           }),
           role({
             id: "reviewer",
@@ -343,6 +355,7 @@ describe("gateway Team orchestration", () => {
 
     const engineOptions = runKyreiChat.mock.calls[0]?.[0] as {
       readSkillDocument: (skillId: string, documentId: string) => Promise<unknown>;
+      skills: Array<{ id: string }>;
       team: {
         profileId: string;
         roles: Array<{
@@ -354,6 +367,7 @@ describe("gateway Team orchestration", () => {
     };
     expect(engineOptions.readSkillDocument).toEqual(expect.any(Function));
     await expect(engineOptions.readSkillDocument("invalid", "invalid")).resolves.toBeNull();
+    expect(engineOptions.skills.map((skill) => skill.id).sort()).toEqual([...selectedSkillIds].sort());
     expect(engineOptions.team.profileId).toBe("repo-team");
     const specialist = engineOptions.team.roles.find((candidate) => candidate.id === "specialist");
     const reviewer = engineOptions.team.roles.find((candidate) => candidate.id === "reviewer");
@@ -364,7 +378,7 @@ describe("gateway Team orchestration", () => {
         apiKey: workerKey,
         credentials: { apiKey: workerKey },
       },
-      skillIds: [enabled.skill.id],
+      skillIds: selectedSkillIds,
     });
     expect(reviewer).toMatchObject({
       target: {

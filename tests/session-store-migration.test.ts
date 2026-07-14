@@ -15,7 +15,7 @@ describe("session store localization migration", () => {
       messages: { used: [{ role: "user", content: "Keep the explicit title" }] },
     });
 
-    expect(migrated.schemaVersion).toBe(6);
+    expect(migrated.schemaVersion).toBe(7);
     expect(migrated.sessions).toEqual([
       { id: "empty-ru", title: "" },
       { id: "empty-en", title: "" },
@@ -71,6 +71,56 @@ describe("session store localization migration", () => {
 
     expect(migrated.messages.session[0].id).toBe("msg-legacy-session-0");
     expect(migrated.messages.session[1].id).toBe("msg-client-12345678");
+  });
+
+  it("recovers a persisted active assistant draft as an interrupted turn", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    const migrated = store.migrate({
+      schemaVersion: 6,
+      sessions: [{ id: "session", title: "Interrupted" }],
+      messages: {
+        session: [{
+          id: "msg-assistant-active-0001",
+          role: "assistant",
+          content: "Partial answer",
+          pending: true,
+          turnStatus: "streaming",
+          parts: [
+            { type: "reasoning", text: "Checked the repository" },
+            {
+              type: "tool",
+              toolCallId: "call-active",
+              name: "delegate_read",
+              args: { task: "Inspect the project" },
+              progress: "Still working",
+              running: true,
+            },
+            { type: "text", text: "Partial answer" },
+          ],
+        }],
+      },
+    });
+
+    expect(migrated.messages.session).toEqual([
+      expect.objectContaining({
+        id: "msg-assistant-active-0001",
+        role: "assistant",
+        content: "Partial answer",
+        pending: false,
+        turnStatus: "interrupted",
+        parts: [
+          { type: "reasoning", text: "Checked the repository" },
+          expect.objectContaining({
+            type: "tool",
+            toolCallId: "call-active",
+            running: false,
+            error: "tool_interrupted",
+            progress: undefined,
+          }),
+          { type: "text", text: "Partial answer" },
+        ],
+      }),
+    ]);
   });
 
   it("plans and commits a rewind at a user message with ordered snapshot ids", () => {

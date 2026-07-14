@@ -71,6 +71,19 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(prompt).not.toContain("SECRET_SKILL_BODY");
   });
 
+  it("requires a user-selected Skill before task-specific work without treating docs as mandatory", () => {
+    const prompt = buildSystemPrompt({
+      hasTools: true,
+      skills: [{ id: "review", name: "Code review", description: "Review changed code" }],
+      requiredSkillIds: ["review", "missing"],
+    })!;
+    expect(prompt).toContain("User explicitly selected these Skills for this turn: review.");
+    expect(prompt).toContain("load every selected Skill with read_skill");
+    expect(prompt).toContain("SKILL.md is sufficient");
+    expect(prompt).toContain("Use offset to continue a long self-contained SKILL.md");
+    expect(prompt).not.toContain("missing.");
+  });
+
   it("mentions read-only delegation only when the capability is enabled", () => {
     const disabled = buildSystemPrompt({ hasTools: true, workspace: "/w" })!;
     const enabled = buildSystemPrompt({ hasTools: true, hasDelegation: true, workspace: "/w" })!;

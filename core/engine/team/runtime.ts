@@ -22,6 +22,7 @@ import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { assembleSystemContext } from "../memory/layers.js";
 import { selectTeamRoleTools } from "./capabilities.js";
 import { createTeamMemberRunner } from "./member-runner.js";
+import { createTeamResearchCacheRegistry } from "./research-cache.js";
 import type { TeamRoleExecutor } from "./tool.js";
 
 const READ_ONLY_TEAM_CAPABILITIES = new Set<AgentCapability>([
@@ -81,6 +82,13 @@ export async function createTeamRoleExecutors(
   const audit = options.auditLogPath ? createAuditLog(options.auditLogPath) : undefined;
   const ccr = workspaceReady ? createCcrStore(join(options.workspace!, ".kyrei", "ccr")) : null;
   const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};
+  // Each Team delegate/department execution creates one combined AbortSignal.
+  // Bind a small exact-result cache to that signal so all parallel roles share
+  // it, while later executions always start from an empty cache.
+  const researchCaches = createTeamResearchCacheRegistry({
+    config: options.config,
+    sensitiveValues: options.sensitiveValues,
+  });
   let projectContext = options.projectContext;
   if (projectContext === undefined && workspaceReady) {
     try {
@@ -133,12 +141,14 @@ export async function createTeamRoleExecutors(
         : undefined;
       const scopedRetrieveTools = canReadWorkspace ? retrieveTools : {};
       const scopedWebTools = role.capabilities.includes("web")
-        ? buildWebTools(options.config, {
-            ...(audit ? { audit } : {}),
-            sessionId: options.sessionId,
-            signal,
-            sensitiveValues: options.sensitiveValues,
-          })
+        ? researchCaches.forSignal(signal).wrapWebTools(
+            buildWebTools(options.config, {
+              ...(audit ? { audit } : {}),
+              sessionId: options.sessionId,
+              signal,
+              sensitiveValues: options.sensitiveValues,
+            }),
+          )
         : {};
       const scopedBrainTools = role.capabilities.includes("memory.read")
         ? buildGBrainTools(options.config.memory.gbrain, {

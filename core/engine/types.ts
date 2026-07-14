@@ -36,8 +36,19 @@ export interface SubagentEventMetadata {
   confidence?: number;
   cost_usd?: number;
   evidence?: string[];
+  /** Source receipts minted only by successful Team web_fetch calls. */
+  sources?: Array<{
+    id: string;
+    requested_url: string;
+    final_url: string;
+    title: string;
+    content_digest: string;
+    fetched_at: string;
+  }>;
   files_read?: string[];
   files_written?: string[];
+  /** Child finished operationally but did not produce a trustworthy conclusion. */
+  incomplete?: boolean;
   input_tokens?: number;
   model?: string;
   output_tokens?: number;
@@ -196,6 +207,8 @@ export interface DelegationConfig {
   maxParallel: number;
   /** Maximum model/tool loop steps available to each read-only child. */
   maxSteps: number;
+  /** Hard wall-clock limit for one read-only child, including every model/tool step. */
+  timeoutMs: number;
 }
 
 /** User-authored behaviour profile. It is advisory and always subordinate to Kyrei policy. */
@@ -249,6 +262,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     maxTasks: 3,
     maxParallel: 3,
     maxSteps: 8,
+    timeoutMs: 90_000,
   },
   memory: {
     gbrain: {
@@ -493,6 +507,8 @@ export interface RunKyreiChatOpts {
   modelParams?: ModelParams;
   /** User-enabled Agent Skills, prevalidated and bounded by the local gateway. */
   skills?: RuntimeSkill[];
+  /** Skills explicitly selected for this user turn. They must be read before relevant task work. */
+  requiredSkillIds?: string[];
   /** Gateway-owned usage recorder; never supplied by the renderer. */
   onSkillUsed?: (id: string) => void | Promise<void>;
   /** Gateway-owned lazy reader; document contents never ride in runtime config. */

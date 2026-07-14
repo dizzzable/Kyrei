@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { gateway } from "@/lib/gateway";
 import { rebaseImportedPipelines } from "@/lib/pipeline-import";
-import type { AppConfig } from "@/lib/types";
+import type { AppConfig, GBrainRuntimeStatus } from "@/lib/types";
 import { Button } from "@/components/ui";
 import { BoolField, EnumField, Field, NumberField, TextField } from "@/components/settings/ConfigField";
 import { ThemeGrid } from "@/components/settings/ThemeGrid";
@@ -113,6 +113,9 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [customActive, setCustomActive] = useState(isCustomThemeActive());
   const [customError, setCustomError] = useState(false);
   const [backupImportError, setBackupImportError] = useState(false);
+  const [gbrainStatus, setGbrainStatus] = useState<GBrainRuntimeStatus | null>(null);
+  const [gbrainBusy, setGbrainBusy] = useState(false);
+  const [gbrainCheckFailed, setGbrainCheckFailed] = useState(false);
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -293,6 +296,73 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     else engineSaveTimer.current = setTimeout(() => void flushEngineSave(), 500);
   };
 
+  const checkGBrain = useCallback(async () => {
+    // A changed command is meaningful only after the gateway has the same
+    // persisted configuration as this settings screen.
+    if (!await flushEngineSave()) return;
+    setGbrainBusy(true);
+    setGbrainCheckFailed(false);
+    try {
+      setGbrainStatus(await gateway.getGBrainStatus());
+    } catch {
+      // The status endpoint normally returns a structured unavailable state.
+      // This fallback covers a temporarily unreachable local gateway only.
+      setGbrainCheckFailed(true);
+    } finally {
+      setGbrainBusy(false);
+    }
+  }, [flushEngineSave]);
+
+  useEffect(() => {
+    if (visibleSection === "memory") void checkGBrain();
+  }, [checkGBrain, visibleSection]);
+
+  const initializeGBrain = useCallback(async () => {
+    // Persist a just-edited command before invoking it; otherwise a delayed
+    // settings save could initialize a different executable than the user saw.
+    if (!await flushEngineSave()) return;
+    setGbrainBusy(true);
+    setGbrainCheckFailed(false);
+    try {
+      const result = await gateway.initializeGBrain();
+      setGbrainStatus(result.status);
+      const nextEngine = { ...(result.config.engine ?? {}) };
+      pendingEngineSave.current = null;
+      engineRef.current = nextEngine;
+      setEngine(nextEngine);
+      setEngineText(JSON.stringify(nextEngine, null, 2));
+      setSaveFailed(false);
+      onSaved(result.config);
+      flash();
+    } catch {
+      setGbrainCheckFailed(true);
+    } finally {
+      setGbrainBusy(false);
+    }
+  }, [flash, flushEngineSave, onSaved]);
+
+  const installGBrain = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setGbrainBusy(true);
+    setGbrainCheckFailed(false);
+    try {
+      const result = await gateway.installGBrain();
+      setGbrainStatus(result.status);
+      const nextEngine = { ...(result.config.engine ?? {}) };
+      pendingEngineSave.current = null;
+      engineRef.current = nextEngine;
+      setEngine(nextEngine);
+      setEngineText(JSON.stringify(nextEngine, null, 2));
+      setSaveFailed(false);
+      onSaved(result.config);
+      flash();
+    } catch {
+      setGbrainCheckFailed(true);
+    } finally {
+      setGbrainBusy(false);
+    }
+  }, [flash, flushEngineSave, onSaved]);
+
   const importTheme = (file: File) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -392,6 +462,24 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
 
   const sectionMeta = SETTINGS_SECTIONS.find((entry) => entry.id === visibleSection)!;
   const permissionRules = importPermissionRules(permissionRulesInput(engine));
+  const gbrainStatusTitle = gbrainCheckFailed
+    ? t("settings.gbrain.status.error")
+    : !gbrainStatus
+      ? t("settings.gbrain.status.checking")
+      : gbrainStatus.state === "ready"
+        ? t(gbrainStatus.doctorStatus === "warnings" ? "settings.gbrain.status.readyWarnings" : "settings.gbrain.status.ready")
+        : gbrainStatus.state === "not_initialized"
+          ? t("settings.gbrain.status.notInitialized")
+          : gbrainStatus.state === "unavailable"
+            ? t("settings.gbrain.status.unavailable")
+            : t("settings.gbrain.status.error");
+  const gbrainStatusHint = gbrainStatus?.state === "ready" && gbrainStatus.mode === "off"
+    ? t("settings.gbrain.status.accessDisabled")
+    : gbrainStatus?.state === "not_initialized"
+      ? t("settings.gbrain.status.initializeHint")
+      : gbrainStatus?.state === "unavailable"
+        ? t("settings.gbrain.status.unavailableHint")
+        : undefined;
 
   const overlay = (
     <div
@@ -629,6 +717,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           <NumberField label={t("settings.delegation.maxTasks.label")} hint={t("settings.delegation.maxTasks.hint")} value={Number(getEngineField("delegation.maxTasks", 3))} min={1} max={8} step={1} onChange={(value) => setEngineField("delegation.maxTasks", value)} />
                           <NumberField label={t("settings.delegation.maxParallel.label")} hint={t("settings.delegation.maxParallel.hint")} value={Number(getEngineField("delegation.maxParallel", 3))} min={1} max={8} step={1} onChange={(value) => setEngineField("delegation.maxParallel", value)} />
                           <NumberField label={t("settings.delegation.maxSteps.label")} hint={t("settings.delegation.maxSteps.hint")} value={Number(getEngineField("delegation.maxSteps", 8))} min={1} max={24} step={1} onChange={(value) => setEngineField("delegation.maxSteps", value)} />
+                          <NumberField label={t("settings.delegation.timeout.label")} hint={t("settings.delegation.timeout.hint")} value={Number(getEngineField("delegation.timeoutMs", 90_000))} min={1_000} max={300_000} step={1_000} format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })} onChange={(value) => setEngineField("delegation.timeoutMs", value)} />
                         </>
                       )}
                       <NumberField label={t("settings.contextSoft.label")} hint={t("settings.contextSoft.hint")} value={Number(getEngineField("contextBudget.softPct", 0.75))} min={0.3} max={0.95} step={0.05} format={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setEngineField("contextBudget.softPct", value)} />
@@ -700,6 +789,38 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                   <section>
                     <GroupTitle>{t("settings.groups.gbrain")}</GroupTitle>
                     <div className="divide-y divide-border-soft">
+                      <Field label={t("settings.gbrain.setup.label")} hint={t("settings.gbrain.setup.hint")} stacked>
+                        <div className="rounded-lg border border-border-soft bg-elevated/45 px-3 py-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2.5">
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-medium text-foreground" role="status">{gbrainStatusTitle}</p>
+                              {gbrainStatusHint && <p className="mt-0.5 text-[12px] leading-snug text-muted">{gbrainStatusHint}</p>}
+                            </div>
+                            <div className="flex shrink-0 flex-wrap items-center gap-2">
+                              <Button variant="outline" size="sm" onClick={() => void checkGBrain()} disabled={gbrainBusy}>
+                                {gbrainBusy ? t("settings.gbrain.status.checking") : t("settings.gbrain.check")}
+                              </Button>
+                              {gbrainStatus?.state === "not_initialized" && (
+                                <Button size="sm" onClick={() => void initializeGBrain()} disabled={gbrainBusy}>
+                                  {gbrainBusy ? t("settings.gbrain.initializing") : t("settings.gbrain.initialize")}
+                                </Button>
+                              )}
+                              {gbrainStatus?.state === "unavailable" && gbrainStatus.reason === "command_unavailable" && (
+                                <Button size="sm" onClick={() => void installGBrain()} disabled={gbrainBusy}>
+                                  {gbrainBusy ? t("settings.gbrain.installing") : t("settings.gbrain.install")}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </Field>
+                      <TextField
+                        label={t("settings.gbrain.command.label")}
+                        hint={t("settings.gbrain.command.hint")}
+                        value={String(getEngineField("memory.gbrain.command", "gbrain"))}
+                        placeholder="gbrain"
+                        onChange={(value) => setEngineField("memory.gbrain.command", value)}
+                      />
                       <EnumField
                         label={t("settings.gbrain.mode.label")}
                         hint={t("settings.gbrain.mode.hint")}
@@ -713,7 +834,6 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       />
                       {String(getEngineField("memory.gbrain.mode", "off")) !== "off" && (
                         <>
-                          <TextField label={t("settings.gbrain.command.label")} hint={t("settings.gbrain.command.hint")} value={String(getEngineField("memory.gbrain.command", "gbrain"))} placeholder="gbrain" onChange={(value) => setEngineField("memory.gbrain.command", value)} />
                           <TextField label={t("settings.gbrain.source.label")} hint={t("settings.gbrain.source.hint")} value={String(getEngineField("memory.gbrain.source", ""))} placeholder="personal" onChange={(value) => setEngineField("memory.gbrain.source", value)} />
                           <NumberField label={t("settings.gbrain.timeout.label")} hint={t("settings.gbrain.timeout.hint")} value={Number(getEngineField("memory.gbrain.timeoutMs", 180_000))} min={1_000} max={600_000} step={1_000} format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })} onChange={(value) => setEngineField("memory.gbrain.timeoutMs", value)} />
                           <NumberField label={t("settings.gbrain.output.label")} hint={t("settings.gbrain.output.hint")} value={Number(getEngineField("memory.gbrain.maxOutputBytes", 200_000))} min={1_024} max={1_000_000} step={1_024} format={(value) => t("settings.units.kilobytesShort", { count: Math.round(value / 1_024) })} onChange={(value) => setEngineField("memory.gbrain.maxOutputBytes", value)} />

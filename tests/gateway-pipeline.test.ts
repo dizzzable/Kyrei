@@ -333,6 +333,62 @@ describe("gateway Pipeline v1 control plane", () => {
     );
   });
 
+  it("materializes every explicitly selected skill for a pipeline department profile", async () => {
+    await server.close();
+    const calls: Array<Record<string, unknown>> = [];
+    server = await startGateway({
+      dataDir,
+      preferredPort: 0,
+      engineLoader: async () => ({
+        runKyreiChat: async () => ({ text: "done", parts: [] }),
+        listModels: () => [],
+        runTeamDepartment: async (input: Record<string, unknown>) => {
+          calls.push(input);
+          return teamDepartmentResult(String(input.stageId));
+        },
+      }),
+    });
+    await configureOrganization();
+
+    const selectedSkillIds: string[] = [];
+    for (let index = 0; index < 33; index += 1) {
+      const created = await request<{ skill: { id: string } }>("/api/skills", {
+        method: "POST",
+        body: JSON.stringify({
+          name: `pipeline-selected-${index + 1}`,
+          description: "Selected by the research department",
+          content: "Return a concise evidence-backed result.",
+        }),
+      });
+      selectedSkillIds.push(created.skill.id);
+    }
+    const current = await request<any>("/api/config");
+    const orchestration = structuredClone(current.orchestration);
+    const researchProfile = orchestration.profiles.find((profile: { id: string }) => profile.id === "research-team");
+    researchProfile.roles[0].skillIds = selectedSkillIds;
+    await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ orchestration }),
+    });
+
+    const created = await request<{ run: { runId: string } }>("/api/pipeline-runs", {
+      method: "POST",
+      body: JSON.stringify({ pipelineId: "coding-product", goal: "Research with assigned skills" }),
+    });
+    await request(`/api/pipeline-runs/${created.run.runId}/start`, { method: "POST", body: "{}" });
+    await waitForPipelineRun<any>(
+      created.run.runId,
+      (run) => run.stages.find((stage: { id: string }) => stage.id === "research")?.status === "completed",
+    );
+
+    const researchCall = calls.find((call) => (
+      (call.team as { profileId?: string }).profileId === "research-team"
+    ));
+    expect(researchCall).toBeDefined();
+    expect((researchCall?.skills as Array<{ id: string }>).map((skill) => skill.id).sort())
+      .toEqual([...selectedSkillIds].sort());
+  });
+
   it("runs pinned Team departments through the direct adapter and blocks before an untrusted write", async () => {
     await server.close();
     const calls: Array<Record<string, unknown>> = [];

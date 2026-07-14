@@ -136,15 +136,31 @@ async function terminateProcessTree(child: ChildProcess): Promise<void> {
     }
     return;
   }
-  await new Promise<void>((resolvePromise) => {
-    const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-    const finish = () => resolvePromise();
-    killer.once("error", () => {
-      try { child.kill("SIGKILL"); } catch { /* already exited */ }
-      finish();
-    });
-    killer.once("close", finish);
+  // `ChildProcess.kill()` only reaches cmd.exe when `shell: true` is used on
+  // Windows. taskkill /T is the tree-aware path, but it can itself fail to
+  // start or return non-zero (for example when the shell has exited between
+  // the abort and taskkill's process lookup). In both cases, still terminate
+  // the root process we own instead of leaving a timer or child alive.
+  const taskkillExitCode = await new Promise<number | null>((resolvePromise) => {
+    let killer: ChildProcess;
+    try {
+      killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    } catch {
+      resolvePromise(null);
+      return;
+    }
+    let done = false;
+    const finish = (exitCode: number | null) => {
+      if (done) return;
+      done = true;
+      resolvePromise(exitCode);
+    };
+    killer.once("error", () => finish(null));
+    killer.once("close", (exitCode) => finish(exitCode));
   });
+  if (taskkillExitCode !== 0) {
+    try { child.kill("SIGKILL"); } catch { /* already exited */ }
+  }
 }
 
 function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<string> {

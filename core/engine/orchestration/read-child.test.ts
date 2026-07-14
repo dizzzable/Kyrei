@@ -40,7 +40,17 @@ describe("read-only child runner", () => {
         "project_map",
         "delegate_read",
       ),
-      definitions("web_search", "web_fetch", "brain_search", "brain_capture", "read_skill", "approval"),
+      definitions(
+        "web_search",
+        "web_fetch",
+        "brain_search",
+        "brain_capture",
+        "search_skills",
+        "read_skill",
+        "read_skill_document",
+        "search_skill_documents",
+        "approval",
+      ),
     );
 
     expect(Object.keys(selected).sort()).toEqual([
@@ -49,6 +59,9 @@ describe("read-only child runner", () => {
       "project_map",
       "read_file",
       "read_skill",
+      "read_skill_document",
+      "search_skill_documents",
+      "search_skills",
       "web_fetch",
       "web_search",
     ]);
@@ -66,6 +79,7 @@ describe("read-only child runner", () => {
     expect(instructions).toContain("read-only research subagent");
     expect(instructions).toContain("must not write files");
     expect(instructions).toContain("delegate to another agent");
+    expect(instructions).toContain("search_skills");
     expect(instructions).toContain("review: Code review - Inspect changes");
     expect(instructions).toContain("language of the goal");
   });
@@ -158,6 +172,98 @@ describe("read-only child runner", () => {
       toolCount: 2,
       providerCalls: 1,
       filesRead: ["src/a.ts", "src/b.ts"],
+    });
+  });
+
+  it("spends one tool-free continuation on a missing child summary", async () => {
+    generateTextMock
+      .mockResolvedValueOnce({
+        text: "",
+        steps: [{ text: "" }],
+        toolCalls: [{ toolName: "read_file" }],
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+        responseMessages: [{ role: "assistant", content: [] }],
+      })
+      .mockResolvedValueOnce({
+        text: "The requested evidence is in src/agent.ts; no contradiction was found.",
+        steps: [{ text: "The requested evidence is in src/agent.ts; no contradiction was found." }],
+        toolCalls: [],
+        usage: { inputTokens: 30, outputTokens: 12, totalTokens: 42 },
+        responseMessages: [],
+      });
+
+    const model = { id: "same-parent-model" } as unknown as LanguageModel;
+    const controller = new AbortController();
+    const progress: DelegateProgress[] = [];
+    const runner = createReadOnlyChildRunner({
+      model,
+      modelId: "model-1",
+      tools: definitions("read_file"),
+      maxSteps: 3,
+      maxRetries: 2,
+      cost: { inputPerM: 1, outputPerM: 2 },
+    });
+
+    const result = await runner({
+      childId: "child-synthesis",
+      goal: "Find the evidence",
+      index: 0,
+      signal: controller.signal,
+      readOnly: true,
+      allowDelegation: false,
+      onProgress: (update) => progress.push(update),
+    });
+
+    expect(generateTextMock).toHaveBeenCalledTimes(2);
+    const synthesisCall = generateTextMock.mock.calls[1]?.[0] as Record<string, unknown>;
+    expect(synthesisCall).toMatchObject({
+      model,
+      abortSignal: controller.signal,
+      maxRetries: 0,
+    });
+    expect(synthesisCall["instructions"]).toContain("Do not call tools.");
+    expect(synthesisCall).not.toHaveProperty("tools");
+    expect(synthesisCall).not.toHaveProperty("stopWhen");
+    expect(result).toMatchObject({
+      summary: "The requested evidence is in src/agent.ts; no contradiction was found.",
+      toolCount: 1,
+      providerCalls: 2,
+      usage: { inputTokens: 130, outputTokens: 32, totalTokens: 162, costUsd: 0.000194 },
+    });
+    expect(progress.some((update) => typeof update !== "string" && update.text === "Preparing final research summary")).toBe(true);
+  });
+
+  it("returns an explicit non-evidence result when a child cannot be synthesized", async () => {
+    generateTextMock.mockResolvedValueOnce({
+      text: "",
+      steps: [{ text: "" }],
+      toolCalls: [{ toolName: "read_file" }],
+      usage: {},
+      responseMessages: [],
+    });
+
+    const runner = createReadOnlyChildRunner({
+      model: { id: "worker-model" } as unknown as LanguageModel,
+      modelId: "worker-model",
+      tools: definitions("read_file"),
+      maxSteps: 2,
+      maxRetries: 0,
+      cost: { inputPerM: 0, outputPerM: 0 },
+    });
+    const result = await runner({
+      childId: "child-incomplete",
+      goal: "Find the evidence",
+      index: 0,
+      readOnly: true,
+      allowDelegation: false,
+      onProgress: () => undefined,
+    });
+
+    expect(generateTextMock).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      incomplete: true,
+      toolCount: 1,
+      summary: expect.stringContaining("Treat this as non-evidence"),
     });
   });
 
@@ -327,6 +433,111 @@ describe("read-only child runner", () => {
       outcome: "interrupted",
       phase: "stream",
     });
+  });
+
+  it("enforces a wall-clock timeout even when the provider ignores AbortSignal", async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | undefined;
+      let rejectLate: ((error: Error) => void) | undefined;
+      generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
+        providerSignal = options["abortSignal"] as AbortSignal;
+        return new Promise((_resolve, reject) => {
+          rejectLate = reject;
+        });
+      });
+      const handle = { lease: "worker-timeout" };
+      const acquire = vi.fn(() => handle);
+      const release = vi.fn();
+      const runner = createReadOnlyChildRunner({
+        model: { id: "slow-worker" } as unknown as LanguageModel,
+        modelId: "slow-worker",
+        tools: {},
+        maxSteps: 2,
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        cost: { inputPerM: 0, outputPerM: 0 },
+        providerAttempt: {
+          lifecycle: { acquire, release },
+          target: { providerId: "worker-provider", accountId: "timeout", modelId: "slow-worker" },
+        },
+      });
+
+      const pending = runner({
+        childId: "child-timeout",
+        goal: "Do not hang the parent",
+        index: 0,
+        readOnly: true,
+        allowDelegation: false,
+        onProgress: () => undefined,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+        code: "delegation_timeout",
+        timeoutMs: 1_000,
+        message: "Delegated research timed out after 1000ms",
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejected;
+      expect(providerSignal?.aborted).toBe(true);
+      // The provider ignored the cancellation; its physical request is still
+      // in flight, so its account lease must remain occupied.
+      expect(release).not.toHaveBeenCalled();
+
+      rejectLate?.(new Error("late provider failure"));
+      await vi.runAllTicks();
+      expect(release).toHaveBeenCalledWith(handle, {
+        providerId: "worker-provider",
+        accountId: "timeout",
+        modelId: "slow-worker",
+        outcome: "interrupted",
+        phase: "stream",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("propagates an external abort distinctly from a child timeout", async () => {
+    let providerSignal: AbortSignal | undefined;
+    let resolveLate: ((value: unknown) => void) | undefined;
+    generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
+      providerSignal = options["abortSignal"] as AbortSignal;
+      return new Promise((resolve) => {
+        resolveLate = resolve;
+      });
+    });
+    const controller = new AbortController();
+    const runner = createReadOnlyChildRunner({
+      model: { id: "slow-worker" } as unknown as LanguageModel,
+      modelId: "slow-worker",
+      tools: {},
+      maxSteps: 2,
+      maxRetries: 0,
+      timeoutMs: 30_000,
+      cost: { inputPerM: 0, outputPerM: 0 },
+    });
+
+    const pending = runner({
+      childId: "child-parent-abort",
+      goal: "Stop with the parent",
+      index: 0,
+      signal: controller.signal,
+      readOnly: true,
+      allowDelegation: false,
+      onProgress: () => undefined,
+    });
+    controller.abort(new Error("parent stopped"));
+
+    await expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+      message: "parent stopped",
+    });
+    expect(providerSignal?.aborted).toBe(true);
+
+    resolveLate?.({ text: "too late", steps: [], toolCalls: [], usage: {} });
+    await Promise.resolve();
   });
 
   it("does not report a resolved terminal finish reason as account success", async () => {

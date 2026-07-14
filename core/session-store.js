@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
  * on-disk format can evolve without breaking older installs.
  */
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_ID_RE = /^msg-[a-zA-Z0-9_-]{8,80}$/;
 
@@ -45,6 +45,29 @@ function normalizeStoredMessage(value, sessionId, index) {
     ...source,
     id: normalizedMessageId(source.id, sessionId, index),
     at,
+    ...(Array.isArray(parts) ? { parts } : {}),
+  };
+}
+
+function recoverInterruptedDraft(message) {
+  if (
+    message?.role !== "assistant"
+    || (message.pending !== true && message.turnStatus !== "streaming")
+  ) return message;
+  const parts = Array.isArray(message.parts)
+    ? message.parts.map(part => part?.type === "tool" && part.running === true
+      ? {
+          ...part,
+          running: false,
+          error: typeof part.error === "string" && part.error ? part.error : "tool_interrupted",
+          progress: undefined,
+        }
+      : part)
+    : message.parts;
+  return {
+    ...message,
+    pending: false,
+    turnStatus: "interrupted",
     ...(Array.isArray(parts) ? { parts } : {}),
   };
 }
@@ -100,7 +123,9 @@ function normalizedMessagesBySession(value) {
   return Object.fromEntries(Object.entries(value).map(([sessionId, messages]) => [
     sessionId,
     Array.isArray(messages)
-      ? messages.map((message, index) => normalizeStoredMessage(message, sessionId, index))
+      ? messages.map((message, index) => recoverInterruptedDraft(
+          normalizeStoredMessage(message, sessionId, index),
+        ))
       : [],
   ]));
 }
@@ -235,6 +260,32 @@ export class SessionStore {
 
   getMessages(sessionId) {
     return this.state.messages[sessionId] ?? [];
+  }
+
+  getMessage(sessionId, messageId) {
+    return (this.state.messages[sessionId] ?? []).find(message => message.id === messageId) ?? null;
+  }
+
+  updateMessage(sessionId, messageId, patch) {
+    const list = this.state.messages[sessionId] ?? [];
+    const index = list.findIndex(message => message.id === messageId);
+    if (index < 0) return null;
+    const current = list[index];
+    const next = typeof patch === "function" ? patch(current) : patch;
+    if (!next || typeof next !== "object") return current;
+    const stored = normalizeStoredMessage({ ...current, ...next, id: current.id }, sessionId, index);
+    list[index] = stored;
+    this.touch();
+    return stored;
+  }
+
+  removeMessage(sessionId, messageId) {
+    const list = this.state.messages[sessionId] ?? [];
+    const index = list.findIndex(message => message.id === messageId);
+    if (index < 0) return false;
+    list.splice(index, 1);
+    this.touch();
+    return true;
   }
 
   findApproval(sessionId, approvalId) {

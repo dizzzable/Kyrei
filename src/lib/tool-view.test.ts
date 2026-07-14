@@ -76,4 +76,31 @@ describe("buildToolView", () => {
       tone: "agent",
     });
   });
+
+  it("describes skill activity with localized labels and relevant inputs", () => {
+    expect(buildToolView(tool({ name: "search_skills", args: { query: "react" } }), en)).toMatchObject({
+      title: "Find assigned skills",
+      icon: "search",
+      tone: "search",
+      subtitle: "react",
+    });
+    expect(buildToolView(tool({ name: "read_skill", args: { id: "skill_react" } }), en)).toMatchObject({
+      title: "Load skill instructions",
+      icon: "book-open",
+      tone: "agent",
+      subtitle: "skill_react",
+    });
+    expect(buildToolView(tool({ name: "read_skill_document", args: { skillId: "skill_react", documentId: "doc_hooks" } }), ru)).toMatchObject({
+      title: "Чтение документа skill",
+      icon: "file-text",
+      tone: "agent",
+      subtitle: "doc_hooks",
+    });
+    expect(buildToolView(tool({ name: "search_skill_documents", args: { skillId: "skill_react", query: "hooks" } }), en)).toMatchObject({
+      title: "Search skill documents",
+      icon: "search",
+      tone: "search",
+      subtitle: "hooks",
+    });
+  });
 });
