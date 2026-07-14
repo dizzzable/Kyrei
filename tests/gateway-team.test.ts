@@ -193,6 +193,83 @@ describe("gateway Team orchestration", () => {
     });
   });
 
+  it("bounds permission rules at the durable engine config boundary", async () => {
+    const initial = await request<any>("/api/config");
+    const initialPermissions = initial.engine?.permissions ?? {
+      terminal: "auto",
+      web: "off",
+      review: "agent",
+    };
+    const { rules: _rules, ...permissionsWithoutRules } = initialPermissions;
+    await expect(request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        engine: { ...initial.engine, permissions: permissionsWithoutRules },
+      }),
+    })).resolves.toBeDefined();
+
+    const maxRules = Array.from({ length: 128 }, (_, index) => ({
+      pattern: index === 0 ? "x".repeat(512) : `^tool-${index}$`,
+      action: (["allow", "ask", "deny"] as const)[index % 3],
+    }));
+    const maxSaved = await request<any>("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        engine: {
+          ...initial.engine,
+          permissions: { ...permissionsWithoutRules, rules: maxRules },
+        },
+      }),
+    });
+    expect(maxSaved.engine.permissions.rules).toHaveLength(128);
+
+    const validRules = [
+      { pattern: "^run_command:npm test$", action: "ask" },
+      { pattern: "^web_search$", action: "allow" },
+      { pattern: "^edit_file:", action: "deny" },
+    ];
+    const saved = await request<any>("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        engine: {
+          ...initial.engine,
+          permissions: { ...permissionsWithoutRules, rules: validRules },
+        },
+      }),
+    });
+    expect(saved.engine.permissions.rules).toEqual(validRules);
+
+    const invalidRules = [
+      {},
+      Array.from({ length: 129 }, (_, index) => ({ pattern: `^tool-${index}$`, action: "ask" })),
+      [null],
+      [[{ pattern: "^run_command$", action: "ask" }]],
+      [{ pattern: 42, action: "ask" }],
+      [{ pattern: "", action: "ask" }],
+      [{ pattern: "x".repeat(513), action: "ask" }],
+      [{ pattern: "^run_command:\n$", action: "ask" }],
+      [{ pattern: "^run_command:\u007f$", action: "ask" }],
+      [{ pattern: "[", action: "ask" }],
+      [{ pattern: "^run_command$", action: "sometimes" }],
+    ];
+
+    for (const rules of invalidRules) {
+      await expect(request("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          engine: {
+            ...saved.engine,
+            permissions: { ...saved.engine.permissions, rules },
+          },
+        }),
+      })).rejects.toThrow("engine_permission_rules_invalid");
+    }
+
+    expect(await request<any>("/api/config")).toMatchObject({
+      engine: { permissions: { rules: validRules } },
+    });
+  });
+
   it("passes a private RuntimeTeamSpec with validated skill ids and explicit/main targets", async () => {
     const main = await readyMain();
     const workerKey = "worker-private-runtime-credential";

@@ -60,16 +60,18 @@ export function EnumField<T extends string>({
   value,
   options,
   onChange,
+  disabled,
 }: {
   label: string;
   hint?: string;
   value: T;
   options: SegmentOption<T>[];
   onChange: (v: T) => void;
+  disabled?: boolean;
 }) {
   return (
     <Field label={label} hint={hint}>
-      <SegmentedControl value={value} options={options} onChange={onChange} size="sm" />
+      <SegmentedControl value={value} options={options} onChange={onChange} size="sm" disabled={disabled} />
     </Field>
   );
 }
