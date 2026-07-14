@@ -18,7 +18,7 @@ Hermes sources: `apps/desktop/src/app/settings/index.tsx`, `apps/desktop/src/app
 | Chat | Personality, timezone, reasoning blocks, image mode | Personality/reasoning visibility | Port timezone and image mode |
 | Appearance | Language, theme profiles, zoom, translucency, tool view, embed consent | Theme/import, scale, density, tool view, language | Adapt translucency; reject third-party inline embeds |
 | Workspace | cwd, project/strict execution, persistent shell, env passthrough, read cap | Workspace jail and read cap | Adapt local PTY/process and optional Docker |
-| Safety | approvals, timeout, allowlist, secret redaction, private URLs, checkpoints | Local tools now enforce policy/pre-hooks/audit fail-closed; interactive resume is missing | Finish durable approval lifecycle |
+| Safety | approvals, timeout, allowlist, secret redaction, private URLs, checkpoints | Durable signed allow-once/deny resume plus guided persistent exact rules; fail-closed policy/pre-hooks/audit remain authoritative | Add session-scoped decisions; keep raw regex expert-only |
 | Memory/context | Built-in/external memory, compression thresholds and protected messages | Strong dormant stores, CCR pruning, GBrain/OpenViking | Adapt structured summary and reviewed learning |
 | Voice | STT/TTS provider matrix plus local engines | Web Speech | Keep Web Speech; optional Piper/Whisper later |
 | Advanced | Toolsets, backend, caps, retries, delegation, updates | Base caps/retries only | Adapt schema-driven UI; hide unsupported controls |
@@ -60,7 +60,7 @@ Hermes additionally supports profile `.env`, `auth.json`, 1Password, and Bitward
 | External memory | 8 plugins: byterover, hindsight, holographic, honcho, mem0, openviking, retaindb, supermemory | GBrain/OpenViking adapters; built-in SQLite dormant | Keep built-in authoritative; one optional external layer |
 | Post-turn learning | Background memory/skill review and curator | Missing live wiring | Proposals with explicit review; never silent self-edit |
 | Terminal backends | Local, Docker, Singularity, Modal, Daytona, SSH; PTY/background | One-shot local command | Local PTY + optional Docker; reject cloud/SSH core |
-| Approvals | Manual default, once/always/deny, grouped UI, native actions | Event type exists; no pause/respond path | P0 end-to-end gate |
+| Approvals | Manual default, once/always/deny, grouped UI, native actions | Signed allow-once/deny pause-and-resume is durable; persistent command/path/tool rules are managed in Safety settings | Add expiring session scope and promote-to-persistent from the approval card |
 | Agent browser | Search/extract plus click/type/snapshot/CDP/dialogs | Safe text search/fetch | Disposable agent-only browser; reject arbitrary eval/profile reuse |
 | Skills | Progressive list/view/manage/install with provenance and AST checks | Missing | Trusted-root list/view first, controlled install second |
 | Delegation | Isolated sync/background children, concurrency 3, depth 1 | Reviewer contracts only | Flat read-only workers, single writer, strict budgets |
@@ -79,11 +79,11 @@ Hermes additionally supports profile `.env`, `auth.json`, 1Password, and Bitward
 | Dormant | Role models, SQLite/vector memory, LTM writer/handoff, OpenViking, reliability modules, reviewer/plans, draft/history helpers |
 | Missing live | Image inputs, skills, MCP, subagents, MoA, persistent PTY, LSP, archive/branch lineage, update manager |
 
-The original critical defect is now closed for execution: `run_command`, `diagnostics`, `write_file`, and `edit_file` enforce deny/ask/allow, secret scanning, cancellation barriers, live workspace target validation, and correlated metadata-only audit. `ask` deliberately executes nothing. What remains is the durable UI approval/resume flow; until that lands, users must use explicit policy rules rather than an approve-once button.
+The original critical defect and its UI lifecycle are now closed for execution: `run_command`, `diagnostics`, `write_file`, and `edit_file` enforce deny/ask/allow, secret scanning, cancellation barriers, live workspace target validation, correlated metadata-only audit, and a durable signed allow-once/deny resume. Workspace Safety also exposes exact persistent rules without requiring regex; malformed legacy policy locks guided editing instead of being silently weakened. `web_search` and `web_fetch` intentionally expose only Allow/Deny rules until they join the signed approval path.
 
 ## Prioritised delivery order
 
-1. Durable signed approval response and resume lifecycle on top of the completed fail-closed local-tool gate.
+1. Session-scoped approval decisions and safe promotion from allow-once to a persistent exact rule.
 2. Flat bounded read-only subagents with a single writer.
 3. Skills list/view with provenance, then controlled install/manage.
 4. Two-stage context compression with structured summaries and reversible CCR recall.

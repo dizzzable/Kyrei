@@ -800,6 +800,34 @@ function pipelineConflict(code) {
   return error;
 }
 
+function validateEnginePermissionRulesBoundary(value) {
+  if (!Array.isArray(value) || value.length > 128) {
+    throw new TypeError("engine_permission_rules_invalid");
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new TypeError("engine_permission_rules_invalid");
+    }
+    const pattern = entry.pattern;
+    const action = entry.action;
+    if (
+      typeof pattern !== "string"
+      || pattern.length < 1
+      || pattern.length > 512
+      || /[\u0000-\u001f\u007f]/.test(pattern)
+      || (action !== "allow" && action !== "ask" && action !== "deny")
+    ) {
+      throw new TypeError("engine_permission_rules_invalid");
+    }
+    try {
+      new RegExp(pattern);
+    } catch {
+      throw new TypeError("engine_permission_rules_invalid");
+    }
+    return { pattern, action };
+  });
+}
+
 function validateEngineConfigBoundary(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("engine_config_invalid");
@@ -811,6 +839,17 @@ function validateEngineConfigBoundary(value) {
     throw new TypeError("engine_sandbox_invalid");
   }
   const next = { ...value };
+  if (
+    value.permissions
+    && typeof value.permissions === "object"
+    && !Array.isArray(value.permissions)
+    && Object.hasOwn(value.permissions, "rules")
+  ) {
+    next.permissions = {
+      ...value.permissions,
+      rules: validateEnginePermissionRulesBoundary(value.permissions.rules),
+    };
+  }
   const profileIds = new Set();
   if (Object.hasOwn(value, "promptProfiles")) {
     if (!Array.isArray(value.promptProfiles) || value.promptProfiles.length > 64) {
