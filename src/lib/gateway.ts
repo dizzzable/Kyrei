@@ -25,6 +25,12 @@ import type {
   SkillInfo,
   SkillRoot,
 } from "./types";
+import type {
+  KiroOrganizationAccountInput,
+  KiroOrganizationCredentialInput,
+  KiroOrganizationModelCatalog,
+  KiroOrganizationPoolSnapshot,
+} from "./kiro-organization-types";
 
 /** A model entry from the engine registry (`GET /api/models`). */
 export interface ModelCatalogEntry {
@@ -267,6 +273,57 @@ export const gateway = {
     json<KiroCliModelCatalog>("/api/connectors/kiro/models"),
   logoutKiroCli: () =>
     json<{ loggedOut: true }>("/api/connectors/kiro/logout", { method: "POST", body: "{}" }),
+  getKiroOrganizationPool: () =>
+    json<KiroOrganizationPoolSnapshot>("/api/connectors/kiro/organization"),
+  updateKiroOrganizationPool: (
+    input: Pick<KiroOrganizationPoolSnapshot, "enabled" | "strategy" | "sessionAffinity"> & { expectedGeneration: number },
+  ) =>
+    json<KiroOrganizationPoolSnapshot>("/api/connectors/kiro/organization/pool", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  createKiroOrganizationAccount: (
+    account: KiroOrganizationAccountInput,
+    expectedGeneration: number,
+    credential?: KiroOrganizationCredentialInput,
+  ) =>
+    json<KiroOrganizationPoolSnapshot>("/api/connectors/kiro/organization/accounts", {
+      method: "POST",
+      body: JSON.stringify({ account, expectedGeneration, ...(credential ? { credential } : {}) }),
+    }),
+  updateKiroOrganizationAccount: (
+    accountId: string,
+    account: Partial<KiroOrganizationAccountInput>,
+    expectedRevision: number,
+    credential?: KiroOrganizationCredentialInput,
+  ) =>
+    json<KiroOrganizationPoolSnapshot>(
+      `/api/connectors/kiro/organization/accounts/${encodeURIComponent(accountId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ account, expectedRevision, ...(credential ? { credential } : {}) }),
+      },
+    ),
+  deleteKiroOrganizationAccount: (accountId: string, expectedRevision: number) =>
+    json<KiroOrganizationPoolSnapshot>(
+      `/api/connectors/kiro/organization/accounts/${encodeURIComponent(accountId)}`,
+      { method: "DELETE", body: JSON.stringify({ expectedRevision }) },
+    ),
+  verifyKiroOrganizationAccount: (accountId: string, expectedRevision: number) =>
+    json<KiroOrganizationPoolSnapshot>(
+      `/api/connectors/kiro/organization/accounts/${encodeURIComponent(accountId)}/verify`,
+      { method: "POST", body: JSON.stringify({ expectedRevision }) },
+    ),
+  getKiroOrganizationAccountModels: (accountId: string) =>
+    json<KiroOrganizationModelCatalog>(
+      `/api/connectors/kiro/organization/accounts/${encodeURIComponent(accountId)}/models`,
+      { method: "POST", body: "{}" },
+    ),
+  revokeKiroOrganizationAccount: (accountId: string, expectedRevision: number) =>
+    json<KiroOrganizationPoolSnapshot>(
+      `/api/connectors/kiro/organization/accounts/${encodeURIComponent(accountId)}/revoke`,
+      { method: "POST", body: JSON.stringify({ expectedRevision }) },
+    ),
   chooseFolder: () => json<{ folder: string } & AppConfig>("/api/choose-folder", { method: "POST" }),
 
   listSkills: () => json<{ skills: SkillInfo[]; roots: SkillRoot[] }>("/api/skills"),

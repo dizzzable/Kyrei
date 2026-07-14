@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
@@ -114,7 +114,7 @@ describe("gateway config persistence", () => {
     });
     await expect(failing.save(
       { label: "uncommitted" },
-      { providers: { uncommitted: { apiKey: "uncommitted-test-secret" } } },
+      { providers: { committed: { apiKey: "committed-test-secret" } } },
     )).rejects.toThrow("injected-config-write-failure");
 
     const recovered = await createGatewayConfigPersistence({ dataDir }).load();
@@ -128,6 +128,174 @@ describe("gateway config persistence", () => {
       ...(await readdir(snapshotDir)),
     ].filter(name => name.endsWith(".tmp"));
     expect(leftovers).toEqual([]);
+  });
+
+  it("never recovers a revoked Kiro credential after a secrets-first half commit", async () => {
+    const dataDir = await temporaryDirectory();
+    const marker = "revoked-kiro-half-commit-secret";
+    const publicAccount = {
+      id: "build-team",
+      name: "Build team",
+      enabled: true,
+      weight: 1,
+      priority: 0,
+      maxConcurrency: 1,
+    };
+    const baseline = createGatewayConfigPersistence({ dataDir });
+    await baseline.save(
+      { kiroOrganization: { accounts: [publicAccount] } },
+      {
+        version: 3,
+        providers: {},
+        accounts: {},
+        kiroOrganization: {
+          version: 1,
+          accounts: { "build-team": { kind: "api-key", apiKey: marker } },
+        },
+      },
+    );
+
+    let failed = false;
+    const failing = createGatewayConfigPersistence({
+      dataDir,
+      fileSystem: {
+        rename: async (source: string, target: string) => {
+          if (!failed && target === join(dataDir, "kyrei-config.json")) {
+            failed = true;
+            throw new Error("injected-config-rename-failure");
+          }
+          return rename(source, target);
+        },
+      },
+    });
+    await failing.load();
+    await expect(failing.save(
+      { kiroOrganization: { accounts: [publicAccount] } },
+      {
+        version: 3,
+        providers: {},
+        accounts: {},
+        kiroOrganization: { version: 1, accounts: {} },
+      },
+    )).rejects.toThrow("injected-config-rename-failure");
+
+    const recovered = await createGatewayConfigPersistence({ dataDir }).load();
+    expect(JSON.stringify(recovered)).not.toContain(marker);
+    expect(recovered.secrets).toEqual({});
+    const snapshotNames = await readdir(join(dataDir, ".kyrei-provider-state"));
+    expect(snapshotNames.filter(name => /^(?:config|secrets)-/.test(name))).toEqual([]);
+    await expect(readFile(join(dataDir, ".kyrei-secret-mutation-fence.json"), "utf8"))
+      .resolves.toContain("pending-secret-mutation");
+  });
+
+  it("honors the durable credential fence when failure happens before the secrets rename", async () => {
+    const dataDir = await temporaryDirectory();
+    const marker = "revoked-before-secrets-rename";
+    const baseline = createGatewayConfigPersistence({ dataDir });
+    await baseline.save(
+      { label: "credential-present" },
+      {
+        version: 3,
+        providers: {},
+        accounts: {},
+        kiroOrganization: {
+          version: 1,
+          accounts: { "build-team": { kind: "api-key", apiKey: marker } },
+        },
+      },
+    );
+
+    let failed = false;
+    const failing = createGatewayConfigPersistence({
+      dataDir,
+      fileSystem: {
+        rename: async (source: string, target: string) => {
+          if (!failed && target === join(dataDir, "kyrei-secrets.json")) {
+            failed = true;
+            throw new Error("injected-secrets-rename-failure");
+          }
+          return rename(source, target);
+        },
+      },
+    });
+    await failing.load();
+    await expect(failing.save(
+      { label: "credential-revoked" },
+      { version: 3, providers: {}, accounts: {}, kiroOrganization: { version: 1, accounts: {} } },
+    )).rejects.toThrow("injected-secrets-rename-failure");
+
+    const recovery = createGatewayConfigPersistence({ dataDir });
+    const recovered = await recovery.load();
+    expect(JSON.stringify(recovered)).not.toContain(marker);
+    expect(recovered.secrets).toEqual({});
+    await recovery.save(recovered.config, recovered.secrets);
+    await expect(readFile(recovery.secretMutationFencePath, "utf8"))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    expect(JSON.stringify(await createGatewayConfigPersistence({ dataDir }).load())).not.toContain(marker);
+  });
+
+  it("writes the durable fence before protected secret encoding can fail", async () => {
+    const dataDir = await temporaryDirectory();
+    const marker = "revoked-before-secret-encoding";
+    const codec = reversibleCodec();
+    const baseline = createGatewayConfigPersistence({ dataDir, secretsCodec: codec });
+    await baseline.save(
+      { label: "credential-present" },
+      { providers: { primary: { apiKey: marker } } },
+    );
+
+    const failing = createGatewayConfigPersistence({
+      dataDir,
+      secretsCodec: {
+        encode: async () => { throw new Error("injected-secret-encode-failure"); },
+        decode: codec.decode,
+      },
+    });
+    await failing.load();
+    await expect(failing.save(
+      { label: "credential-revoked" },
+      { providers: {} },
+    )).rejects.toThrow("injected-secret-encode-failure");
+    await expect(readFile(failing.secretMutationFencePath, "utf8"))
+      .resolves.toContain("pending-secret-mutation");
+
+    const recovered = await createGatewayConfigPersistence({ dataDir, secretsCodec: codec }).load();
+    expect(recovered.secrets).toEqual({});
+    expect(JSON.stringify(recovered)).not.toContain(marker);
+  });
+
+  it("keeps credentials fail-closed when the durable fence cannot be cleared after main commit", async () => {
+    const dataDir = await temporaryDirectory();
+    const marker = "revoked-before-fence-clear";
+    const baseline = createGatewayConfigPersistence({ dataDir });
+    await baseline.save(
+      { label: "credential-present" },
+      { providers: { primary: { apiKey: marker } } },
+    );
+
+    const fencePath = join(dataDir, ".kyrei-secret-mutation-fence.json");
+    let failed = false;
+    const failing = createGatewayConfigPersistence({
+      dataDir,
+      fileSystem: {
+        rm: async (path: string, options: Parameters<typeof rm>[1]) => {
+          if (!failed && path === fencePath) {
+            failed = true;
+            throw new Error("injected-fence-clear-failure");
+          }
+          return rm(path, options);
+        },
+      },
+    });
+    await failing.load();
+    await expect(failing.save(
+      { label: "credential-revoked" },
+      { providers: {} },
+    )).rejects.toThrow("injected-fence-clear-failure");
+
+    const recovered = await createGatewayConfigPersistence({ dataDir }).load();
+    expect(recovered.secrets).toEqual({});
+    expect(JSON.stringify(recovered)).not.toContain(marker);
   });
 
   it("restores a consistent revision when either main JSON file is corrupt", async () => {
@@ -200,8 +368,21 @@ describe("gateway config persistence", () => {
       { label: "must-not-commit" },
       { version: 2, providers: {}, accounts: { provider: { backup: { apiKey: "must-never-be-plaintext" } } } },
     )).rejects.toThrow("OS secret storage is unavailable");
+    await expect(persistence.save(
+      { label: "must-not-commit-kiro" },
+      {
+        version: 3,
+        providers: {},
+        accounts: {},
+        kiroOrganization: {
+          version: 1,
+          accounts: { "build-team": { kind: "api-key", apiKey: "kiro-must-never-be-plaintext" } },
+        },
+      },
+    )).rejects.toThrow("OS secret storage is unavailable");
     const persisted = await readFile(join(dataDir, "kyrei-secrets.json"), "utf8");
     expect(persisted).not.toContain("must-never-be-plaintext");
+    expect(persisted).not.toContain("kiro-must-never-be-plaintext");
   });
 
   it("serializes concurrent provider transactions before deriving their next states", async () => {

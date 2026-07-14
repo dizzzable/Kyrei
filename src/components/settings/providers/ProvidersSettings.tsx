@@ -11,6 +11,7 @@ import type {
   ProviderTemplate,
 } from "@/lib/types";
 import { KiroCliConnectorCard } from "./KiroCliConnectorCard";
+import { KiroOrganizationPoolCard } from "./KiroOrganizationPoolCard";
 import { ProviderCatalog } from "./ProviderCatalog";
 import { ProviderAccountPoolDialog } from "./ProviderAccountPoolDialog";
 import { ProviderSetupDialog } from "./ProviderSetupDialog";
@@ -211,6 +212,8 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
       </header>
 
       <KiroCliConnectorCard />
+
+      <KiroOrganizationPoolCard />
 
       {templateError ? (
         <div className="flex items-center justify-between gap-3 border-y border-warning/25 py-2 text-[11px] text-warning" role="status">

@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
+import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, relative } from "node:path";
 import { SessionStore } from "./session-store.js";
 import { SkillsStore } from "./skills-store.js";
@@ -28,6 +28,16 @@ import { publicProviderTemplates } from "./provider-templates.js";
 import { ProviderAccountPoolRouter } from "./provider-account-pool.js";
 import { KiroCliConnector } from "./kiro-cli-connector.js";
 import { createKiroConnectorApi } from "./kiro-connector-api.js";
+import {
+  MAX_KIRO_ORGANIZATION_ACCOUNTS,
+  KiroOrganizationConfigError,
+  normalizeKiroOrganizationAccountSecret,
+  normalizeKiroOrganizationConfig,
+  normalizeKiroOrganizationSecrets,
+  serializeKiroOrganizationSecrets,
+} from "./kiro-organization-config.js";
+import { KiroOrganizationBroker } from "./kiro-organization-broker.js";
+import { KiroOrganizationWorker } from "./kiro-organization-worker.js";
 import {
   ProviderConfigError,
   collectProviderCredentialValues,
@@ -128,6 +138,25 @@ function readBody(req) {
   });
 }
 
+function kiroOrganizationError(code) {
+  return new KiroOrganizationConfigError(code, code);
+}
+
+function strictRequestRecord(value, code = "kiro_organization_request_invalid") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw kiroOrganizationError(code);
+  }
+  return value;
+}
+
+function assertOnlyFields(value, fields, code = "kiro_organization_request_field_invalid") {
+  const source = strictRequestRecord(value);
+  for (const key of Object.keys(source)) {
+    if (!fields.has(key)) throw kiroOrganizationError(code);
+  }
+  return source;
+}
+
 function providerCredentialScope(provider) {
   try {
     return `${provider.protocol}:${new URL(provider.baseURL).origin}:${provider.requiresApiKey ? "explicit" : "none"}`;
@@ -159,6 +188,21 @@ function pruneProviderAccountSecrets(secretState, providers) {
     );
     return Object.keys(retained).length ? [[providerId, retained]] : [];
   }));
+  return next;
+}
+
+function pruneKiroOrganizationSecrets(secretState, organizationConfig) {
+  const next = normalizeProviderSecrets(secretState);
+  const allowedIds = new Set(
+    (Array.isArray(organizationConfig?.accounts) ? organizationConfig.accounts : [])
+      .map((account) => account?.id)
+      .filter((accountId) => typeof accountId === "string"),
+  );
+  const retained = new Map(
+    [...normalizeKiroOrganizationSecrets(next.kiroOrganization)]
+      .filter(([accountId]) => allowedIds.has(accountId)),
+  );
+  next.kiroOrganization = serializeKiroOrganizationSecrets(retained);
   return next;
 }
 
@@ -404,6 +448,23 @@ export function requestErrorStatus(error) {
   if (code === "provider_discovery_rate_limited") return 429;
   if (code === "provider_discovery_timeout") return 504;
   if (code === "provider_discovery_unavailable" || code === "provider_discovery_invalid_response" || code === "provider_discovery_response_too_large") return 502;
+  if (code === "kiro_organization_protected_storage_required") return 503;
+  if (code === "kiro_organization_credential_required" || code === "kiro_organization_verification_required") return 409;
+  if (code === "kiro_organization_verification_failed") return 401;
+  if (code === "kiro_organization_cli_timeout") return 504;
+  if (code === "kiro_organization_cli_not_found" || code === "kiro_organization_cli_version_unsupported" || code === "kiro_organization_cli_termination_unconfirmed" || code === "kiro_organization_broker_closed") return 503;
+  if (
+    code === "kiro_organization_cli_start_failed"
+    || code === "kiro_organization_cli_command_failed"
+    || code === "kiro_organization_cli_output_limit"
+    || code === "kiro_organization_cli_output_invalid"
+    || code === "kiro_organization_cli_version_invalid"
+    || code === "kiro_organization_whoami_invalid"
+    || code === "kiro_organization_credential_reflected"
+    || code.startsWith("kiro_organization_model_")
+    || code.startsWith("kiro_organization_models_")
+  ) return 502;
+  if (code === "kiro_organization_operation_stale" || code === "kiro_organization_reconfigured" || code === "kiro_organization_lease_stale") return 409;
   if (code === "kiro_cli_login_not_found") return 404;
   if (code === "kiro_cli_auth_busy" || code === "kiro_cli_login_active") return 409;
   if (code === "kiro_cli_timeout" || code === "kiro_cli_login_timeout") return 504;
@@ -456,7 +517,7 @@ export function requestErrorStatus(error) {
     code.startsWith("pipeline_")
     || code.startsWith("workspace_lease_")
   ) return 400;
-  if (error?.name === "SkillsStoreError" || error?.name === "ProviderConfigError" || error?.name === "ProviderDiscoveryError" || error?.name === "TeamConfigError" || error?.name === "PipelineConfigError" || error instanceof TypeError || error instanceof RangeError) return 400;
+  if (error?.name === "SkillsStoreError" || error?.name === "ProviderConfigError" || error?.name === "ProviderDiscoveryError" || error?.name === "TeamConfigError" || error?.name === "PipelineConfigError" || error?.name === "KiroOrganizationConfigError" || error?.name === "KiroOrganizationBrokerError" || error?.name === "KiroOrganizationWorkerError" || error instanceof TypeError || error instanceof RangeError) return 400;
   return 500;
 }
 
@@ -796,11 +857,25 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
   const configPath = join(dataDir, "kyrei-config.json");
   const secretsPath = join(dataDir, "kyrei-secrets.json");
   const snapshotDir = join(dataDir, PERSISTENCE_SNAPSHOT_DIR);
+  const secretMutationFencePath = join(dataDir, ".kyrei-secret-mutation-fence.json");
   let writeTail = Promise.resolve();
   let revisionSequence = 0;
+  let committedSecretsFingerprint = "";
+  let committedSecretsKnown = false;
+  let secretMutationFenceActive = false;
   const hasSecretMaterial = (value) => {
     const normalized = normalizeProviderSecrets(value);
-    return Object.keys(normalized.providers).length > 0 || Object.keys(normalized.accounts).length > 0;
+    return Object.keys(normalized.providers).length > 0
+      || Object.keys(normalized.accounts).length > 0
+      || normalizeKiroOrganizationSecrets(normalized.kiroOrganization).size > 0;
+  };
+  const secretStateFingerprint = (value) => createHash("sha256")
+    .update(canonicalJson(normalizeProviderSecrets(value)), "utf8")
+    .digest("hex");
+  const rememberLoadedPair = (pair) => {
+    committedSecretsFingerprint = secretStateFingerprint(pair.secrets);
+    committedSecretsKnown = true;
+    return pair;
   };
 
   const nextRevision = () => [
@@ -889,9 +964,30 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
       }
       for (const name of names) {
         const isMainTemp = directory === dataDir && /^\.kyrei-(?:config|secrets)\.json\..+\.tmp$/.test(name);
+        const isFenceTemp = directory === dataDir && /^\.\.kyrei-secret-mutation-fence\.json\..+\.tmp$/.test(name);
         const isSnapshotTemp = directory === snapshotDir && /^\.(?:config|secrets)-[a-z0-9-]+\.json\..+\.tmp$/.test(name);
-        if (isMainTemp || isSnapshotTemp) await fs.rm(join(directory, name), { force: true }).catch(() => {});
+        if (isMainTemp || isFenceTemp || isSnapshotTemp) await fs.rm(join(directory, name), { force: true }).catch(() => {});
       }
+    }
+  };
+
+  const secretMutationFenceExists = async () => {
+    try {
+      await fs.readFile(secretMutationFencePath, "utf8");
+      return true;
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      // An unreadable or malformed fence is still a fence. Loading any prior
+      // credential generation would be less safe than failing closed.
+      return true;
+    }
+  };
+
+  const publicConfigFallback = async () => {
+    try {
+      return JSON.parse(await fs.readFile(configPath, "utf8"));
+    } catch {
+      return {};
     }
   };
 
@@ -947,8 +1043,16 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
   const load = async () => {
     await fs.mkdir(snapshotDir, { recursive: true });
     await cleanupTemps();
+    secretMutationFenceActive = await secretMutationFenceExists();
+    if (secretMutationFenceActive) {
+      // A credential mutation did not reach its durable completion point. The
+      // public config remains recoverable, but no main/snapshot credential is
+      // trusted until an empty/sanitized pair is committed and clears the fence.
+      await purgeSnapshots({ strict: true });
+      return rememberLoadedPair({ config: await publicConfigFallback(), secrets: {} });
+    }
     try {
-      return await loadPair(configPath, secretsPath);
+      return rememberLoadedPair(await loadPair(configPath, secretsPath));
     } catch (error) {
       // A readable encrypted envelope proves that this store is protected.
       // Never fall back to an older plaintext generation when safeStorage is
@@ -958,7 +1062,7 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
     const pairs = await snapshotPairs();
     for (const pair of pairs) {
       try {
-        return await loadPair(pair.configFile, pair.secretsFile, pair.revision);
+        return rememberLoadedPair(await loadPair(pair.configFile, pair.secretsFile, pair.revision));
       } catch (error) {
         if (error instanceof SecretStorageUnavailableError) throw error;
       }
@@ -967,9 +1071,7 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
     // No consistent pair exists (first run or unrecoverable corruption). Keep a
     // valid public config when possible, but never combine it with unverified
     // credentials from another revision.
-    let fallbackConfig = {};
-    try { fallbackConfig = JSON.parse(await fs.readFile(configPath, "utf8")); } catch { /* first run/corrupt config */ }
-    return { config: fallbackConfig, secrets: {} };
+    return rememberLoadedPair({ config: await publicConfigFallback(), secrets: {} });
   };
 
   const pruneSnapshots = async currentRevision => {
@@ -985,24 +1087,78 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
     }
   };
 
-  const purgeSnapshots = async () => {
+  const purgeSnapshots = async ({ strict = false } = {}) => {
     let names = [];
     try { names = await fs.readdir(snapshotDir); } catch { return; }
-    await Promise.all(names.map(name => {
+    await Promise.all(names.map(async name => {
       if (!/^(?:config|secrets)-[a-z0-9-]+\.json$/.test(name)) return Promise.resolve();
+      if (strict) return fs.rm(join(snapshotDir, name), { force: true });
       return fs.rm(join(snapshotDir, name), { force: true }).catch(() => {});
     }));
+    if (!strict) return;
+    const remaining = (await fs.readdir(snapshotDir))
+      .filter(name => /^(?:config|secrets)-[a-z0-9-]+\.json$/.test(name));
+    if (remaining.length) throw new Error("provider-persistence-recovery-fence-failed");
+    if (process.platform !== "win32") {
+      const directoryHandle = await fs.open(snapshotDir, "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    }
+  };
+
+  const writeSecretMutationFence = async (revision) => {
+    await atomicWrite(secretMutationFencePath, JSON.stringify({
+      version: 1,
+      revision,
+      state: "pending-secret-mutation",
+    }, null, 2), { secret: true });
+    secretMutationFenceActive = true;
+  };
+
+  const clearSecretMutationFence = async () => {
+    await fs.rm(secretMutationFencePath, { force: true });
+    if (await secretMutationFenceExists()) {
+      throw new Error("provider-persistence-secret-fence-clear-failed");
+    }
+    if (process.platform !== "win32") {
+      const directoryHandle = await fs.open(dataDir, "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    }
+    secretMutationFenceActive = false;
   };
 
   const commit = async ({ revision, configSnapshot, secretsSnapshot }) => {
     await fs.mkdir(snapshotDir, { recursive: true });
+    if (!committedSecretsKnown) await load();
     const configStored = JSON.stringify(persistedValue(configSnapshot, revision), null, 2);
+    const nextSecretsFingerprint = secretStateFingerprint(secretsSnapshot);
+
+    // A prior recovery pair may contain a key that this transaction removes or
+    // rotates. Invalidate it durably before the secrets commit point. If the
+    // following config rename fails, load() must prefer fail-closed credential
+    // loss over resurrecting any earlier credential generation.
+    if (nextSecretsFingerprint !== committedSecretsFingerprint && !secretMutationFenceActive) {
+      await writeSecretMutationFence(revision);
+    }
+    if (secretMutationFenceActive) {
+      await purgeSnapshots({ strict: true });
+    }
     const secretsStored = await encodeSecrets(secretsSnapshot, revision);
 
     // Main state is the commit point. A crash between these two renames leaves
-    // different revisions, which load() rejects in favour of a prior snapshot.
+    // different revisions. Recovery is available for metadata-only writes;
+    // credential mutations deliberately removed the older recovery pair above.
     await atomicWrite(secretsPath, secretsStored, { secret: true });
     await atomicWrite(configPath, configStored);
+    committedSecretsFingerprint = nextSecretsFingerprint;
+    committedSecretsKnown = true;
 
     // Recovery snapshots are written after the main pair commits. Failure to
     // refresh redundancy must not make an already committed save look rejected.
@@ -1020,8 +1176,9 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
       // Main files already committed. If redundancy cannot be refreshed, a
       // stale snapshot is less safe than no snapshot because it could retain
       // credentials the user just cleared and resurrect them on recovery.
-      await purgeSnapshots();
+      await purgeSnapshots({ strict: secretMutationFenceActive });
     }
+    if (secretMutationFenceActive) await clearSecretMutationFence();
     return revision;
   };
 
@@ -1042,6 +1199,7 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
     configPath,
     secretsPath,
     snapshotDir,
+    secretMutationFencePath,
     load,
     save,
     drain: () => writeTail,
@@ -1058,6 +1216,7 @@ export async function startGateway({
   requireProtectedSecrets = false,
   openPath,
   kiroConnector = new KiroCliConnector(),
+  kiroOrganizationWorker,
   engineLoader = () => import("./engine/.dist/index.mjs"),
   providerDiscovery = discoverProviderModels,
   sandboxCapabilityProbe = pipelineSandboxCapability,
@@ -1097,7 +1256,10 @@ export async function startGateway({
   }
   const rawConfig = loaded.config;
   let config = normalizeGatewayConfig(rawConfig);
-  let secrets = pruneProviderAccountSecrets(normalizeProviderSecrets(loaded.secrets), config.providers);
+  let secrets = pruneKiroOrganizationSecrets(
+    pruneProviderAccountSecrets(normalizeProviderSecrets(loaded.secrets), config.providers),
+    config.kiroOrganization,
+  );
   const legacyApiKey = typeof rawConfig.apiKey === "string" ? rawConfig.apiKey : "";
   if (legacyApiKey && !secrets.providers[config.activeProviderId]?.apiKey) {
     secrets.providers[config.activeProviderId] = {
@@ -1109,11 +1271,111 @@ export async function startGateway({
   const saveConfig = (configValue = config, secretsValue = secrets) => persistence.save(configValue, secretsValue);
   await saveConfig(config, secrets);
 
+  const organizationWorker = kiroOrganizationWorker ?? new KiroOrganizationWorker({
+    homeRoot: join(dataDir, "kiro-organization", "accounts"),
+  });
+  const organizationAuditPath = join(dataDir, "kiro-organization-audit.jsonl");
+  let organizationAuditTail = Promise.resolve();
+  const appendOrganizationAudit = (event) => {
+    const line = `${JSON.stringify(event)}\n`;
+    organizationAuditTail = organizationAuditTail.then(async () => {
+      await appendFile(organizationAuditPath, line, { encoding: "utf8", mode: 0o600 });
+      if (process.platform !== "win32") await chmod(organizationAuditPath, 0o600);
+    }).catch(() => undefined);
+  };
+  const kiroOrganizationBroker = new KiroOrganizationBroker({
+    config: config.kiroOrganization,
+    secrets: normalizeKiroOrganizationSecrets(secrets.kiroOrganization),
+    worker: organizationWorker,
+    protectedStorage: Boolean(secretsCodec),
+    audit: appendOrganizationAudit,
+  });
+
   let configMutationTail = Promise.resolve();
   const mutateConfig = operation => {
     const result = configMutationTail.then(operation);
     configMutationTail = result.catch(() => {});
     return result;
+  };
+
+  const KIRO_ORGANIZATION_ACCOUNT_INPUT_FIELDS = new Set([
+    "id",
+    "name",
+    "enabled",
+    "weight",
+    "priority",
+    "maxConcurrency",
+    "modelIds",
+    "projectIds",
+  ]);
+  const currentKiroOrganizationSecrets = () => (
+    normalizeKiroOrganizationSecrets(secrets.kiroOrganization)
+  );
+  const forgetKiroOrganizationCredentialInMemory = (accountId) => {
+    const nextSecrets = normalizeProviderSecrets(secrets);
+    const organizationSecrets = normalizeKiroOrganizationSecrets(nextSecrets.kiroOrganization);
+    organizationSecrets.delete(accountId);
+    nextSecrets.kiroOrganization = serializeKiroOrganizationSecrets(organizationSecrets);
+    secrets = nextSecrets;
+  };
+  const requireKiroOrganizationGeneration = (value) => {
+    if (!Number.isSafeInteger(value) || value !== kiroOrganizationBroker.snapshot().generation) {
+      throw kiroOrganizationError("kiro_organization_generation_conflict");
+    }
+  };
+  const currentKiroOrganizationAccount = (accountId) => {
+    const account = config.kiroOrganization.accounts.find((candidate) => candidate.id === accountId);
+    if (!account) throw kiroOrganizationError("kiro_organization_account_not_found");
+    return account;
+  };
+  const requireKiroOrganizationAccountRevision = (account, value) => {
+    if (!Number.isSafeInteger(value) || value !== account.revision) {
+      throw kiroOrganizationError("kiro_organization_revision_conflict");
+    }
+  };
+  const requireKiroOrganizationProtectedStorage = () => {
+    if (!secretsCodec) throw kiroOrganizationError("kiro_organization_protected_storage_required");
+  };
+  const commitKiroOrganizationState = async (organizationConfig, organizationSecrets) => {
+    const normalizedOrganization = normalizeKiroOrganizationConfig(organizationConfig);
+    const normalizedSecrets = normalizeKiroOrganizationSecrets(organizationSecrets);
+    const nextConfig = normalizeGatewayConfig({
+      ...config,
+      kiroOrganization: normalizedOrganization,
+    });
+    const nextSecrets = normalizeProviderSecrets(secrets);
+    nextSecrets.kiroOrganization = serializeKiroOrganizationSecrets(normalizedSecrets);
+    await saveConfig(nextConfig, nextSecrets);
+    config = nextConfig;
+    secrets = nextSecrets;
+    return kiroOrganizationBroker.reconfigure({
+      config: normalizedOrganization,
+      secrets: normalizedSecrets,
+    });
+  };
+  const advanceKiroOrganizationCredentialRevision = (nextConfig, previousConfig, accountId) => {
+    const previous = previousConfig.accounts.find((account) => account.id === accountId);
+    const current = nextConfig.accounts.find((account) => account.id === accountId);
+    if (!previous || !current) return nextConfig;
+    const advance = (value) => {
+      if (!Number.isSafeInteger(value) || value < 1 || value >= Number.MAX_SAFE_INTEGER) {
+        throw kiroOrganizationError("kiro_organization_revision_exhausted");
+      }
+      return value + 1;
+    };
+    const accountRevision = current.revision === previous.revision
+      ? advance(previous.revision)
+      : current.revision;
+    const configRevision = nextConfig.revision === previousConfig.revision
+      ? advance(previousConfig.revision)
+      : nextConfig.revision;
+    return normalizeKiroOrganizationConfig({
+      ...nextConfig,
+      revision: configRevision,
+      accounts: nextConfig.accounts.map((account) => account.id === accountId
+        ? { ...account, revision: accountRevision }
+        : account),
+    });
   };
 
   const store = new SessionStore({ runtimeDir: dataDir });
@@ -2846,6 +3108,182 @@ export async function startGateway({
         return sendJson(res, 200, publicProviderTemplates());
       }
 
+      if (path === "/api/connectors/kiro/organization") {
+        if (req.method === "GET") return sendJson(res, 200, kiroOrganizationBroker.snapshot());
+      }
+
+      if (path === "/api/connectors/kiro/organization/pool" && req.method === "PATCH") {
+        const body = assertOnlyFields(
+          await readBody(req),
+          new Set(["enabled", "strategy", "sessionAffinity", "expectedGeneration"]),
+        );
+        const snapshot = await mutateConfig(async () => {
+          requireKiroOrganizationGeneration(body.expectedGeneration);
+          const current = config.kiroOrganization;
+          const nextOrganization = normalizeKiroOrganizationConfig({
+            ...current,
+            ...(Object.hasOwn(body, "enabled") ? { enabled: body.enabled } : {}),
+            ...(Object.hasOwn(body, "strategy") ? { strategy: body.strategy } : {}),
+            ...(Object.hasOwn(body, "sessionAffinity") ? { sessionAffinity: body.sessionAffinity } : {}),
+          }, { previous: current });
+          return commitKiroOrganizationState(nextOrganization, currentKiroOrganizationSecrets());
+        });
+        return sendJson(res, 200, snapshot);
+      }
+
+      if (path === "/api/connectors/kiro/organization/accounts" && req.method === "POST") {
+        const body = assertOnlyFields(
+          await readBody(req),
+          new Set(["account", "credential", "expectedGeneration"]),
+        );
+        const accountInput = assertOnlyFields(
+          body.account,
+          KIRO_ORGANIZATION_ACCOUNT_INPUT_FIELDS,
+          "kiro_organization_account_field_invalid",
+        );
+        if (!body.credential) throw kiroOrganizationError("kiro_organization_credential_required");
+        requireKiroOrganizationProtectedStorage();
+        const credential = normalizeKiroOrganizationAccountSecret(body.credential);
+        const snapshot = await mutateConfig(async () => {
+          requireKiroOrganizationGeneration(body.expectedGeneration);
+          const current = config.kiroOrganization;
+          if (current.accounts.length >= MAX_KIRO_ORGANIZATION_ACCOUNTS) {
+            throw kiroOrganizationError("kiro_organization_accounts_limit");
+          }
+          if (current.accounts.some((account) => account.id === accountInput.id)) {
+            throw kiroOrganizationError("kiro_organization_account_conflict");
+          }
+          const nextOrganization = normalizeKiroOrganizationConfig({
+            ...current,
+            accounts: [...current.accounts, accountInput],
+          }, { previous: current });
+          const nextOrganizationSecrets = currentKiroOrganizationSecrets();
+          nextOrganizationSecrets.set(accountInput.id, credential);
+          return commitKiroOrganizationState(nextOrganization, nextOrganizationSecrets);
+        });
+        return sendJson(res, 201, snapshot);
+      }
+
+      const kiroOrganizationAccountMatch = path.match(
+        /^\/api\/connectors\/kiro\/organization\/accounts\/([^/]+)(\/(?:verify|models|revoke))?$/,
+      );
+      if (kiroOrganizationAccountMatch) {
+        const accountId = decodeURIComponent(kiroOrganizationAccountMatch[1]);
+        const action = kiroOrganizationAccountMatch[2] ?? "";
+
+        if (!action && req.method === "PATCH") {
+          const body = assertOnlyFields(
+            await readBody(req),
+            new Set(["account", "credential", "expectedRevision"]),
+          );
+          const accountPatch = assertOnlyFields(
+            body.account,
+            KIRO_ORGANIZATION_ACCOUNT_INPUT_FIELDS,
+            "kiro_organization_account_field_invalid",
+          );
+          if (Object.hasOwn(accountPatch, "id") && accountPatch.id !== accountId) {
+            throw kiroOrganizationError("kiro_organization_account_id_immutable");
+          }
+          const suppliedCredential = Object.hasOwn(body, "credential");
+          let credential;
+          if (suppliedCredential) {
+            requireKiroOrganizationProtectedStorage();
+            credential = normalizeKiroOrganizationAccountSecret(body.credential);
+          }
+          const snapshot = await mutateConfig(async () => {
+            const current = config.kiroOrganization;
+            const previous = currentKiroOrganizationAccount(accountId);
+            requireKiroOrganizationAccountRevision(previous, body.expectedRevision);
+            let nextOrganization = normalizeKiroOrganizationConfig({
+              ...current,
+              accounts: current.accounts.map((account) => account.id === accountId
+                ? { ...account, ...accountPatch, id: accountId, revision: account.revision }
+                : account),
+            }, { previous: current });
+            const nextOrganizationSecrets = currentKiroOrganizationSecrets();
+            if (suppliedCredential) {
+              nextOrganizationSecrets.set(accountId, credential);
+              nextOrganization = advanceKiroOrganizationCredentialRevision(
+                nextOrganization,
+                current,
+                accountId,
+              );
+            }
+            return commitKiroOrganizationState(nextOrganization, nextOrganizationSecrets);
+          });
+          return sendJson(res, 200, snapshot);
+        }
+
+        if (!action && req.method === "DELETE") {
+          const body = assertOnlyFields(await readBody(req), new Set(["expectedRevision"]));
+          const snapshot = await mutateConfig(async () => {
+            const current = config.kiroOrganization;
+            const previous = currentKiroOrganizationAccount(accountId);
+            requireKiroOrganizationAccountRevision(previous, body.expectedRevision);
+            // Fence active work before the disk commit. A failed persistence
+            // leaves the in-memory account revoked instead of silently active.
+            kiroOrganizationBroker.revoke(accountId);
+            const nextOrganization = normalizeKiroOrganizationConfig({
+              ...current,
+              accounts: current.accounts.filter((account) => account.id !== accountId),
+            }, { previous: current });
+            const nextOrganizationSecrets = currentKiroOrganizationSecrets();
+            nextOrganizationSecrets.delete(accountId);
+            try {
+              const committed = await commitKiroOrganizationState(nextOrganization, nextOrganizationSecrets);
+              kiroOrganizationBroker.markRevocationCommitted(accountId, previous.revision);
+              return committed;
+            } catch (error) {
+              forgetKiroOrganizationCredentialInMemory(accountId);
+              kiroOrganizationBroker.markRevocationPersistenceFailed(accountId, previous.revision);
+              throw error;
+            }
+          });
+          return sendJson(res, 200, snapshot);
+        }
+
+        if (action === "/verify" && req.method === "POST") {
+          const body = assertOnlyFields(await readBody(req), new Set(["expectedRevision"]));
+          const account = currentKiroOrganizationAccount(accountId);
+          requireKiroOrganizationAccountRevision(account, body.expectedRevision);
+          await kiroOrganizationBroker.verifyAccount(accountId);
+          return sendJson(res, 200, kiroOrganizationBroker.snapshot());
+        }
+
+        if (action === "/models" && req.method === "POST") {
+          assertOnlyFields(await readBody(req), new Set());
+          currentKiroOrganizationAccount(accountId);
+          return sendJson(res, 200, await kiroOrganizationBroker.discoverModels(accountId));
+        }
+
+        if (action === "/revoke" && req.method === "POST") {
+          const body = assertOnlyFields(await readBody(req), new Set(["expectedRevision"]));
+          const snapshot = await mutateConfig(async () => {
+            const current = config.kiroOrganization;
+            const previous = currentKiroOrganizationAccount(accountId);
+            requireKiroOrganizationAccountRevision(previous, body.expectedRevision);
+            kiroOrganizationBroker.revoke(accountId);
+            const nextOrganizationSecrets = currentKiroOrganizationSecrets();
+            nextOrganizationSecrets.delete(accountId);
+            const nextOrganization = advanceKiroOrganizationCredentialRevision(
+              normalizeKiroOrganizationConfig(current),
+              current,
+              accountId,
+            );
+            try {
+              const committed = await commitKiroOrganizationState(nextOrganization, nextOrganizationSecrets);
+              kiroOrganizationBroker.markRevocationCommitted(accountId, previous.revision);
+              return committed;
+            } catch (error) {
+              forgetKiroOrganizationCredentialInMemory(accountId);
+              kiroOrganizationBroker.markRevocationPersistenceFailed(accountId, previous.revision);
+              throw error;
+            }
+          });
+          return sendJson(res, 200, snapshot);
+        }
+      }
+
       if (path === "/api/connectors/kiro") {
         if (req.method === "GET") return sendJson(res, 200, await kiroApi.status());
       }
@@ -3626,6 +4064,7 @@ export async function startGateway({
     }
     closePromise = (async () => {
       const connectorClose = Promise.resolve(kiroApi.close()).catch(() => undefined);
+      const organizationClose = Promise.resolve(kiroOrganizationBroker.close()).catch(() => undefined);
       await cronScheduler.stop();
       await configMutationTail;
       await persistence.drain();
@@ -3634,6 +4073,8 @@ export async function startGateway({
       await workspaceLeaseStore.flush();
       await store.close();
       await connectorClose;
+      await organizationClose;
+      await organizationAuditTail;
     })();
     return closePromise;
   };
