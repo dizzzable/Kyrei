@@ -24,6 +24,7 @@ import { KeybindPanel } from "@/components/settings/KeybindPanel";
 import { ModelSettings } from "@/components/settings/models/ModelSettings";
 import { ProvidersSettings } from "@/components/settings/providers/ProvidersSettings";
 import { SkillsSettings } from "@/components/settings/SkillsSettings";
+import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
 import {
   SETTINGS_SECTIONS,
   resolveSettingsSection,
@@ -42,6 +43,7 @@ import {
 } from "@/store/settings";
 import { LANGUAGES, useI18n, setLang, type Lang } from "@/i18n";
 import { cn } from "@/lib/utils";
+import { importPermissionRules } from "@/lib/permission-rules";
 
 interface SettingsProps {
   config: AppConfig;
@@ -70,6 +72,14 @@ function GroupTitle({ children }: { children: ReactNode }) {
   return <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">{children}</h4>;
 }
 
+function permissionRulesInput(engine: Record<string, unknown>): unknown {
+  if (!Object.hasOwn(engine, "permissions") || engine.permissions === undefined) return [];
+  const permissions = engine.permissions;
+  if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return permissions;
+  if (!Object.hasOwn(permissions, "rules") || (permissions as Record<string, unknown>).rules === undefined) return [];
+  return (permissions as Record<string, unknown>).rules;
+}
+
 export function Settings({ config, onClose, onSaved, initialSection = "model" }: SettingsProps) {
   const [section, setSection] = useState<SettingsSectionId>(initialSection);
   const visibleSection = resolveSettingsSection(section);
@@ -82,9 +92,16 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [model, setModel] = useState(config.model);
   const [workspace, setWorkspace] = useState(config.workspace);
   const [engineText, setEngineText] = useState(() => JSON.stringify(config.engine ?? {}, null, 2));
+  const [engine, setEngine] = useState<Record<string, unknown>>(() => ({ ...(config.engine ?? {}) }));
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
   const [engineError, setEngineError] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const workspaceSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const engineSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingWorkspaceSave = useRef<Partial<{ provider: string; model: string; workspace: string }> | null>(null);
+  const pendingEngineSave = useRef<Record<string, unknown> | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const importRef = useRef<HTMLInputElement | null>(null);
   const themeImportRef = useRef<HTMLInputElement | null>(null);
@@ -156,7 +173,8 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   }, []);
 
   useEffect(() => () => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
+    if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+    if (engineSaveTimer.current) clearTimeout(engineSaveTimer.current);
     if (flashTimer.current) clearTimeout(flashTimer.current);
   }, []);
 
@@ -182,11 +200,13 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }>) => {
       try {
         const next = await gateway.setConfig(patch);
+        setSaveFailed(false);
         onSaved(next);
         flash();
         return true;
       } catch {
         // The draft remains editable while the local gateway is unavailable.
+        setSaveFailed(true);
         return false;
       }
     },
@@ -195,24 +215,57 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
 
   const scheduleSave = useCallback(
     (patch: Partial<{ provider: string; model: string; workspace: string }>) => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => void persist(patch), 500);
+      pendingWorkspaceSave.current = { ...(pendingWorkspaceSave.current ?? {}), ...patch };
+      if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+      workspaceSaveTimer.current = setTimeout(() => {
+        const pending = pendingWorkspaceSave.current;
+        pendingWorkspaceSave.current = null;
+        workspaceSaveTimer.current = null;
+        if (pending) void persist(pending);
+      }, 500);
     },
     [persist],
   );
+
+  const flushWorkspaceSave = useCallback(async () => {
+    if (workspaceSaveTimer.current) clearTimeout(workspaceSaveTimer.current);
+    workspaceSaveTimer.current = null;
+    const pending = pendingWorkspaceSave.current;
+    pendingWorkspaceSave.current = null;
+    return pending ? persist(pending) : true;
+  }, [persist]);
+
+  const flushEngineSave = useCallback(async () => {
+    if (engineSaveTimer.current) clearTimeout(engineSaveTimer.current);
+    engineSaveTimer.current = null;
+    const pending = pendingEngineSave.current;
+    pendingEngineSave.current = null;
+    return pending ? persist({ engine: pending }) : true;
+  }, [persist]);
+
+  const closeSettings = useCallback(async () => {
+    await Promise.all([flushWorkspaceSave(), flushEngineSave()]);
+    onClose();
+  }, [flushEngineSave, flushWorkspaceSave, onClose]);
+  onCloseRef.current = () => void closeSettings();
 
   const saveEngine = useCallback(() => {
     try {
       const parsed = engineText.trim() ? JSON.parse(engineText) : {};
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("engine-object-required");
+      const next = parsed as Record<string, unknown>;
       setEngineError(false);
-      void persist({ engine: parsed as Record<string, unknown> });
+      if (engineSaveTimer.current) clearTimeout(engineSaveTimer.current);
+      engineSaveTimer.current = null;
+      pendingEngineSave.current = null;
+      engineRef.current = next;
+      setEngine(next);
+      void persist({ engine: next });
     } catch {
       setEngineError(true);
     }
   }, [engineText, persist]);
 
-  const [engine, setEngine] = useState<Record<string, unknown>>(() => ({ ...(config.engine ?? {}) }));
   const getEngineField = (path: string, fallback: unknown): unknown => {
     let current: unknown = engine;
     for (const key of path.split(".")) {
@@ -221,21 +274,22 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
     return current ?? fallback;
   };
-  const setEngineField = (path: string, value: unknown) => {
-    setEngine((previous) => {
-      const next: Record<string, unknown> = JSON.parse(JSON.stringify(previous));
-      const keys = path.split(".");
-      let current = next;
-      for (let index = 0; index < keys.length - 1; index++) {
-        if (typeof current[keys[index]] !== "object" || current[keys[index]] == null) current[keys[index]] = {};
-        current = current[keys[index]] as Record<string, unknown>;
-      }
-      current[keys[keys.length - 1]] = value;
-      setEngineText(JSON.stringify(next, null, 2));
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => void persist({ engine: next }), 500);
-      return next;
-    });
+  const setEngineField = (path: string, value: unknown, persistImmediately = false) => {
+    const next: Record<string, unknown> = JSON.parse(JSON.stringify(engineRef.current));
+    const keys = path.split(".");
+    let current = next;
+    for (let index = 0; index < keys.length - 1; index++) {
+      if (typeof current[keys[index]] !== "object" || current[keys[index]] == null) current[keys[index]] = {};
+      current = current[keys[index]] as Record<string, unknown>;
+    }
+    current[keys[keys.length - 1]] = value;
+    engineRef.current = next;
+    setEngine(next);
+    setEngineText(JSON.stringify(next, null, 2));
+    if (engineSaveTimer.current) clearTimeout(engineSaveTimer.current);
+    pendingEngineSave.current = next;
+    if (persistImmediately) void flushEngineSave();
+    else engineSaveTimer.current = setTimeout(() => void flushEngineSave(), 500);
   };
 
   const importTheme = (file: File) => {
@@ -336,11 +390,12 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   };
 
   const sectionMeta = SETTINGS_SECTIONS.find((entry) => entry.id === visibleSection)!;
+  const permissionRules = importPermissionRules(permissionRulesInput(engine));
 
   const overlay = (
     <div
       className="fixed inset-x-0 top-[var(--app-titlebar-h)] bottom-[var(--app-statusbar-h)] z-[100] grid min-h-0 place-items-center bg-black/78 p-3 sm:p-5"
-      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      onClick={(event) => { if (event.target === event.currentTarget) void closeSettings(); }}
     >
       <div
         ref={dialogRef}
@@ -385,13 +440,20 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
             </select>
             <span className="hidden text-[14px] font-semibold min-[761px]:block">{t(sectionMeta.labelKey)}</span>
             <div className="ml-auto flex items-center gap-3">
-              <span className={cn("text-[12px] text-success transition-opacity", savedFlash ? "opacity-100" : "opacity-0")}>
-                {t("settings.saved")}
+              <span
+                className={cn(
+                  "text-[12px] transition-opacity",
+                  saveFailed ? "text-danger" : "text-success",
+                  saveFailed || savedFlash ? "opacity-100" : "opacity-0",
+                )}
+                role={saveFailed ? "alert" : "status"}
+              >
+                {t(saveFailed ? "settings.saveFailed" : "settings.saved")}
               </span>
               <button
                 ref={closeRef}
                 type="button"
-                onClick={onClose}
+                onClick={() => void closeSettings()}
                 className="rounded-md p-1 text-muted transition-colors hover:bg-elevated hover:text-foreground"
                 aria-label={t("common.close")}
               >
@@ -442,6 +504,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       <EnumField
                         label={t("settings.permissions.terminal.label")}
                         hint={t("settings.permissions.terminal.hint")}
+                        disabled={permissionRules.issues.length > 0}
                         value={String(getEngineField("permissions.terminal", "auto")) as "off" | "auto" | "turbo"}
                         options={[
                           { value: "off", label: t("settings.options.off") },
@@ -453,6 +516,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       <EnumField
                         label={t("settings.permissions.review.label")}
                         hint={t("settings.permissions.review.hint")}
+                        disabled={permissionRules.issues.length > 0}
                         value={String(getEngineField("permissions.review", "agent")) as "always" | "agent" | "request"}
                         options={[
                           { value: "always", label: t("settings.options.always") },
@@ -475,6 +539,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       <EnumField
                         label={t("settings.permissions.web.label")}
                         hint={t("settings.permissions.web.hint")}
+                        disabled={permissionRules.issues.length > 0}
                         value={String(getEngineField("permissions.web", "read")) as "off" | "search" | "read"}
                         options={[
                           { value: "off", label: t("settings.options.off") },
@@ -482,6 +547,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           { value: "read", label: t("settings.options.read") },
                         ]}
                         onChange={(value) => setEngineField("permissions.web", value)}
+                      />
+                      <PermissionRulesEditor
+                        rules={permissionRules.rules}
+                        importIssueCount={permissionRules.issues.length}
+                        onChange={(rules) => setEngineField("permissions.rules", rules, true)}
                       />
                       <NumberField
                         label={t("settings.commandTimeout.label")}
