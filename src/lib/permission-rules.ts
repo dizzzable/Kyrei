@@ -200,6 +200,80 @@ export function createExactPathPermissionRule(
   return { pattern: exactPattern(`${tool}:${canonicalTarget}`), action };
 }
 
+/**
+ * Build a durable permission rule from a pending approval tool call.
+ * Returns null when the tool/args cannot form a safe exact rule.
+ */
+export function permissionRuleFromApproval(
+  toolName: string,
+  args: unknown,
+  action: PermissionRuleAction,
+): PermissionRule | null {
+  if (!isPermissionRuleAction(action)) return null;
+  const name = typeof toolName === "string" ? toolName.trim() : "";
+  if (!name) return null;
+  const a = args && typeof args === "object" && !Array.isArray(args)
+    ? args as Record<string, unknown>
+    : {};
+
+  try {
+    if (name === "run_command") {
+      const command = typeof a.command === "string" ? a.command.trim() : "";
+      // Always-allow must not promote a tool-wide "any command" rule from empty targets.
+      if (!command) return action === "allow" ? null : createExactToolPermissionRule("run_command", action);
+      return createExactCommandPermissionRule(command, action);
+    }
+    if (name === "write_file" || name === "edit_file") {
+      const path = typeof a.path === "string"
+        ? a.path
+        : typeof a.file === "string"
+          ? a.file
+          : "";
+      if (!path.trim()) return action === "allow" ? null : createExactToolPermissionRule(name, action);
+      try {
+        return createExactPathPermissionRule(name, path.trim(), action);
+      } catch {
+        // Absolute / escaping paths: refuse silent tool-wide Always allow.
+        return action === "allow" ? null : createExactToolPermissionRule(name, action);
+      }
+    }
+    if (
+      name === "web_search"
+      || name === "web_fetch"
+      || name === "diagnostics"
+      || name === "mcp_call"
+      || name === "mcp_list_tools"
+    ) {
+      return createExactToolPermissionRule(name, action);
+    }
+    // Unknown tools: tool-scoped rule if the name is safe.
+    return createExactToolPermissionRule(name, action);
+  } catch {
+    return null;
+  }
+}
+
+/** True if an equivalent pattern+action already exists (avoid duplicates). */
+export function permissionRulesContain(rules: readonly PermissionRule[], candidate: PermissionRule): boolean {
+  return rules.some((r) => r.pattern === candidate.pattern && r.action === candidate.action);
+}
+
+export function mergePermissionRule(
+  rules: readonly PermissionRule[],
+  candidate: PermissionRule,
+): PermissionRule[] {
+  if (permissionRulesContain(rules, candidate)) return [...rules];
+  // Same pattern with weaker action: upgrade to candidate when candidate is stronger.
+  const rank = ACTION_RANK;
+  const next = rules.map((r) => {
+    if (r.pattern !== candidate.pattern) return r;
+    return rank[candidate.action] >= rank[r.action] ? candidate : r;
+  });
+  if (next.some((r) => r.pattern === candidate.pattern)) return next;
+  if (next.length >= MAX_PERMISSION_RULES) return next;
+  return [...next, candidate];
+}
+
 function decodeGeneratedLiteral(value: string): string | undefined {
   let decoded = "";
   for (let index = 0; index < value.length; index += 1) {

@@ -29,4 +29,33 @@ describe("selectTeamRoleTools", () => {
       "web_fetch",
     ]);
   });
+
+  it("exposes shared local memory reads without mutation tools", () => {
+    const selected = selectTeamRoleTools(
+      ["workspace.read", "memory.read"],
+      {
+        plan_read: { name: "plan" },
+        plan_write_roadmap: { name: "plan write" },
+        query_decisions: { name: "decisions" },
+        record_decision: { name: "record" },
+        memory_search: { name: "search" },
+        openviking_find: { name: "ov" },
+        openviking_add_message: { name: "ov write" },
+        project_map: { name: "map" },
+        brain_search: { name: "brain" },
+      } as never,
+    );
+
+    expect(Object.keys(selected).sort()).toEqual([
+      "brain_search",
+      "memory_search",
+      "openviking_find",
+      "plan_read",
+      "project_map",
+      "query_decisions",
+    ]);
+    expect(selected).not.toHaveProperty("record_decision");
+    expect(selected).not.toHaveProperty("plan_write_roadmap");
+    expect(selected).not.toHaveProperty("openviking_add_message");
+  });
 });

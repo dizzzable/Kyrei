@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Loader2, ShieldAlert, X } from "lucide-react";
+import { Check, Loader2, ShieldAlert, ShieldCheck, X } from "lucide-react";
 
 import { Button } from "@/components/ui";
 import { useI18n } from "@/i18n";
@@ -23,12 +23,18 @@ function ApprovalStatusIcon({ status, busy }: { status: ApprovalPart["status"]; 
   return <ShieldAlert className="size-3.5" />;
 }
 
+export type ApprovalDecisionOptions = { always?: boolean };
+
 export function ApprovalCard({
   part,
   onDecision,
 }: {
   part: ApprovalPart;
-  onDecision?: (approvalId: string, approved: boolean) => Promise<void> | void;
+  onDecision?: (
+    approvalId: string,
+    approved: boolean,
+    options?: ApprovalDecisionOptions,
+  ) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
@@ -60,11 +66,11 @@ export function ApprovalCard({
   // Expired requests resume as a denial, so they cannot strand the session.
   const waitingForContinuation = resolved && !part.consumedAt;
 
-  const decide = async (approved: boolean) => {
+  const decide = async (approved: boolean, options?: ApprovalDecisionOptions) => {
     if (!onDecision || busy) return;
     setBusy(true);
     try {
-      await onDecision(part.approvalId, approved);
+      await onDecision(part.approvalId, approved, options);
     } finally {
       setBusy(false);
     }
@@ -121,12 +127,31 @@ export function ApprovalCard({
                 : t("chat.approval.scope.once")}
         </span>
         {!resolved && (
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
             <Button size="sm" variant="ghost" disabled={busy || !onDecision} onClick={() => void decide(false)}>
               {t("chat.approval.deny")}
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="text-danger hover:text-danger"
+              disabled={busy || !onDecision}
+              onClick={() => void decide(false, { always: true })}
+              title={t("chat.approval.alwaysDenyHint")}
+            >
+              {t("chat.approval.alwaysDeny")}
+            </Button>
             <Button size="sm" variant="secondary" disabled={busy || !onDecision} onClick={() => void decide(true)}>
               {t("chat.approval.allowOnce")}
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy || !onDecision}
+              onClick={() => void decide(true, { always: true })}
+              title={t("chat.approval.alwaysAllowHint")}
+            >
+              <ShieldCheck className="size-3.5" />
+              {t("chat.approval.alwaysAllow")}
             </Button>
           </div>
         )}

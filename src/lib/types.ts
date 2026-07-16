@@ -44,11 +44,40 @@ export interface ToolPart {
 
 export type MessagePart = TextPart | ReasoningPart | ToolPart | ApprovalPart;
 
+export interface FileReviewHunk {
+  id: string;
+  status: "pending" | "accepted" | "rejected";
+  start: number;
+  end: number;
+  preview: string;
+}
+
+export interface FileReviewFile {
+  path: string;
+  tool: string;
+  snapshotId?: string;
+  status: "pending" | "accepted" | "rejected";
+  diffPreview?: string;
+  /** Full ordered ops for selective hunk apply (kind + text). */
+  diffOps?: Array<{ kind: " " | "+" | "-"; text: string }>;
+  /** Hunks for Kiro-style per-hunk accept/reject. */
+  hunks?: FileReviewHunk[];
+}
+
+export interface FileReviewState {
+  status: "pending" | "accepted" | "rejected" | "partial";
+  files: FileReviewFile[];
+  snapshotIds: string[];
+  resolvedAt?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
   parts: MessagePart[];
   pending?: boolean;
+  turnStatus?: StoredChatMessage["turnStatus"];
+  fileReview?: FileReviewState;
 }
 
 export interface SessionInfo {
@@ -56,9 +85,21 @@ export interface SessionInfo {
   title?: string;
   createdAt?: string;
   updatedAt?: string;
+  /**
+   * Soft-archive: hidden from sidebar, messages kept for hybrid memory FTS / restore.
+   * Permanent delete uses DELETE /api/sessions/:id.
+   */
+  archived?: boolean;
+  archivedAt?: string;
+  /** User fork lineage (branch). Independent of subagent parent ids. */
+  parentSessionId?: string;
+  rootSessionId?: string;
+  forkedFromMessageId?: string;
+  forkedAt?: string;
+  lineageKind?: "branch";
   /** Runtime turn status from the gateway (absent = idle). */
   status?: "idle" | "working";
-  source?: "chat" | "cron";
+  source?: "chat" | "cron" | "import";
   /** Session-scoped target. New sessions inherit the current Settings default. */
   providerId?: string;
   modelId?: string;
@@ -80,6 +121,14 @@ export interface SessionInfo {
   };
 }
 
+export interface StoredImageAttachment {
+  id: string;
+  name: string;
+  mediaType: string;
+  relPath: string;
+  bytes: number;
+}
+
 export interface StoredChatMessage {
   id: string;
   role: ChatMessage["role"];
@@ -87,7 +136,23 @@ export interface StoredChatMessage {
   parts?: MessagePart[];
   at?: string;
   pending?: boolean;
-  turnStatus?: "streaming" | "complete" | "max_steps" | "awaiting_approval" | "interrupted" | "error";
+  turnStatus?:
+    | "streaming"
+    | "complete"
+    | "max_steps"
+    | "awaiting_approval"
+    | "awaiting_file_review"
+    | "interrupted"
+    | "error"
+    | "goal_unsatisfied"
+    | "budget_exceeded"
+    | "heal_handoff";
+  /** Supervised-mode pending file-edit review (Kiro Supervised analogue). */
+  fileReview?: FileReviewState;
+  /** User-attached images for this turn (files under gateway dataDir). */
+  imageAttachments?: StoredImageAttachment[];
+  /** How images were presented to the model for this turn. */
+  imagePresentation?: "native" | "text";
   /** Safe gateway error metadata used to restore a failed turn after restart. */
   errorCode?: string;
   errorMessage?: string;
@@ -314,6 +379,14 @@ export interface TeamOrchestrationConfig {
 
 export type PipelineStageKind = "department" | "approval" | "action" | "truth-gate";
 
+export interface PipelineTruthGateCheck {
+  id: string;
+  command: string;
+  ecosystem?: string;
+  /** Frozen at config normalize time (sha256 of ecosystem/command/cwdPolicy). */
+  testDigest?: string;
+}
+
 export interface PipelineStageDefinition {
   id: string;
   name: string;
@@ -323,6 +396,8 @@ export interface PipelineStageDefinition {
   retry: { maxAttempts: number; backoffMs: number };
   teamProfileId?: string;
   action?: string;
+  /** truth-gate only: pinned check commands for the trusted test runner. */
+  checks?: PipelineTruthGateCheck[];
 }
 
 export interface PipelineLimits {
@@ -625,6 +700,130 @@ export interface AppConfig {
   pipelines?: PipelinesConfig;
   /** Non-secret engine tuning (permissions/roles/budgets); shown in Advanced. */
   engine?: Record<string, unknown>;
+  /** Public messaging webhook status (token never exposed). */
+  messaging?: {
+    enabled: boolean;
+    autoRun: boolean;
+    maxBodyChars: number;
+    hasToken: boolean;
+  };
+}
+
+/** Full messaging status including recent inbound previews. */
+export interface MessagingRuntimeStatus {
+  enabled: boolean;
+  autoRun: boolean;
+  maxBodyChars: number;
+  hasToken: boolean;
+  recent: Array<{
+    id: string;
+    at: string;
+    channel: string;
+    sessionId: string;
+    preview: string;
+    autoRun: boolean;
+    status: string;
+  }>;
+  note?: string;
+}
+
+export interface MessagingTokenResult {
+  ok: boolean;
+  token: string;
+  status: MessagingRuntimeStatus;
+}
+
+/** Built-in project memory index (FTS + lexical vectors). Files remain SoT. */
+export interface MemoryIndexRuntimeStatus {
+  state: "ready" | "disabled" | "no_workspace" | "error";
+  enabled: boolean;
+  backend: "sqlite" | "postgres" | "off" | "file";
+  configuredBackend: "sqlite" | "postgres" | "off";
+  indexDir: string | null;
+  vectorSearch: "sqlite-vec" | "pgvector" | "bruteforce" | "none";
+  docCount: number;
+  vectorCapable: boolean;
+  tierA: {
+    memoryMd: boolean;
+    notesMd: boolean;
+    plan: boolean;
+    handoffs: number;
+    ltmDecisions: boolean;
+    projectIndex: boolean;
+  };
+  message?: string;
+}
+
+export interface MemoryIndexReindexResult {
+  ok: boolean;
+  upserted: number;
+  vectorsUpserted: number;
+  sources: string[];
+  status: MemoryIndexRuntimeStatus;
+  error?: string;
+}
+
+/** Result of regenerating LTM runtime snapshot from the durable ledger. */
+export interface LtmConsolidateResult {
+  ok: boolean;
+  via?: "typescript" | "python";
+  error?: string;
+  stdout?: string;
+}
+
+/** Dual-write chat mirror status (JSON remains write path for approvals). */
+export interface SessionMirrorRuntimeStatus {
+  enabled: boolean;
+  readSearch: boolean;
+  enginePrimary?: boolean;
+  state: "ready" | "disabled" | "error";
+  sessionCount: number;
+  path?: string;
+  note?: string;
+  message?: string;
+}
+
+export interface SessionMirrorSearchHit {
+  sessionId: string;
+  seq: number;
+  role: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface SessionMirrorSearchResult {
+  query: string;
+  hits: SessionMirrorSearchHit[];
+}
+
+export interface SessionMirrorSyncResult {
+  ok: boolean;
+  sessions: number;
+  messages: number;
+  note?: string;
+}
+
+/** Progressive cutover readiness (JSON remains write SoT for approvals/rewind). */
+export interface SessionMirrorParityResult {
+  enabled: boolean;
+  /** True when engine SessionStore schema holds provider/approvals/pending fields. */
+  schemaReady?: boolean;
+  /** True when public GET prefers engine SessionStore (A4b). */
+  enginePrimary?: boolean;
+  /** True when mutations dual-commit to engine (A4c, same flag as enginePrimary). */
+  writeThrough?: boolean;
+  /**
+   * True when enginePrimary is on, write-through is active, and mirror covers all JSON ids.
+   * Approval/rewind algorithms still execute on JSON first, then dual-commit.
+   */
+  cutoverReady: boolean;
+  json: { sessions: number; messages: number };
+  mirror: { sessions: number; messages: number };
+  missingInMirror: string[];
+  extraInMirror: string[];
+  blockers: string[];
+  note?: string;
+  message?: string;
 }
 
 /** Safe, user-facing health state for the optional local GBrain runtime. */

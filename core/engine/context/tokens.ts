@@ -103,3 +103,30 @@ export function isOverflow(localEstimate: number, providerUsage: number | null, 
     effective,
   };
 }
+
+/**
+ * Extract provider-reported **context fill** from AI SDK step results for dual-trigger
+ * overflow (Hermes: trust real usage when larger than local estimate).
+ *
+ * Uses the **last** step with finite input/prompt tokens so post-compaction steps
+ * are not permanently sticky from a pre-compact max. Falls back to last totalTokens
+ * only when input/prompt is missing.
+ */
+export function providerUsageFromSteps(
+  steps: ReadonlyArray<{ usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; promptTokens?: number } }> | null | undefined,
+): number | null {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const u = steps[i]?.usage;
+    if (!u || typeof u !== "object") continue;
+    const input = Number(u.inputTokens ?? u.promptTokens);
+    if (Number.isFinite(input) && input > 0) return input;
+  }
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const u = steps[i]?.usage;
+    if (!u || typeof u !== "object") continue;
+    const total = Number(u.totalTokens);
+    if (Number.isFinite(total) && total > 0) return total;
+  }
+  return null;
+}

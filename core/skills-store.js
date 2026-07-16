@@ -944,6 +944,91 @@ export class SkillsStore {
     });
   }
 
+  /**
+   * Replace SKILL.md for an owned skill (explicit user/curator apply only).
+   * Content may be a full document with frontmatter or a body that is re-wrapped.
+   */
+  async update(id, { content, description, metadata } = {}) {
+    return this.#queueMutation(async () => {
+      if (typeof id !== "string" || !PUBLIC_ID_RE.test(id)) fail("skill_not_found", "Skill not found");
+      const skill = (await this.#discover()).find((candidate) => candidate.id === id);
+      if (!skill) fail("skill_not_found", "Skill not found");
+      if (!skill.owned) fail("root_not_owned", "Skills in custom roots are read-only");
+      if (skill.provenance === "workspace") {
+        const currentRoot = await this.#workspaceRootDescriptor();
+        if (!currentRoot.owned || !currentRoot.canonical ||
+          pathKey(currentRoot.canonical) !== pathKey(skill._rootCanonical)) {
+          fail("root_not_owned", "Workspace skills root is no longer owned by the workspace");
+        }
+      }
+
+      const supplied = typeof content === "string" ? content : "";
+      if (!supplied.trim() && typeof description !== "string") {
+        fail("invalid_skill_document", "Skill update requires content or description");
+      }
+
+      let document;
+      if (supplied.replace(/^\uFEFF/, "").startsWith("---\n") || supplied.replace(/^\uFEFF/, "").startsWith("---\r\n")) {
+        const parsed = parseSkillFrontmatter(supplied);
+        if (parsed.metadata.name && parsed.metadata.name !== skill.name) {
+          fail("invalid_skill_document", "Frontmatter name must match the existing skill name");
+        }
+        // Keep the on-disk name stable even if the model omits frontmatter name.
+        if (!parsed.metadata.name) {
+          document = renderSkillDocument({
+            name: skill.name,
+            description: cleanText(description ?? parsed.metadata.description ?? skill.description, MAX_DESCRIPTION_CHARS),
+            content: parsed.body,
+            metadata: {
+              ...(skill.metadata ?? {}),
+              ...(parsed.metadata.version ? { version: parsed.metadata.version } : {}),
+              ...(parsed.metadata.author ? { author: parsed.metadata.author } : {}),
+              ...(parsed.metadata.tags ? { tags: parsed.metadata.tags } : {}),
+              ...(isRecord(metadata) ? metadata : {}),
+            },
+          });
+        } else {
+          document = supplied.endsWith("\n") ? supplied : `${supplied}\n`;
+        }
+      } else if (supplied.trim()) {
+        document = renderSkillDocument({
+          name: skill.name,
+          description: cleanText(description ?? skill.description, MAX_DESCRIPTION_CHARS),
+          content: supplied,
+          metadata: {
+            ...(skill.metadata ?? {}),
+            ...(isRecord(metadata) ? metadata : {}),
+          },
+        });
+      } else {
+        const existing = parseSkillFrontmatter(skill.content);
+        document = renderSkillDocument({
+          name: skill.name,
+          description: cleanText(description, MAX_DESCRIPTION_CHARS),
+          content: existing.body,
+          metadata: {
+            ...(skill.metadata ?? {}),
+            ...(isRecord(metadata) ? metadata : {}),
+          },
+        });
+      }
+
+      if (Buffer.byteLength(document, "utf8") > this.maxSkillBytes) {
+        fail("skill_too_large", "Skill document exceeds the configured size limit");
+      }
+
+      const fileInfo = await pathInfoNoSymlink(skill._skillFile);
+      if (!fileInfo?.isFile()) fail("skill_not_found", "Skill not found");
+      if (!isPathInside(skill._skillDirectory, skill._skillFile, true)) {
+        fail("path_escape", "Skill path is no longer safe");
+      }
+      await atomicWrite(skill._skillFile, document);
+      const refreshed = (await this.#discover()).find((candidate) => candidate.id === id);
+      if (!refreshed) fail("invalid_skill_document", "Updated skill could not be discovered");
+      return publicSkill(refreshed, true);
+    });
+  }
+
   async delete(id) {
     return this.#queueMutation(async () => {
       if (typeof id !== "string" || !PUBLIC_ID_RE.test(id)) fail("skill_not_found", "Skill not found");

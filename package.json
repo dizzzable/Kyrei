@@ -62,6 +62,7 @@
     "hast-util-from-html-isomorphic": "^2.0.0",
     "hast-util-to-text": "^4.0.2",
     "katex": "^0.17.0",
+    "pg": "^8.22.0",
     "radix-ui": "^1.6.2",
     "remark-math": "^6.0.0",
     "sqlite-vec": "^0.1.9",
@@ -74,6 +75,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/katex": "^0.16.8",
     "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.3",
@@ -170,12 +172,19 @@
       "artifactName": "${productName}-Portable-${version}.${ext}"
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "assets/icon.png",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "linux": {
-      "target": ["AppImage", "deb", "pacman"],
+      "target": [
+        "AppImage",
+        "deb",
+        "pacman"
+      ],
       "icon": "assets/icon.png",
       "executableName": "kyrei",
       "syncDesktopName": true,

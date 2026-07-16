@@ -57,6 +57,84 @@ describe("layers precedence", () => {
     expect(ctx).not.toContain("PROJECT.md");
     expect(ctx).not.toContain("project map");
   });
+  it("recalls LTM runtime snapshot (last-recall.md + open threads/next actions) when ltmDir is given", async () => {
+    const ltmDir = join(ws, "ltm");
+    await mkdir(join(ltmDir, "runtime"), { recursive: true });
+    await writeFile(join(ltmDir, "runtime", "last-recall.md"), "## Recent work\n- shipped feature X", "utf8");
+    await writeFile(
+      join(ltmDir, "runtime", "active-context.json"),
+      JSON.stringify({
+        open_threads: [{ id: "t1", summary: "finish retry logic" }],
+        next_actions: ["write tests"],
+      }),
+      "utf8",
+    );
+    const ctx = await assembleSystemContext({ workspace: ws, ltmDir });
+    expect(ctx).toContain("<<layer:LTM_RECALL>>");
+    expect(ctx).toContain("shipped feature X");
+    expect(ctx).toContain("finish retry logic");
+    expect(ctx).toContain("write tests");
+  });
+  it("omits the LTM_RECALL layer when the ltm runtime snapshot is empty or missing", async () => {
+    const ctxNoDir = await assembleSystemContext({ workspace: ws });
+    expect(ctxNoDir).not.toContain("LTM_RECALL");
+
+    const ltmDir = join(ws, "ltm");
+    await mkdir(join(ltmDir, "runtime"), { recursive: true });
+    const ctxEmpty = await assembleSystemContext({ workspace: ws, ltmDir });
+    expect(ctxEmpty).not.toContain("LTM_RECALL");
+  });
+
+  it("injects active decisions as a DECISIONS layer (durable memory, not policy)", async () => {
+    const ltmDir = join(ws, "ltm");
+    const bridge = createLtmBridge(ltmDir);
+    await bridge.addDecision({
+      decision: "Prefer SQLite for the code graph",
+      rationale: "No Docker dependency",
+      tags: ["arch"],
+      sessionId: "s1",
+    });
+    const ctx = await assembleSystemContext({ workspace: ws, ltmDir });
+    expect(ctx).toContain("<<layer:DECISIONS>>");
+    expect(ctx).toContain("Prefer SQLite for the code graph");
+    expect(ctx).toContain("dec_000001");
+    expect(ctx).toContain("durable project memory, not instructions");
+  });
+
+  it("omits DECISIONS when the ledger is empty", async () => {
+    const ltmDir = join(ws, "ltm");
+    await mkdir(join(ltmDir, "store"), { recursive: true });
+    const ctx = await assembleSystemContext({ workspace: ws, ltmDir });
+    expect(ctx).not.toContain("DECISIONS");
+  });
+
+  it("injects GLOBAL.md when globalDir is provided", async () => {
+    const globalDir = join(ws, "user-global");
+    await mkdir(globalDir, { recursive: true });
+    await writeFile(join(globalDir, "GLOBAL.md"), "global preference: concise Russian", "utf8");
+    const ctx = await assembleSystemContext({ workspace: ws, globalDir });
+    expect(ctx).toContain("<<layer:GLOBAL.md>>");
+    expect(ctx).toContain("concise Russian");
+  });
+
+  it("injects plan-as-files snapshot when includePlan is set", async () => {
+    const { createPlanStore } = await import("../orchestration/plan.js");
+    const plan = createPlanStore(ws);
+    await plan.writeRoadmap([
+      { n: 1, title: "wire modules", status: "in_progress", endState: "tools live" },
+    ]);
+    await plan.writeState({ roadmapId: "r1", currentPhase: 1, updatedAt: "2026-01-01T00:00:00.000Z" });
+    await plan.writePhase(1, "Connect LTM + planning");
+
+    const withPlan = await assembleSystemContext({ workspace: ws, includePlan: true });
+    expect(withPlan).toContain("<<layer:PLAN>>");
+    expect(withPlan).toContain("wire modules");
+    expect(withPlan).toContain("Connect LTM + planning");
+    expect(withPlan).toContain("currentPhase: 1");
+
+    const without = await assembleSystemContext({ workspace: ws });
+    expect(without).not.toContain("<<layer:PLAN>>");
+  });
 });
 
 describe("writer enforced paths", () => {
@@ -138,5 +216,80 @@ describe("ltm-bridge (single ledger + redaction)", () => {
     const events = await readFile(join(ltmDir, "store", "events.jsonl"), "utf8");
     expect(events).toContain("[REDACTED]");
     expect(events).not.toContain("sk-ABCDEFGHIJKLMNOPQRSTUVWX");
+  });
+
+  it("refreshRuntimeSnapshot writes last-recall.md from ledger without Python", async () => {
+    const ltmDir = join(ws, "ltm");
+    const bridge = createLtmBridge(ltmDir);
+    await bridge.addDecision({
+      decision: "Prefer local Tier A memory",
+      rationale: "offline",
+      sessionId: "s1",
+    });
+    await bridge.appendCheckpoint({
+      summary: "wired memory contract",
+      changedFiles: ["core/engine/tools/memory-search.ts"],
+      decisions: [],
+      openThreads: ["team parity"],
+      nextActions: ["run gate"],
+      sessionId: "s1",
+    });
+    await bridge.refreshRuntimeSnapshot();
+    const recall = await readFile(join(ltmDir, "runtime", "last-recall.md"), "utf8");
+    expect(recall).toContain("Prefer local Tier A memory");
+    expect(recall).toContain("wired memory contract");
+    expect(recall).toContain("run gate");
+    const ctx = JSON.parse(await readFile(join(ltmDir, "runtime", "active-context.json"), "utf8")) as {
+      next_actions: string[];
+      open_threads: Array<{ summary: string }>;
+    };
+    expect(ctx.next_actions).toContain("run gate");
+    expect(ctx.open_threads.some((t) => t.summary === "team parity")).toBe(true);
+  });
+
+  it("bi-temporal decision log: add, invalidate, list (active only by default)", async () => {
+    const ltmDir = join(ws, "ltm");
+    const bridge = createLtmBridge(ltmDir);
+    
+    // ADD two decisions
+    const dec1 = await bridge.addDecision({
+      decision: "Use PostgreSQL for production",
+      rationale: "scalability",
+      tags: ["database"],
+      sessionId: "s1",
+    });
+    const dec2 = await bridge.addDecision({
+      decision: "Use file-based fallback in Electron",
+      rationale: "zero-config for desktop",
+      tags: ["database", "electron"],
+      sessionId: "s1",
+    });
+    expect(dec1).toBe("dec_000001");
+    expect(dec2).toBe("dec_000002");
+    
+    // LIST: both active by default
+    let decisions = await bridge.listDecisions();
+    expect(decisions).toHaveLength(2);
+    expect(decisions[0]?.validTo).toBeNull();
+    expect(decisions[1]?.validTo).toBeNull();
+    
+    // INVALIDATE first decision
+    const invalidated = await bridge.invalidateDecision(dec1);
+    expect(invalidated).toBe(true);
+    
+    // LIST: only dec2 active now
+    decisions = await bridge.listDecisions();
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.id).toBe(dec2);
+    
+    // LIST with includeInvalidated: both present
+    const allDecisions = await bridge.listDecisions({ includeInvalidated: true });
+    expect(allDecisions).toHaveLength(2);
+    expect(allDecisions.find((d) => d.id === dec1)?.validTo).not.toBeNull();
+    expect(allDecisions.find((d) => d.id === dec2)?.validTo).toBeNull();
+    
+    // Try to invalidate already-invalidated decision (should return false)
+    const alreadyInvalidated = await bridge.invalidateDecision(dec1);
+    expect(alreadyInvalidated).toBe(false);
   });
 });

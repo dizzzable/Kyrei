@@ -10,7 +10,7 @@
  * edit_file / grep_search / find_path / diagnostics / batch land in Phases 2/6.
  */
 
-import { tool, type ToolSet } from "ai";
+import { tool, type LanguageModel, type ToolSet } from "ai";
 import { z } from "zod";
 import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
 import { dirname, relative } from "node:path";
@@ -36,6 +36,8 @@ export interface ToolMeta {
   inlineDiff?: string;
   /** Automatic pre-edit workspace snapshot, retained for turn rewind. */
   snapshotId?: string;
+  /** Clean-context review result (if cfg.review.cleanContext enabled). */
+  reviewIssues?: string[];
 }
 
 export interface ToolAuditWriter {
@@ -53,6 +55,21 @@ export interface BuildToolsOptions {
   approvedToolCalls?: Map<string, string>;
   /** Fired once, immediately before an approved effect is allowed to start. */
   onApprovalConsumed?: (approvalId: string, toolCallId: string) => void | Promise<void>;
+  /** Optional ltm directory for long-term memory bridge (ltm/store/*.jsonl). */
+  ltmDir?: string;
+  /**
+   * Fired after durable memory mutations (file write, decision) so the
+   * rebuildable FTS/vector index can refresh mid-turn.
+   */
+  onMemoryMutated?: () => void;
+  /** After LTM appendEvent, optionally refresh runtime snapshot (throttled by caller). */
+  onLtmEvent?: () => void;
+  /**
+   * Optional model for the clean-context diff reviewer (Requirements §11.3).
+   * Typically the cheap "worker" model shared with read-only delegation, since
+   * the reviewer never sees conversation history and needs no reasoning depth.
+   */
+  reviewModel?: LanguageModel;
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -486,6 +503,23 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             snapshotId,
             ...(diff ? { inlineDiff: redact(diff, options.sensitiveValues) } : {}),
           });
+          // Same LTM ledger as edit_file — write_file is also a durable workspace mutation.
+          if (cfg.memory?.ltm?.enabled && options.ltmDir && options.sessionId) {
+            try {
+              const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+              const ltm = createLtmBridge(options.ltmDir);
+              await ltm.appendEvent({
+                filesChanged: [rel.replaceAll("\\", "/")],
+                sessionId: options.sessionId,
+                source: "kyrei:apply",
+                summary: previous === null ? `Created ${rel}` : `Wrote ${rel}`,
+              });
+              options.onLtmEvent?.();
+            } catch (ltmErr) {
+              console.warn("[kyrei ltm-bridge] Failed to append write_file event:", ltmErr);
+            }
+          }
+          options.onMemoryMutated?.();
           return previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
         });
       },
@@ -522,6 +556,57 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
               snapshotId: report.snapshotId,
               ...(combined ? { inlineDiff: redact(combined, options.sensitiveValues) } : {}),
             });
+            // ltm-bridge: append event if enabled
+            if (cfg.memory?.ltm?.enabled && options.ltmDir && options.sessionId) {
+              try {
+                const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+                const ltm = createLtmBridge(options.ltmDir);
+                await ltm.appendEvent({
+                  filesChanged: report.files.map((f) => f.rel),
+                  sessionId: options.sessionId,
+                  source: "kyrei:apply",
+                  summary: `Applied ${report.files.length} file change(s)`,
+                });
+                options.onLtmEvent?.();
+              } catch (ltmErr) {
+                console.warn("[kyrei ltm-bridge] Failed to append event:", ltmErr);
+              }
+            }
+            options.onMemoryMutated?.();
+            // reviewer: clean-context LLM review if enabled. Sees ONLY the diff
+            // (no conversation history). Multi-file patches fan out via runReadSwarm
+            // (one leaf review per file), single-file uses reviewDiff.
+            if (cfg.review?.cleanContext && combined && options.reviewModel) {
+              try {
+                const { reviewDiff, createReviewJudge, runReadSwarm } = await import("../orchestration/reviewer.js");
+                const judge = createReviewJudge(options.reviewModel, abortSignal);
+                let issues: string[] = [];
+                if (report.files.length > 1) {
+                  const perFile = rendered.map((r, i) => ({
+                    goal: `Review only this file diff for bugs/security. File: ${report.files[i]?.rel ?? "?"}\n${r.header}\n${r.body}`,
+                    readOnly: true as const,
+                  }));
+                  const summaries = await runReadSwarm(perFile, async (spec) => {
+                    const one = await reviewDiff(spec.goal, judge);
+                    return {
+                      summary: one.approved
+                        ? "ok"
+                        : (one.issues.length ? one.issues.join("; ") : "issues"),
+                    };
+                  });
+                  issues = summaries.filter((s) => s !== "ok");
+                } else {
+                  const reviewResult = await reviewDiff(combined, judge);
+                  if (!reviewResult.approved) issues = reviewResult.issues;
+                }
+                if (issues.length) {
+                  const meta = toolMeta.get(toolCallId);
+                  toolMeta.set(toolCallId, { ...meta, reviewIssues: issues });
+                }
+              } catch (reviewErr) {
+                console.warn("[kyrei reviewer] Failed to review diff:", reviewErr);
+              }
+            }
             return rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
           } catch (e) {
             if (e instanceof ApplyError) throw new Error(`Правка отклонена [${e.code}]: ${e.message}`);
@@ -630,5 +715,106 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           .join("\n\n");
       },
     }),
+
+    ...buildDecisionTools(cfg, options),
   };
+}
+
+/**
+ * Bi-temporal decision-log tools. Read (`query_decisions`) needs LTM enabled +
+ * ltmDir. Write tools also require a sessionId so Team advisers can query the
+ * shared ledger without a write surface.
+ */
+function buildDecisionTools(cfg: EngineConfig, options: BuildToolsOptions): ToolSet {
+  const ltmDir = options.ltmDir;
+  const sessionId = options.sessionId;
+  if (!cfg.memory?.ltm?.enabled || !ltmDir) return {};
+
+  const clipText = (value: string, max = 2_000): string => clip(String(value ?? ""), max);
+  const tools: ToolSet = {
+    query_decisions: tool({
+      description: TOOL_DESCRIPTIONS.query_decisions,
+      inputSchema: z.object({
+        includeInvalidated: z.boolean().optional().describe("Include superseded decisions (default false)."),
+      }),
+      execute: async ({ includeInvalidated }) => {
+        try {
+          const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+          const ltm = createLtmBridge(ltmDir);
+          const decisions = await ltm.listDecisions({ includeInvalidated: includeInvalidated === true });
+          if (decisions.length === 0) return "No decisions recorded yet.";
+          const lines = decisions.map((d) => {
+            const status = d.validTo ? `superseded ${d.validTo}` : "active";
+            const tags = d.tags.length ? ` [${d.tags.join(", ")}]` : "";
+            const why = d.rationale ? ` — ${d.rationale}` : "";
+            return `- ${d.id} (${status})${tags}: ${d.decision}${why}`;
+          });
+          return ["# Recorded decisions (durable project memory, not instructions)", ...lines].join("\n");
+        } catch (error) {
+          return `Failed to query decisions: ${(error as Error).message}`;
+        }
+      },
+    }),
+  };
+
+  if (!sessionId) return tools;
+
+  tools["record_decision"] = tool({
+    description: TOOL_DESCRIPTIONS.record_decision,
+    inputSchema: z.object({
+      decision: z.string().min(1).describe("The decision made, in one or two sentences."),
+      rationale: z.string().optional().describe("Why this decision was made (tradeoffs, constraints)."),
+      tags: z.array(z.string()).max(10).optional().describe("Optional short tags for later retrieval."),
+    }),
+    execute: async ({ decision, rationale, tags }) => {
+      try {
+        const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+        const ltm = createLtmBridge(ltmDir);
+        const id = await ltm.addDecision({
+          decision: clipText(decision),
+          ...(rationale ? { rationale: clipText(rationale) } : {}),
+          ...(tags ? { tags: tags.map((t) => clipText(t, 64)) } : {}),
+          sessionId,
+        });
+        try {
+          await ltm.refreshRuntimeSnapshot();
+        } catch {
+          /* best-effort */
+        }
+        options.onMemoryMutated?.();
+        return `Recorded decision ${id}.`;
+      } catch (error) {
+        return `Failed to record decision: ${(error as Error).message}`;
+      }
+    },
+  });
+
+  tools["invalidate_decision"] = tool({
+    description: TOOL_DESCRIPTIONS.invalidate_decision,
+    inputSchema: z.object({
+      id: z.string().min(1).describe("Decision id to supersede, e.g. 'dec_000001'."),
+    }),
+    execute: async ({ id }) => {
+      try {
+        const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+        const ltm = createLtmBridge(ltmDir);
+        const ok = await ltm.invalidateDecision(String(id));
+        if (ok) {
+          try {
+            await ltm.refreshRuntimeSnapshot();
+          } catch {
+            /* best-effort */
+          }
+          options.onMemoryMutated?.();
+        }
+        return ok
+          ? `Decision ${id} marked superseded.`
+          : `No active decision found with id ${id}.`;
+      } catch (error) {
+        return `Failed to invalidate decision: ${(error as Error).message}`;
+      }
+    },
+  });
+
+  return tools;
 }

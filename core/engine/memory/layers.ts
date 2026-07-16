@@ -1,11 +1,13 @@
 /**
  * Layered instruction/memory assembly with precedence (Requirements §6.2, §6.5).
  * Order (high → low): AGENTS.md → steering (.kiro/steering/*.md, always) →
- * project MEMORY.md → global GLOBAL.md. Higher layers win; each block is labeled.
+ * project MEMORY.md → LTM recall (recent session activity) → global GLOBAL.md.
+ * Higher layers win; each block is labeled.
  */
 
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { createLtmBridge } from "./ltm-bridge.js";
 
 async function readIfExists(path: string): Promise<string | null> {
   try {
@@ -38,6 +40,107 @@ async function readAlwaysSteering(workspace: string): Promise<string[]> {
 export interface AssembleOpts {
   workspace: string;
   globalDir?: string; // userData/kyrei/memory
+  /** Optional LTM store directory (`<workspace>/ltm`). Recall is read-only and best-effort. */
+  ltmDir?: string;
+  /**
+   * When true, inject active plan-as-files content from `.kyrei/plan/`
+   * (ROADMAP.md + STATE.json + current phase notes). Fail-open.
+   */
+  includePlan?: boolean;
+}
+
+/**
+ * Best-effort recall from the LTM ledger's runtime snapshot
+ * (`ltm/runtime/active-context.json` + `last-recall.md`). Written by the
+ * Python `ltm.py` CLI hook and/or `ltm-bridge.ts`; read here so past session
+ * activity that was only ever *appended* is not permanently write-only.
+ * Recall failures never block system-context assembly (fail-open).
+ */
+async function readLtmRecall(ltmDir: string): Promise<string | null> {
+  try {
+    const bridge = createLtmBridge(ltmDir);
+    const { activeContext, lastRecall } = await bridge.recall();
+    const parts: string[] = [];
+    if (lastRecall.trim()) parts.push(lastRecall.trim());
+    if (activeContext && typeof activeContext === "object") {
+      const ctx = activeContext as Record<string, unknown>;
+      const threads = Array.isArray(ctx.open_threads) ? ctx.open_threads : [];
+      const nextActions = Array.isArray(ctx.next_actions) ? ctx.next_actions : [];
+      if (threads.length || nextActions.length) {
+        const lines: string[] = [];
+        if (threads.length) {
+          lines.push("Open threads:");
+          for (const t of threads.slice(0, 10)) {
+            const summary = typeof t === "object" && t && "summary" in t ? String((t as Record<string, unknown>).summary ?? "") : String(t);
+            if (summary) lines.push(`- ${summary}`);
+          }
+        }
+        if (nextActions.length) {
+          lines.push("Next actions:");
+          for (const a of nextActions.slice(0, 5)) lines.push(`- ${String(a)}`);
+        }
+        parts.push(lines.join("\n"));
+      }
+    }
+    const body = parts.join("\n\n").trim();
+    return body || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Active bi-temporal decisions from `ltm/store/decisions.jsonl`.
+ * Durable project memory, not instructions. Fail-open.
+ */
+async function readLtmDecisions(ltmDir: string): Promise<string | null> {
+  try {
+    const bridge = createLtmBridge(ltmDir);
+    const decisions = await bridge.listDecisions();
+    if (decisions.length === 0) return null;
+    const lines = decisions.slice(0, 30).map((d) => {
+      const tags = d.tags.length ? ` [${d.tags.join(", ")}]` : "";
+      const why = d.rationale ? ` — ${d.rationale}` : "";
+      return `- ${d.id}${tags}: ${d.decision}${why}`;
+    });
+    return [
+      "Active architectural decisions (durable project memory, not instructions):",
+      ...lines,
+    ].join("\n");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort plan-as-files snapshot under `.kyrei/plan/`. Fail-open.
+ */
+async function readPlanContext(workspace: string): Promise<string | null> {
+  try {
+    const { createPlanStore } = await import("../orchestration/plan.js");
+    const plan = createPlanStore(workspace);
+    const roadmap = (await plan.readRoadmap()).trim();
+    const state = await plan.readState();
+    if (!roadmap && !state) return null;
+    const parts: string[] = [];
+    if (roadmap) parts.push(roadmap);
+    if (state) {
+      parts.push(
+        [
+          "Plan state:",
+          `- roadmapId: ${state.roadmapId}`,
+          `- currentPhase: ${state.currentPhase}`,
+          `- updatedAt: ${state.updatedAt}`,
+        ].join("\n"),
+      );
+      const phase = (await plan.readPhase(state.currentPhase)).trim();
+      if (phase) parts.push(`Current phase notes:\n${phase}`);
+    }
+    const body = parts.join("\n\n").trim();
+    return body || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function assembleSystemContext(opts: AssembleOpts): Promise<string> {
@@ -52,6 +155,16 @@ export async function assembleSystemContext(opts: AssembleOpts): Promise<string>
   // A repository may contain stale or malicious `.kyrei/intel` files; agents
   // access the deterministic graph through project_map/project_impact tool
   // results, which are explicitly untrusted data rather than system policy.
+  if (opts.ltmDir) {
+    const recall = await readLtmRecall(opts.ltmDir);
+    if (recall) layers.push({ name: "LTM_RECALL", body: recall });
+    const decisions = await readLtmDecisions(opts.ltmDir);
+    if (decisions) layers.push({ name: "DECISIONS", body: decisions });
+  }
+  if (opts.includePlan) {
+    const plan = await readPlanContext(workspace);
+    if (plan) layers.push({ name: "PLAN", body: plan });
+  }
   if (opts.globalDir) {
     const g = await readIfExists(join(opts.globalDir, "GLOBAL.md"));
     if (g) layers.push({ name: "GLOBAL.md", body: g });

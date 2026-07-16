@@ -150,13 +150,44 @@ export interface ArtifactEvidenceRef extends EvidenceRefBase {
   readonly artifactDigest: string;
 }
 
+/**
+ * Applicable code change proposed by an implementation department.
+ * Carries raw patch text (bounded) so a deterministic action-executor can apply
+ * it without an LLM. origin is typically "reported" until apply succeeds.
+ */
+export interface PatchEvidenceRef extends EvidenceRefBase {
+  readonly kind: "patch";
+  /** Context-anchored patch body (parse-patch.ts format). */
+  readonly patch: string;
+  /** SHA-256 hex of the exact patch string. */
+  readonly patchDigest: string;
+}
+
 export type EvidenceRef =
   | FileEvidenceRef
   | CommandEvidenceRef
   | TestEvidenceRef
   | DiagnosticEvidenceRef
   | UrlEvidenceRef
-  | ArtifactEvidenceRef;
+  | ArtifactEvidenceRef
+  | PatchEvidenceRef;
+
+/** Deterministic receipt produced by workspace.apply (no LLM). */
+export interface ActionReceipt {
+  readonly workspaceDigest: string;
+  readonly workspaceDigestBefore: string;
+  readonly observedAt: string;
+  readonly patchDigest: string;
+  readonly appliedFiles: readonly string[];
+}
+
+/** Deterministic receipt produced by a truth-gate after trusted verification. */
+export interface TruthGateReceipt {
+  readonly workspaceDigest: string;
+  readonly observedAt: string;
+  /** Sorted unique SHA-256 digests of upstream action receipts. */
+  readonly actionReceiptDigests: readonly string[];
+}
 
 export interface ArtifactClaim {
   readonly id: string;

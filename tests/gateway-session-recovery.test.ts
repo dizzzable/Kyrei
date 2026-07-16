@@ -26,9 +26,21 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await server?.close();
+  try {
+    await server?.close();
+  } catch {
+    /* ignore */
+  }
   server = null;
-  await rm(dataDir, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (attempt === 7) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
 });
 
 async function start(options: Record<string, unknown>) {
@@ -513,6 +525,8 @@ describe("gateway active-turn durability", () => {
     try {
       await start({ engineLoader });
       const session = await createSession();
+      // Session create / mirror dual-write may load the engine once; clear before prompt.
+      engineLoader.mockClear();
       await sendPrompt(session.id);
       await entered;
       await expect(request("/api/cancel", {

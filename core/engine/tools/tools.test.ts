@@ -544,3 +544,64 @@ describe("tools — batch (partial success, read-only only)", () => {
     expect(out).toContain("не read-only");
   });
 });
+
+describe("tools — bi-temporal decision log", () => {
+  it("is absent unless LTM is enabled; query works without session, writes need session", () => {
+    const off = buildTools(ws, {
+      ...DEFAULT_ENGINE_CONFIG,
+      memory: { ...DEFAULT_ENGINE_CONFIG.memory, ltm: { enabled: false } },
+    }, new Map<string, ToolMeta>(), { sessionId: "s1", ltmDir: join(ws, "ltm") });
+    expect(off["record_decision"]).toBeUndefined();
+    expect(off["query_decisions"]).toBeUndefined();
+    const cfg = { ...DEFAULT_ENGINE_CONFIG, memory: { ...DEFAULT_ENGINE_CONFIG.memory, ltm: { enabled: true } } };
+    const noSession = buildTools(ws, cfg, new Map<string, ToolMeta>(), { ltmDir: join(ws, "ltm") });
+    expect(noSession["record_decision"]).toBeUndefined();
+    expect(noSession["query_decisions"]).toBeDefined();
+  });
+
+  it("records, queries, and supersedes decisions on the durable ledger", async () => {
+    const cfg = { ...DEFAULT_ENGINE_CONFIG, memory: { ...DEFAULT_ENGINE_CONFIG.memory, ltm: { enabled: true } } };
+    const decisionTools = buildTools(ws, cfg, new Map<string, ToolMeta>(), {
+      sessionId: "s1",
+      ltmDir: join(ws, "ltm"),
+    });
+    expect(decisionTools["record_decision"]).toBeDefined();
+
+    const recorded = await execFrom(decisionTools, "record_decision", {
+      decision: "Use SQLite for the code graph",
+      rationale: "No Docker dependency",
+      tags: ["arch"],
+    });
+    expect(recorded).toContain("dec_000001");
+
+    const listed = await execFrom(decisionTools, "query_decisions", {});
+    expect(listed).toContain("dec_000001");
+    expect(listed).toContain("Use SQLite for the code graph");
+    expect(listed).toContain("active");
+
+    const invalidated = await execFrom(decisionTools, "invalidate_decision", { id: "dec_000001" });
+    expect(invalidated).toContain("superseded");
+
+    const activeOnly = await execFrom(decisionTools, "query_decisions", {});
+    expect(activeOnly).toBe("No decisions recorded yet.");
+
+    const withHistory = await execFrom(decisionTools, "query_decisions", { includeInvalidated: true });
+    expect(withHistory).toContain("dec_000001");
+    expect(withHistory).toContain("superseded");
+
+    const raw = await readFile(join(ws, "ltm", "store", "decisions.jsonl"), "utf8");
+    expect(raw).toContain("Use SQLite for the code graph");
+  });
+
+  it("appends an LTM event on write_file as well as edit_file", async () => {
+    const cfg = { ...DEFAULT_ENGINE_CONFIG, memory: { ...DEFAULT_ENGINE_CONFIG.memory, ltm: { enabled: true } } };
+    const tools = buildTools(ws, cfg, new Map<string, ToolMeta>(), {
+      sessionId: "s1",
+      ltmDir: join(ws, "ltm"),
+    });
+    await execFrom(tools, "write_file", { path: "notes.txt", content: "hello memory" });
+    const events = await readFile(join(ws, "ltm", "store", "events.jsonl"), "utf8");
+    expect(events).toContain("notes.txt");
+    expect(events).toContain("Created notes.txt");
+  });
+});

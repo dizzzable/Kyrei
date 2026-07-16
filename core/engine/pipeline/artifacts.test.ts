@@ -291,4 +291,67 @@ describe("artifact envelopes", () => {
       expect.objectContaining({ code: "invalid_metric", field: "metrics.durationMs" }),
     ]));
   });
+
+  function samplePatch(body = "+hello\n"): string {
+    return `*** Begin Patch\n*** Add File: notes/hello.txt\n${body}*** End Patch\n`;
+  }
+
+  function patchDigest(patch: string): string {
+    return createHash("sha256").update(patch, "utf8").digest("hex");
+  }
+
+  function artifactWithPatch(patch: string, digest = patchDigest(patch)): ArtifactEnvelope {
+    return {
+      ...validArtifact(),
+      kind: "department",
+      evidence: [
+        {
+          id: "applicable-patch",
+          kind: "patch",
+          origin: "reported",
+          summary: "Applicable implementation patch",
+          capturedAt: "2026-07-13T10:00:00.000Z",
+          workspaceDigest: WORKSPACE_DIGEST,
+          patch,
+          patchDigest: digest,
+        },
+      ],
+      claims: [],
+      checks: [],
+    };
+  }
+
+  it("accepts patch evidence and round-trips through createArtifactEnvelope", () => {
+    const patch = samplePatch("+line one\n+line two\n");
+    const source = artifactWithPatch(patch);
+    expect(validateArtifactEnvelope(source)).toEqual({ valid: true, issues: [] });
+    const created = createArtifactEnvelope(source);
+    expect(created.evidence[0]).toMatchObject({
+      kind: "patch",
+      patch,
+      patchDigest: patchDigest(patch),
+    });
+    expect(created.evidence[0]).not.toBe(source.evidence[0]);
+  });
+
+  it("rejects patch evidence that is too large, digests mismatch, empty, or escapes workspace", () => {
+    const valid = samplePatch();
+    const oversized = samplePatch(`+${"x".repeat(70_000)}\n`);
+    expect(validateArtifactEnvelope(artifactWithPatch(oversized)).issues).toContainEqual(
+      expect.objectContaining({ code: "field_too_large", field: "evidence.patch" }),
+    );
+    expect(validateArtifactEnvelope(artifactWithPatch(valid, "0".repeat(64))).issues).toContainEqual(
+      expect.objectContaining({ code: "invalid_digest", field: "evidence.patchDigest" }),
+    );
+    expect(validateArtifactEnvelope(artifactWithPatch("*** Begin Patch\n*** End Patch\n")).issues)
+      .toContainEqual(expect.objectContaining({ code: "invalid_evidence", field: "evidence.patch" }));
+    const absolute = "*** Begin Patch\n*** Add File: /etc/passwd\n+x\n*** End Patch\n";
+    expect(validateArtifactEnvelope(artifactWithPatch(absolute)).issues).toContainEqual(
+      expect.objectContaining({ code: "invalid_evidence", field: "evidence.patch.path" }),
+    );
+    const parent = "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch\n";
+    expect(validateArtifactEnvelope(artifactWithPatch(parent)).issues).toContainEqual(
+      expect.objectContaining({ code: "invalid_evidence", field: "evidence.patch.path" }),
+    );
+  });
 });

@@ -232,3 +232,95 @@ export async function restoreSnapshotSequence(options) {
   transaction.commit();
   return transaction.result;
 }
+
+/**
+ * Read one workspace-relative file's pre-edit payload from a snapshot (utf8).
+ * @returns {{ existed: boolean, text: string, target: string, rel: string }}
+ */
+export async function readSnapshotRelativeFile({ workspace, snapshotId, relPath }) {
+  if (!workspace || !snapshotId || !relPath) fail("checkpoint_path_invalid");
+  const workspaceInfo = await info(workspace);
+  if (!workspaceInfo?.isDirectory()) fail("checkpoint_workspace_invalid");
+  const workspaceCanonical = await realpath(workspace);
+  const snapshotRoot = join(workspaceCanonical, ".kyrei", "snapshots");
+  const rootInfo = await info(snapshotRoot);
+  if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) fail("checkpoint_store_unavailable");
+  const snapshotRootCanonical = await realpath(snapshotRoot);
+  if (!inside(workspaceCanonical, snapshotRootCanonical)) fail("checkpoint_store_invalid");
+  const budget = { files: 0, bytes: 0 };
+  const manifest = await readManifest(snapshotRootCanonical, workspaceCanonical, snapshotId, budget);
+  const want = String(relPath).replaceAll("\\", "/");
+  const row = manifest.files.find((f) => f.rel === want || f.rel.endsWith(`/${want}`) || want.endsWith(`/${f.rel}`));
+  if (!row) fail("checkpoint_path_invalid");
+  return {
+    existed: row.existed,
+    text: row.existed && row.bytes ? row.bytes.toString("utf8") : "",
+    target: row.target,
+    rel: row.rel,
+  };
+}
+
+/**
+ * Restore only the listed relative paths from one snapshot (path-scoped reject).
+ * Safer for multi-file snapshots than full-manifest restore when only one path is rejected.
+ */
+export async function restoreSnapshotPaths({ workspace, snapshotId, relPaths }) {
+  const paths = Array.isArray(relPaths)
+    ? [...new Set(relPaths.map((p) => String(p ?? "").replaceAll("\\", "/")).filter(Boolean))]
+    : [];
+  if (!paths.length) {
+    return { restoredSnapshots: 0, restoredFiles: 0 };
+  }
+  if (!workspace || !snapshotId) fail("checkpoint_path_invalid");
+  const workspaceInfo = await info(workspace);
+  if (!workspaceInfo?.isDirectory()) fail("checkpoint_workspace_invalid");
+  const workspaceCanonical = await realpath(workspace);
+  const snapshotRoot = join(workspaceCanonical, ".kyrei", "snapshots");
+  const rootInfo = await info(snapshotRoot);
+  if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) fail("checkpoint_store_unavailable");
+  const snapshotRootCanonical = await realpath(snapshotRoot);
+  if (!inside(workspaceCanonical, snapshotRootCanonical)) fail("checkpoint_store_invalid");
+  const budget = { files: 0, bytes: 0 };
+  const manifest = await readManifest(snapshotRootCanonical, workspaceCanonical, snapshotId, budget);
+  const want = new Set(paths);
+  const files = manifest.files.filter((f) =>
+    want.has(f.rel) || [...want].some((p) => f.rel === p || f.rel.endsWith(`/${p}`) || p.endsWith(`/${f.rel}`)),
+  );
+  if (!files.length) fail("checkpoint_path_invalid");
+  const withWs = files.map((file) => ({ ...file, workspaceCanonical }));
+  const captured = await captureCurrent(withWs);
+  try {
+    for (const file of withWs) {
+      await assertSafeTargetParents(workspaceCanonical, file.target);
+      await writeState(file.target, file.existed ? file.bytes : null);
+    }
+  } catch (error) {
+    for (const [target, content] of captured) {
+      await writeState(target, content).catch(() => undefined);
+    }
+    throw error;
+  }
+  return {
+    restoredSnapshots: 1,
+    restoredFiles: new Set(withWs.map((f) => f.target)).size,
+  };
+}
+
+/**
+ * Write utf8 text to a workspace-relative path with the same path safety as snapshots.
+ */
+export async function writeWorkspaceRelativeFile({ workspace, relPath, text }) {
+  if (!workspace || typeof relPath !== "string" || !relPath) fail("checkpoint_path_invalid");
+  if (typeof text !== "string") fail("checkpoint_path_invalid");
+  const workspaceInfo = await info(workspace);
+  if (!workspaceInfo?.isDirectory()) fail("checkpoint_workspace_invalid");
+  const workspaceCanonical = await realpath(workspace);
+  const { rel, target } = validatedRelativePath(relPath.replaceAll("\\", "/"), workspaceCanonical);
+  void rel;
+  await assertSafeTargetParents(workspaceCanonical, target);
+  const current = await info(target);
+  if (current?.isSymbolicLink()) fail("checkpoint_target_linked");
+  if (current && !current.isFile()) fail("checkpoint_target_invalid");
+  await writeState(target, Buffer.from(text, "utf8"));
+  return { rel: relPath.replaceAll("\\", "/"), target };
+}

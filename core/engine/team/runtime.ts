@@ -15,11 +15,15 @@ import { resolve as resolveModel } from "../provider/registry.js";
 import { buildTools } from "../tools/index.js";
 import { buildWebTools } from "../tools/web.js";
 import { buildGBrainTools } from "../tools/gbrain.js";
+import { buildPlanningTools } from "../tools/planning.js";
+import { buildOpenVikingTools } from "../tools/openviking.js";
+import { buildMemorySearchTools } from "../tools/memory-search.js";
 import { buildSkillTools } from "../tools/skills.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createAuditLog } from "../security/audit.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { assembleSystemContext } from "../memory/layers.js";
+import type { MemoryStore, VectorStore } from "../data/ports.js";
 import { selectTeamRoleTools } from "./capabilities.js";
 import { createTeamMemberRunner } from "./member-runner.js";
 import { createTeamResearchCacheRegistry } from "./research-cache.js";
@@ -55,6 +59,11 @@ export interface CreateTeamRoleExecutorsOptions {
   readonly providerAttemptLifecycle?: ProviderAttemptLifecycle;
   /** Pipeline departments force the same Team runtime into a read-only mode. */
   readonly readOnly?: boolean;
+  /** Shared rebuildable FTS projection from the parent turn (read-only for team). */
+  readonly memoryStore?: MemoryStore;
+  readonly vectorStore?: VectorStore;
+  readonly indexBackend?: string;
+  readonly globalMemoryDir?: string;
 }
 
 /** Pure capability clamp used by pipeline departments before any tool is built. */
@@ -92,7 +101,12 @@ export async function createTeamRoleExecutors(
   let projectContext = options.projectContext;
   if (projectContext === undefined && workspaceReady) {
     try {
-      const assembled = await assembleSystemContext({ workspace: options.workspace! });
+      const assembled = await assembleSystemContext({
+        workspace: options.workspace!,
+        ...(options.config.memory?.ltm?.enabled ? { ltmDir: join(options.workspace!, "ltm") } : {}),
+        ...(options.config.planning?.enabled ? { includePlan: true } : {}),
+        ...(options.globalMemoryDir ? { globalDir: options.globalMemoryDir } : {}),
+      });
       projectContext = assembled.trim() ? assembled : undefined;
     } catch (error) {
       console.warn("[kyrei v2] Team project context disabled:", error);
@@ -130,13 +144,21 @@ export async function createTeamRoleExecutors(
       ...(options.readSkillDocument ? { readDocument: options.readSkillDocument } : {}),
     });
     const canReadWorkspace = role.capabilities.includes("workspace.read");
+    const canReadMemory = role.capabilities.includes("memory.read");
     const roleTools = (signal: AbortSignal): ToolSet => {
+      const ltmDir =
+        options.config.memory?.ltm?.enabled && workspaceReady
+          ? join(options.workspace!, "ltm")
+          : undefined;
+      // Session id is passed for ledger correlation; decision *writes* stay
+      // blocked by the capability allowlist (record/invalidate not listed).
       const scopedWorkspaceTools = canReadWorkspace && workspaceReady
         ? buildTools(options.workspace!, options.config, new Map(), {
             abortSignal: signal,
             audit,
             sessionId: options.sessionId,
             sensitiveValues: options.sensitiveValues,
+            ...(ltmDir ? { ltmDir } : {}),
           })
         : undefined;
       const scopedRetrieveTools = canReadWorkspace ? retrieveTools : {};
@@ -150,18 +172,62 @@ export async function createTeamRoleExecutors(
             }),
           )
         : {};
-      const scopedBrainTools = role.capabilities.includes("memory.read")
+      const scopedBrainTools = canReadMemory
         ? buildGBrainTools(options.config.memory.gbrain, {
             signal,
             maxModelOutputChars: options.config.maxToolOutput,
           })
         : {};
+      const scopedPlanningTools =
+        (canReadWorkspace || canReadMemory) && workspaceReady && options.config.planning?.enabled
+          ? buildPlanningTools({
+              workspace: options.workspace!,
+              maxModelOutputChars: options.config.maxToolOutput,
+            })
+          : {};
+      const scopedOpenVikingTools = canReadMemory
+        ? buildOpenVikingTools(
+            {
+              enabled: Boolean(options.config.memory.openviking?.enabled),
+              ...(options.config.memory.openviking?.baseURL
+                ? { baseURL: options.config.memory.openviking.baseURL }
+                : {}),
+            },
+            { maxModelOutputChars: options.config.maxToolOutput },
+          )
+        : {};
+      // Decision tools without a session still expose query_decisions; when a
+      // session id is present writes exist on the ToolSet but are allowlist-denied.
+      const scopedDecisionTools =
+        canReadMemory && workspaceReady && options.config.memory?.ltm?.enabled
+          ? buildTools(options.workspace!, options.config, new Map(), {
+              abortSignal: signal,
+              sessionId: options.sessionId,
+              ...(ltmDir ? { ltmDir } : {}),
+            })
+          : {};
+      const scopedMemorySearch =
+        canReadMemory && workspaceReady
+          ? buildMemorySearchTools({
+              workspace: options.workspace!,
+              ...(ltmDir ? { ltmDir, ltmEnabled: true } : { ltmEnabled: false }),
+              planningEnabled: Boolean(options.config.planning?.enabled),
+              maxModelOutputChars: options.config.maxToolOutput,
+              indexBackend: options.indexBackend ?? "off",
+              ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
+              ...(options.vectorStore ? { vectorStore: options.vectorStore } : {}),
+            })
+          : {};
       return selectTeamRoleTools(
         role.capabilities,
         scopedWorkspaceTools,
         scopedRetrieveTools,
         scopedWebTools,
         scopedBrainTools,
+        scopedPlanningTools,
+        scopedOpenVikingTools,
+        scopedDecisionTools,
+        scopedMemorySearch,
         assignedSkillTools,
       );
     };

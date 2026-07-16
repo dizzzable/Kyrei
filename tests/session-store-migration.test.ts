@@ -16,11 +16,12 @@ describe("session store localization migration", () => {
     });
 
     expect(migrated.schemaVersion).toBe(7);
+    // normalizeSessionRecord always materializes archived: false for active chats.
     expect(migrated.sessions).toEqual([
-      { id: "empty-ru", title: "" },
-      { id: "empty-en", title: "" },
-      { id: "used", title: "New session" },
-      { id: "custom", title: "My session" },
+      { id: "empty-ru", title: "", archived: false },
+      { id: "empty-en", title: "", archived: false },
+      { id: "used", title: "New session", archived: false },
+      { id: "custom", title: "My session", archived: false },
     ]);
   });
 
@@ -35,8 +36,15 @@ describe("session store localization migration", () => {
       messages: {},
     });
     expect(migrated.sessions).toEqual([
-      { id: "valid", title: "Chat", providerId: "provider", modelId: "model", providerAccountId: "backup-1" },
-      { id: "invalid", title: "Chat" },
+      {
+        id: "valid",
+        title: "Chat",
+        providerId: "provider",
+        modelId: "model",
+        providerAccountId: "backup-1",
+        archived: false,
+      },
+      { id: "invalid", title: "Chat", archived: false },
     ]);
   });
 
@@ -53,6 +61,7 @@ describe("session store localization migration", () => {
       id: "session",
       providerId: "provider",
       modelId: "model",
+      archived: false,
     });
   });
 

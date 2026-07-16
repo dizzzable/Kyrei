@@ -6,6 +6,8 @@
  * layer; a department stores only a Team profile id.
  */
 
+import { createHash } from "node:crypto";
+
 export const PIPELINE_VERSION = 1;
 export const PIPELINE_STAGE_KINDS = ["department", "approval", "action", "truth-gate"];
 export const PIPELINE_ACTIONS = ["workspace.apply"];
@@ -29,11 +31,13 @@ export const DEFAULT_STAGE_RETRY = Object.freeze({
 
 export const MAX_PIPELINE_DEFINITIONS = 256;
 export const MAX_PIPELINE_STAGES = 256;
+export const MAX_TRUTH_GATE_CHECKS = 32;
 
 const MAX_DEFINITION_NAME = 160;
 const MAX_STAGE_NAME = 160;
 const MAX_ACTION_ID = 160;
 const MAX_STAGE_REFERENCES = 128;
+const MAX_CHECK_COMMAND = 512;
 const MAX_REVISION = 2_147_483_647;
 const MAX_GENERATION = Number.MAX_SAFE_INTEGER;
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -134,6 +138,40 @@ function normalizeStringList(value, maxItems, maxLength) {
   return result;
 }
 
+/**
+ * Truth-gate check pins. testDigest is frozen at normalize time from
+ * { ecosystem, command, cwdPolicy } so runtime can detect config drift.
+ */
+function normalizeTruthGateChecks(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const seen = new Set();
+  const checks = [];
+  for (const raw of value.slice(0, MAX_TRUTH_GATE_CHECKS)) {
+    const source = object(raw);
+    const id = cleanText(source.id, 64);
+    const command = cleanText(source.command, MAX_CHECK_COMMAND);
+    const ecosystem = cleanText(source.ecosystem, 64);
+    if (!id || !command || seen.has(id)) return null;
+    seen.add(id);
+    const pin = {
+      ecosystem: ecosystem || "custom",
+      command,
+      cwdPolicy: "workspace-root",
+    };
+    const testDigest = createHash("sha256")
+      .update(JSON.stringify(pin))
+      .digest("hex");
+    checks.push({
+      id,
+      command,
+      ...(ecosystem ? { ecosystem } : {}),
+      testDigest,
+    });
+  }
+  return checks;
+}
+
 function teamProfileIds(teamProfiles) {
   const ids = new Set();
   for (const profile of Array.isArray(teamProfiles) ? teamProfiles : []) {
@@ -171,6 +209,17 @@ function normalizeStage(value, index, ids) {
   if (kind === "action" && (!action || !ACTION_ID_PATTERN.test(action) || !ACTION_SET.has(action))) {
     issues.push("pipeline_stage_action_invalid");
   }
+  let checks;
+  if (kind === "truth-gate") {
+    if (source.checks !== undefined) {
+      checks = normalizeTruthGateChecks(source.checks);
+      if (checks === null) issues.push("pipeline_stage_checks_invalid");
+    } else {
+      checks = [];
+    }
+  } else if (source.checks !== undefined) {
+    issues.push("pipeline_stage_fields_invalid");
+  }
 
   return {
     stage: {
@@ -182,6 +231,7 @@ function normalizeStage(value, index, ids) {
       retry: normalizeRetry(source.retry),
       ...(kind === "department" ? { teamProfileId } : {}),
       ...(kind === "action" ? { action } : {}),
+      ...(kind === "truth-gate" ? { checks: checks ?? [] } : {}),
     },
     issues,
   };
@@ -228,6 +278,33 @@ function hasAncestor(startId, predicate, byId, stopPredicate = () => false) {
     if (!stage) continue;
     if (predicate(stage)) return true;
     if (!stopPredicate(stage)) pending.push(...stage.dependsOn);
+  }
+  return false;
+}
+
+function countAncestors(startId, predicate, byId) {
+  const seen = new Set();
+  const pending = [...(byId.get(startId)?.dependsOn ?? [])];
+  let count = 0;
+  while (pending.length) {
+    const stageId = pending.pop();
+    if (seen.has(stageId)) continue;
+    seen.add(stageId);
+    const stage = byId.get(stageId);
+    if (!stage) continue;
+    if (predicate(stage)) count += 1;
+    pending.push(...stage.dependsOn);
+  }
+  return count;
+}
+
+function actionHasDirectDepartmentApproval(stage, byId) {
+  for (const dependencyId of stage.dependsOn) {
+    const dependency = byId.get(dependencyId);
+    if (dependency?.kind !== "approval") continue;
+    if (dependency.dependsOn.some((id) => byId.get(id)?.kind === "department")) {
+      return true;
+    }
   }
   return false;
 }
@@ -320,14 +397,25 @@ function definitionViolation(definition, availableProfiles) {
         byId,
         dependents,
       );
-      if (!approvedSinceLastGate || !hasTruthGateAfter || stage.retry.maxAttempts !== 1) {
+      const hasDirectDepartmentApproval = actionHasDirectDepartmentApproval(stage, byId);
+      if (
+        !approvedSinceLastGate
+        || !hasTruthGateAfter
+        || !hasDirectDepartmentApproval
+        || stage.retry.maxAttempts !== 1
+      ) {
         return "pipeline_transition_unsafe";
       }
     }
 
     if (stage.kind === "truth-gate") {
-      const checksAnAction = hasAncestor(stage.id, (candidate) => candidate.kind === "action", byId);
-      if (!checksAnAction) return "pipeline_transition_unsafe";
+      const actionAncestors = countAncestors(
+        stage.id,
+        (candidate) => candidate.kind === "action",
+        byId,
+      );
+      // Exactly one action ancestor: scalar requiredActionDigest stays unambiguous.
+      if (actionAncestors !== 1) return "pipeline_transition_unsafe";
     }
   }
 
@@ -494,13 +582,24 @@ function validateStage(value, availableProfiles) {
     const profileId = requireId(source.teamProfileId, "pipeline_stage_profile_invalid");
     if (!availableProfiles.has(profileId)) throw new PipelineConfigError("pipeline_stage_profile_unavailable");
     if (source.action !== undefined) throw new PipelineConfigError("pipeline_stage_action_invalid");
+    if (source.checks !== undefined) throw new PipelineConfigError("pipeline_stage_fields_invalid");
   } else if (source.kind === "action") {
     validateRequiredText(source.action, MAX_ACTION_ID, "pipeline_stage_action_invalid");
     if (!ACTION_ID_PATTERN.test(source.action.trim()) || !ACTION_SET.has(source.action.trim())) {
       throw new PipelineConfigError("pipeline_stage_action_invalid");
     }
     if (source.teamProfileId !== undefined) throw new PipelineConfigError("pipeline_stage_profile_invalid");
-  } else if (source.teamProfileId !== undefined || source.action !== undefined) {
+    if (source.checks !== undefined) throw new PipelineConfigError("pipeline_stage_fields_invalid");
+  } else if (source.kind === "truth-gate") {
+    if (source.teamProfileId !== undefined || source.action !== undefined) {
+      throw new PipelineConfigError("pipeline_stage_fields_invalid");
+    }
+    if (source.checks !== undefined) {
+      if (normalizeTruthGateChecks(source.checks) === null) {
+        throw new PipelineConfigError("pipeline_stage_checks_invalid");
+      }
+    }
+  } else if (source.teamProfileId !== undefined || source.action !== undefined || source.checks !== undefined) {
     throw new PipelineConfigError("pipeline_stage_fields_invalid");
   }
 }
@@ -609,11 +708,19 @@ export function createDefaultCodingPipeline(profileIds) {
         retry: { ...DEFAULT_STAGE_RETRY, maxAttempts: 2 },
       },
       {
+        id: "approve-implementation",
+        name: "Approve implementation",
+        kind: "approval",
+        dependsOn: ["implementation"],
+        allowedHelpFrom: [],
+        retry: { ...DEFAULT_STAGE_RETRY },
+      },
+      {
         id: "apply-changes",
         name: "Apply changes",
         kind: "action",
         action: "workspace.apply",
-        dependsOn: ["implementation"],
+        dependsOn: ["approve-implementation"],
         allowedHelpFrom: [],
         retry: { ...DEFAULT_STAGE_RETRY },
       },
@@ -633,6 +740,9 @@ export function createDefaultCodingPipeline(profileIds) {
         dependsOn: ["verification"],
         allowedHelpFrom: [],
         retry: { ...DEFAULT_STAGE_RETRY },
+        checks: [
+          { id: "unit", command: "npm test --silent", ecosystem: "node" },
+        ],
       },
     ],
     limits: { ...DEFAULT_PIPELINE_LIMITS },

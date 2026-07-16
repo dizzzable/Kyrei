@@ -102,8 +102,15 @@ function sourceReceipts(value: unknown): TeamSourceReceipt[] {
   return receipts;
 }
 
+const MAX_APPLICABLE_PATCH_BYTES = 64 * 1_024;
+
 function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamArtifact): TeamArtifact {
   const sources = sourceReceipts(value?.sources);
+  const applicablePatch = typeof value?.applicablePatch === "string"
+    && value.applicablePatch.length > 0
+    && Buffer.byteLength(value.applicablePatch, "utf8") <= MAX_APPLICABLE_PATCH_BYTES
+    ? value.applicablePatch
+    : undefined;
   return {
     taskId,
     summary: compact(value?.summary) || "No summary returned.",
@@ -122,6 +129,7 @@ function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamAr
     validation: stringList(value?.validation),
     uncertainties: stringList(value?.uncertainties),
     whatWasNotChecked: stringList(value?.whatWasNotChecked),
+    ...(applicablePatch ? { applicablePatch } : {}),
     ...(sources.length ? { sources } : {}),
     ...(value?.metrics
       ? {

@@ -30,9 +30,10 @@ interface ActivityRailProps {
   workingId?: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
-  onDelete: (id: string) => void;
+  onArchive: (id: string) => void;
+  onFork?: (id: string) => void;
   onRename: (id: string, title: string) => void;
-  onOpenActivity: (id: Exclude<ActivityId, "sessions" | "messaging" | "artifacts">) => void;
+  onOpenActivity: (id: Exclude<ActivityId, "sessions">) => void;
   onHome: () => void;
   onOpenSettings: () => void;
   onOpenPalette: () => void;
@@ -44,7 +45,8 @@ export function ActivityRail({
   workingId,
   onSelect,
   onNew,
-  onDelete,
+  onArchive,
+  onFork,
   onRename,
   onOpenActivity,
   onHome,
@@ -67,7 +69,7 @@ export function ActivityRail({
             <button
               key={item.id}
               onClick={() => {
-                if (!unavailable) onOpenActivity(item.id as Exclude<ActivityId, "sessions" | "messaging" | "artifacts">);
+                if (!unavailable) onOpenActivity(item.id as Exclude<ActivityId, "sessions">);
               }}
               disabled={unavailable}
               className="activity-nav-row disabled:cursor-not-allowed disabled:opacity-45"
@@ -86,7 +88,8 @@ export function ActivityRail({
         currentId={currentId}
         workingId={workingId}
         onSelect={onSelect}
-        onDelete={onDelete}
+        onArchive={onArchive}
+        onFork={onFork}
         onRename={onRename}
       />
 

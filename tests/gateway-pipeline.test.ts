@@ -395,59 +395,61 @@ describe("gateway Pipeline v1 control plane", () => {
     server = await startGateway({
       dataDir,
       preferredPort: 0,
-      engineLoader: async () => ({
-        runKyreiChat: async () => ({ text: "done", parts: [] }),
-        listModels: () => [],
-        runTeamDepartment: async (input: Record<string, unknown>) => {
-          calls.push(input);
-          const team = input.team as {
-            roles: Array<{ target: { providerId: string; accountId?: string; model: string } }>;
-          };
-          const lifecycle = input.providerAttemptLifecycle as {
-            acquire(target: Record<string, unknown>): unknown | null;
-            release(handle: unknown, outcome: Record<string, unknown>): void;
-          };
-          const roleTarget = team.roles[0]!.target;
-          const attemptTarget = {
-            providerId: roleTarget.providerId,
-            ...(roleTarget.accountId ? { accountId: roleTarget.accountId } : {}),
-            modelId: roleTarget.model,
-          };
-          const lease = lifecycle.acquire(attemptTarget);
-          if (!lease) throw new Error("pipeline provider capacity unavailable");
-          lifecycle.release(lease, { ...attemptTarget, outcome: "success", phase: "stream" });
-          const stageId = String(input.stageId);
-          const artifact = {
-            taskId: `task-${stageId}`,
-            summary: `Structured ${stageId} result`,
-            provenance: ["model structured response"],
-            confidence: 0.8,
-            evidence: [`reported ${stageId} evidence`],
-            validation: [`reviewed ${stageId}`],
-            uncertainties: ["No deterministic verifier has run."],
-            whatWasNotChecked: ["No workspace mutation was attempted."],
-          };
-          return {
-            runId: `team-${stageId}`,
-            artifact,
-            metrics: {
-              inputTokens: 17,
-              outputTokens: 5,
-              totalTokens: 22,
-              costUsd: 0.01,
-              providerCalls: 4,
-              unmeteredProviderCalls: 1,
-            },
-            taskResults: [{
-              status: "succeeded",
-              artifact: {
-                ...artifact,
-                metrics: { inputTokens: 7, outputTokens: 3 },
+      engineLoader: async () => {
+        const engine = await import("../core/engine/.dist/index.mjs");
+        return {
+          ...engine,
+          runTeamDepartment: async (input: Record<string, unknown>) => {
+            calls.push(input);
+            const team = input.team as {
+              roles: Array<{ target: { providerId: string; accountId?: string; model: string } }>;
+            };
+            const lifecycle = input.providerAttemptLifecycle as {
+              acquire(target: Record<string, unknown>): unknown | null;
+              release(handle: unknown, outcome: Record<string, unknown>): void;
+            };
+            const roleTarget = team.roles[0]!.target;
+            const attemptTarget = {
+              providerId: roleTarget.providerId,
+              ...(roleTarget.accountId ? { accountId: roleTarget.accountId } : {}),
+              modelId: roleTarget.model,
+            };
+            const lease = lifecycle.acquire(attemptTarget);
+            if (!lease) throw new Error("pipeline provider capacity unavailable");
+            lifecycle.release(lease, { ...attemptTarget, outcome: "success", phase: "stream" });
+            const stageId = String(input.stageId);
+            const artifact = {
+              taskId: `task-${stageId}`,
+              summary: `Structured ${stageId} result`,
+              provenance: ["model structured response"],
+              confidence: 0.8,
+              evidence: [`reported ${stageId} evidence`],
+              validation: [`reviewed ${stageId}`],
+              uncertainties: ["No deterministic verifier has run."],
+              whatWasNotChecked: ["No workspace mutation was attempted."],
+            };
+            return {
+              runId: `team-${stageId}`,
+              artifact,
+              metrics: {
+                inputTokens: 17,
+                outputTokens: 5,
+                totalTokens: 22,
+                costUsd: 0.01,
+                providerCalls: 4,
+                unmeteredProviderCalls: 1,
               },
-            }],
-          };
-        },
-      }),
+              taskResults: [{
+                status: "succeeded",
+                artifact: {
+                  ...artifact,
+                  metrics: { inputTokens: 7, outputTokens: 3 },
+                },
+              }],
+            };
+          },
+        };
+      },
     });
     await configureOrganization();
     const created = await request<{ run: { runId: string } }>("/api/pipeline-runs", {
@@ -495,15 +497,36 @@ describe("gateway Pipeline v1 control plane", () => {
       method: "POST",
       body: JSON.stringify({ stageId: "approve-plan", status: "approved", reason: "Reviewed" }),
     });
-    const blocked = await waitForPipelineRun<any>(
+    const awaitingImplApproval = await waitForPipelineRun<any>(
       created.run.runId,
-      (run) => run.status === "blocked",
+      (run) => run.status === "awaiting_approval"
+        && run.stages.find((stage: any) => stage.id === "implementation")?.status === "completed",
     );
-    expect(blocked.stages.find((stage: any) => stage.id === "implementation")).toMatchObject({ status: "completed" });
-    expect(blocked.stages.find((stage: any) => stage.id === "apply-changes")).toMatchObject({
-      status: "blocked",
-      error: { code: "action_executor_unavailable" },
+    expect(awaitingImplApproval.stages.find((stage: any) => stage.id === "implementation"))
+      .toMatchObject({ status: "completed" });
+    await request(`/api/pipeline-runs/${created.run.runId}/approval`, {
+      method: "POST",
+      body: JSON.stringify({ stageId: "approve-implementation", status: "approved", reason: "Diff reviewed" }),
     });
+    const afterApply = await waitForPipelineRun<any>(
+      created.run.runId,
+      (run) => {
+        const apply = run.stages.find((stage: any) => stage.id === "apply-changes");
+        return ["failed", "blocked", "uncertain"].includes(String(apply?.status))
+          || ["failed", "blocked", "interrupted"].includes(run.status);
+      },
+      10_000,
+    );
+    expect(afterApply.stages.find((stage: any) => stage.id === "implementation")).toMatchObject({ status: "completed" });
+    expect(afterApply.stages.find((stage: any) => stage.id === "approve-implementation")).toMatchObject({
+      status: "completed",
+    });
+    // Action executor is wired: without applicablePatch write fails closed (no silent success).
+    const applyStage = afterApply.stages.find((stage: any) => stage.id === "apply-changes");
+    expect(["failed", "uncertain"]).toContain(applyStage.status);
+    expect(String(applyStage.error?.code ?? applyStage.error?.message ?? "")).toMatch(
+      /pipeline_action_payload_missing|payload_missing|exactly one patch evidence|action_executor/,
+    );
     expect(calls.map((call) => String(call.stageId))).toEqual(["research", "planning", "implementation"]);
     for (const call of calls) {
       expect(call.readSkillDocument).toEqual(expect.any(Function));
@@ -779,6 +802,11 @@ describe("gateway Pipeline v1 control plane", () => {
       created.run.workspaceBaselineDigest,
     ));
     await direct.updateStage(created.run.runId, "implementation", { status: "completed" });
+    await direct.recordApproval(created.run.runId, {
+      stageId: "approve-implementation",
+      status: "approved",
+      actor: "test-operator",
+    });
     await direct.updateStage(created.run.runId, "apply-changes", {
       status: "running",
       workspaceDigestBefore: created.run.workspaceBaselineDigest,

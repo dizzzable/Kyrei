@@ -35,6 +35,13 @@ export interface OpenStreamOptions {
 export interface StreamLike {
   stream: AsyncIterable<unknown>;
   responseMessages: PromiseLike<unknown[]>;
+  /** Runtime stop reason, read only after the selected stream settles. */
+  guardStopReason?: () =>
+    | "max_steps"
+    | "repeated_tool_call"
+    | "budget_exceeded"
+    | "heal_handoff"
+    | undefined;
   /** Candidate selected after the early error probe. Start functions may omit it. */
   candidateIndex?: number;
   /** Mutable only inside this module; complete after the returned stream terminates. */
@@ -302,6 +309,7 @@ function wrap(
   return {
     stream: active ? replaySelected(inspected, active, attempts) : replay(inspected),
     responseMessages: stream.responseMessages,
+    guardStopReason: stream.guardStopReason,
     candidateIndex,
     attempts,
   };

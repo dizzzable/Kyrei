@@ -24,6 +24,8 @@ const external = [
   "fast-glob",
   "gpt-tokenizer",
   "gpt-tokenizer/*",
+  "pg",
+  "pg-native",
   "electron",
   "node:*",
 ];

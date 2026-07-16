@@ -51,6 +51,15 @@ describe("Hermes-inspired desktop shell", () => {
     expect(settingsSectionForActivity("providers")).toBe("providers");
   });
 
+  it("wires artifacts to missions and messaging to local notifications settings", () => {
+    const artifacts = ACTIVITY_REGISTRY.find((item) => item.id === "artifacts");
+    const messaging = ACTIVITY_REGISTRY.find((item) => item.id === "messaging");
+    expect(artifacts?.adapter).toBe("missions");
+    expect(messaging?.adapter).toBe("settings");
+    expect(messaging?.settingsSection).toBe("notifications");
+    expect(settingsSectionForActivity("messaging")).toBe("notifications");
+  });
+
   it("provides real English and Russian labels for shell navigation", () => {
     const en = createTranslator(enShell, "en");
     const ru = createTranslator(ruShell, "ru");

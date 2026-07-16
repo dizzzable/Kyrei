@@ -24,6 +24,9 @@ const INDEX_IGNORE = [
   "**/coverage/**",
   "**/.next/**",
   "**/vendor/**",
+  // Local reference implementation used for feature research; it is not a
+  // dependency or source subtree of Kyrei itself.
+  "hermes/**",
 ];
 
 export interface ProjectNode {
@@ -239,4 +242,134 @@ export function formatProjectImpact(impact: ProjectImpact): string {
     `## Direct dependents\n${list(impact.directDependents)}`,
     `## Transitive dependents\n${list(impact.transitiveDependents)}`,
   ].join("\n\n");
+}
+
+/**
+ * Incremental project index builder (Phase 3C).
+ * 
+ * Uses SQLite graph-store for durable, hash-tracked incremental updates. Only
+ * re-parses files whose content changed since last index. Falls back to full
+ * rebuild if SQLite unavailable or corrupted. This is the middle-ground
+ * approach validated by experiments: file-level graph, tool-call triggered,
+ * no background watcher (avoids race conditions from red team critique).
+ */
+export async function buildProjectIndexIncremental(workspace: string): Promise<ProjectIndex> {
+  try {
+    const { openGraphDb, loadGraphState, needsReindex, upsertNodes, replaceEdgesForFiles, saveGraphState, hashFileContent } = await import("./graph-store.js");
+    const dbPath = join(workspace, ".kyrei", "intel", "project-graph.db");
+    const db = openGraphDb(dbPath);
+    
+    // Load existing state if any
+    const existing = loadGraphState(db, workspace);
+    const existingPaths = new Set(existing?.nodes.map(n => n.path) ?? []);
+    
+    // Discover all files (same logic as buildProjectIndex)
+    const entries = await fg(["**/*"], {
+      cwd: workspace,
+      ignore: INDEX_IGNORE,
+      onlyFiles: true,
+      absolute: false,
+      followSymbolicLinks: false,
+      suppressErrors: true,
+    });
+    const files = entries
+      .map(normalizeRel)
+      .filter((path) => SOURCE_EXTENSIONS.some((extension) => path.toLowerCase().endsWith(extension)))
+      .slice(0, MAX_FILES);
+    
+    const currentPaths = new Set(files);
+    
+    // Detect deleted files
+    const deleted = [...existingPaths].filter(p => !currentPaths.has(p));
+    if (deleted.length > 0) {
+      const { deleteNodes } = await import("./graph-store.js");
+      deleteNodes(db, deleted);
+    }
+    
+    // Check which files need re-indexing (new or content changed)
+    const toReindex: string[] = [];
+    const hashMap = new Map<string, string>();
+    
+    for (const path of files) {
+      try {
+        const source = await readSource(workspace, path);
+        const hash = hashFileContent(source);
+        hashMap.set(path, hash);
+        if (needsReindex(db, path, hash)) {
+          toReindex.push(path);
+        }
+      } catch {
+        // File read error — skip this file
+        continue;
+      }
+    }
+    
+    // Re-index only changed files
+    const newNodes: Array<{ path: string; language: string; contentHash: string }> = [];
+    const newEdges: ProjectEdge[] = [];
+    const knownFiles = new Set(files);
+    
+    for (const path of toReindex) {
+      const language = languageFor(path);
+      const hash = hashMap.get(path);
+      if (!hash) continue;
+      
+      newNodes.push({ path, language, contentHash: hash });
+      
+      try {
+        const source = await readSource(workspace, path);
+        for (const specifier of extractRelativeSpecifiers(source)) {
+          const target = resolveRelativeSpecifier(path, specifier, knownFiles);
+          if (target && target !== path) {
+            newEdges.push({ from: path, to: target, type: "imports", provenance: "EXTRACTED" });
+          }
+        }
+      } catch {
+        // Parse/read error — node indexed but no edges
+      }
+    }
+    
+    // Upsert nodes and edges atomically
+    if (newNodes.length > 0) {
+      upsertNodes(db, newNodes);
+      replaceEdgesForFiles(db, toReindex, newEdges);
+    }
+    
+    // Build final index structure
+    const languages: Record<string, number> = {};
+    for (const path of files) {
+      const lang = languageFor(path);
+      languages[lang] = (languages[lang] ?? 0) + 1;
+    }
+    
+    const topLevel = [...new Set(
+      files.map((path) => path.split("/")[0] ?? "").filter((segment): segment is string => Boolean(segment)),
+    )].sort().slice(0, 80);
+    
+    const index: ProjectIndex = {
+      version: INDEX_VERSION,
+      generatedAt: new Date().toISOString(),
+      workspace,
+      fileCount: files.length,
+      truncated: entries.length > files.length,
+      languages,
+      topLevel,
+      entryCandidates: files.filter(isEntryCandidate).slice(0, 40),
+      nodes: files.map(path => ({ path, language: languageFor(path) })),
+      edges: [], // will be loaded from DB
+    };
+    
+    // Load all edges from DB
+    const allEdges = db.prepare("SELECT from_path, to_path FROM graph_edges ORDER BY from_path, to_path").all() as Array<{ from_path: string; to_path: string }>;
+    index.edges = allEdges.map(e => ({ from: e.from_path, to: e.to_path, type: "imports" as const, provenance: "EXTRACTED" as const }));
+    
+    saveGraphState(db, index);
+    db.close();
+    
+    return index;
+  } catch (err) {
+    // SQLite unavailable or corrupted — fallback to full rebuild
+    console.warn("[project-index] Incremental indexing failed, falling back to full rebuild:", err);
+    return buildProjectIndex(workspace);
+  }
 }

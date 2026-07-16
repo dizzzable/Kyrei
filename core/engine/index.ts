@@ -1,11 +1,9 @@
 /**
  * Kyrei engine v2 — public entry.
  *
- * Consumed by `core/gateway.js` when `KYREI_ENGINE=v2`. The result preserves
- * terminal status and credential-free provider-attempt telemetry.
- *
- * Phase 0: types + ports + build pipeline only. `runKyreiChat` is a guarded
- * stub until Phase 1 (orchestrator on AI SDK v5) lands.
+ * Consumed by `core/gateway.js`, which lazily imports the built bundle and calls
+ * `runKyreiChat`. The result preserves terminal status and credential-free
+ * provider-attempt telemetry.
  */
 
 import type { RunKyreiChatOpts, RunKyreiChatResult } from "./types.js";
@@ -13,11 +11,50 @@ import type { RunKyreiChatOpts, RunKyreiChatResult } from "./types.js";
 export * from "./types.js";
 export type * from "./data/ports.js";
 export { runKyreiChat } from "./orchestrator/run.js";
-export { createStores, createFileStores } from "./data/index.js";
+export { createStores, createFileStores, createPostgresStores, createStoresAsync } from "./data/index.js";
+export type { Stores } from "./data/index.js";
 export { createLtmBridge } from "./memory/ltm-bridge.js";
+export type { LtmEvent, LtmCheckpoint, LtmDecisionRecord } from "./memory/ltm-bridge.js";
 export { assembleSystemContext } from "./memory/layers.js";
 export { writeHandoff, readHandoff, reseedFromHandoff, HandoffSchema } from "./memory/handoff.js";
 export type { HandoffArtifact } from "./memory/handoff.js";
+export {
+  orchestrateImport,
+  detectImportFormat,
+  heuristicDistill,
+  redactTranscript,
+  contentDigest,
+  IMPORT_ADAPTERS,
+  ImportError,
+} from "./memory/import/index.js";
+export type {
+  ImportedTranscript,
+  ImportOptions,
+  ImportReport,
+  ImportRawInput,
+  ImportAdapter,
+} from "./memory/import/index.js";
+export { consolidateLtm } from "./memory/consolidate.js";
+export type { ConsolidateResult } from "./memory/consolidate.js";
+export {
+  curateSession,
+  heuristicCurateProposals,
+  transcriptFromMessages,
+  applyCuratorProposals,
+  listCuratorProposals,
+  applyStoredCuratorProposal,
+  curatorProposalDir,
+  DEFAULT_CURATOR_CONFIG,
+} from "./memory/session-curator.js";
+export type {
+  CurateSessionInput,
+  CurateSessionResult,
+  CuratorApplyMode,
+  CuratorModelSource,
+  CuratorProposal,
+  SessionCuratorConfig,
+  StoredCuratorProposalFile,
+} from "./memory/session-curator.js";
 export { writeMemory, assertWritable } from "./memory/writer.js";
 export { withFileLock } from "./memory/lock.js";
 export { redact, containsSecret, sanitizeEnv } from "./security/secrets.js";
@@ -37,13 +74,54 @@ export type { Sandbox, SandboxMode, WrapInput } from "./security/sandbox.js";
 export { safePath, isWorkspaceDir } from "./security/jail.js";
 export { listModels } from "./provider/registry.js";
 export type { ModelEntry } from "./provider/registry.js";
+export { buildModel, buildProviderOptions } from "./provider/build.js";
 export { createPlanStore } from "./orchestration/plan.js";
 export { reviewDiff, runReadSwarm } from "./orchestration/reviewer.js";
+export {
+  prepareMessagesForModel,
+  createModelGoalJudge,
+  maybeVerifyTurnGoal,
+  createHealTracker,
+  toolOutcomesFromSteps,
+  healStateFromOutcomes,
+  shouldHealHandoff,
+  isBudgetBreached,
+  budgetLimitsFromConfig,
+} from "./reliability/runtime.js";
+export {
+  collectFileReviewFromParts,
+  canEnterFileReview,
+  applyFileReviewDecisions,
+  aggregateFileReviewStatus,
+  snapshotIdsForRejected,
+  collectSessionFileChanges,
+} from "./reliability/file-review.js";
+export { matchesProtectedPath } from "./security/permissions.js";
+export { cleanupIncomplete } from "./reliability/cleanup.js";
+export { verifyGoal } from "./reliability/goal-verifier.js";
+export type { GoalJudge, GoalVerdict } from "./reliability/goal-verifier.js";
+export { checkBudget } from "./reliability/budget.js";
+export type { BudgetLimits, BudgetUsage, BudgetBreach } from "./reliability/budget.js";
+export { nextHealState, isTerminal } from "./reliability/self-heal.js";
+export type { HealState, HealOutcome } from "./reliability/self-heal.js";
 export { createLogger } from "./observability/logger.js";
 export type { Logger, LogLevel } from "./observability/logger.js";
 export { buildSystemPrompt, PROMPT_VERSION, PROMPT_CHANGELOG } from "./prompt/system.js";
 export { TOOL_DESCRIPTIONS } from "./prompt/tool-descriptions.js";
 export { resolveEngineConfig, EngineConfigSchema } from "./config/schema.js";
+export {
+  BUILTIN_PERSONALITY_PRESETS,
+  getPersonalityPreset,
+  resolvePersonalityText,
+  matchPersonalityPresetId,
+} from "./personality-catalog.js";
+export type { PersonalityPreset } from "./personality-catalog.js";
+export {
+  coerceImageInputMode,
+  decideImagePresentation,
+  modelSupportsImageInput,
+} from "./images/image-routing.js";
+export type { ImageInputMode, ResolvedImagePresentation } from "./images/image-routing.js";
 export { createWebBrowser, assertPublicWebUrl, fetchPublicWebPage } from "./web/browser.js";
 export type { WebBrowser, WebPage, WebSearchResult } from "./web/browser.js";
 export {
@@ -60,6 +138,52 @@ export type { OpenVikingClient, OpenVikingOptions } from "./memory/openviking.js
 export { createGBrainClient, formatGBrainResult, runGBrainProcess } from "./memory/gbrain.js";
 export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode } from "./memory/gbrain.js";
 export { buildGBrainTools } from "./tools/gbrain.js";
+export { buildPlanningTools } from "./tools/planning.js";
+export { buildOpenVikingTools } from "./tools/openviking.js";
+export { buildMemorySearchTools } from "./tools/memory-search.js";
+export { buildMemoryWriteTools } from "./tools/memory-write.js";
+export { buildMcpTools } from "./tools/mcp.js";
+export { createMcpManager, normalizeMcpConfig } from "./mcp/manager.js";
+export type { McpManager } from "./mcp/manager.js";
+export type { McpConfig, McpServerConfig, McpToolInfo, McpCallResult } from "./mcp/types.js";
+export { DEFAULT_MCP_CONFIG } from "./mcp/types.js";
+export { reindexProjectMemory } from "./memory/project-indexer.js";
+export type { ReindexProjectMemoryOptions, ReindexProjectMemoryResult } from "./memory/project-indexer.js";
+export { openMemoryIndex, closeMemoryIndex } from "./memory/index-backend.js";
+export type { MemoryIndexConfig, MemoryIndexBackend, OpenMemoryIndexResult } from "./memory/index-backend.js";
+export { MemoryIndexSession, flushMemoryIndexPoolForTests, memoryIndexPoolSizeForTests } from "./memory/index-session.js";
+export { lexicalEmbed, LEXICAL_EMBED_MODEL, LEXICAL_EMBED_DIM } from "./memory/lexical-embed.js";
+export {
+  createLexicalEmbedAdapter,
+  createHttpEmbedAdapter,
+  configureEmbedAdapterFromConfig,
+  setEmbedAdapter,
+  getEmbedAdapter,
+  embedText,
+} from "./memory/embed-adapter.js";
+export type { EmbedAdapter, EmbedConfig, EmbedMode, HttpEmbedOptions } from "./memory/embed-adapter.js";
+export { createSessionMirror } from "./data/session-mirror.js";
+export type {
+  SessionMirror,
+  SessionMirrorOptions,
+  GatewayMirrorSession,
+  GatewayMirrorMessage,
+} from "./data/session-mirror.js";
+export {
+  inspectWorkspaceMemoryIndex,
+  reindexWorkspaceMemoryIndex,
+} from "./memory/index-status.js";
+export type { MemoryIndexStatus } from "./memory/index-status.js";
+export {
+  projectSessionsIntoMemory,
+  snippetsFromModelMessages,
+} from "./memory/session-project.js";
+export type {
+  ProjectableSession,
+  ProjectableSessionMessage,
+  ProjectSessionsOptions,
+  ProjectSessionsResult,
+} from "./memory/session-project.js";
 export { runTeamDepartment } from "./team/department.js";
 export type {
   RunTeamDepartmentOptions,

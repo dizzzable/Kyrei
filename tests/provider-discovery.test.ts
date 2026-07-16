@@ -315,7 +315,6 @@ describe("OpenAI-compatible provider discovery", () => {
     ["https://[::ffff:198.18.0.127]/v1", undefined],
     ["http://trusted.example/v1", benchmarkResolver],
     ["https://single-label/v1", benchmarkResolver],
-    ["https://private.example/v1", async () => [{ address: "10.0.0.2", family: 4 as const }]],
     ["https://mixed.example/v1", async () => [
       { address: "198.18.0.127", family: 4 as const },
       { address: "10.0.0.2", family: 4 as const },
@@ -335,12 +334,10 @@ describe("OpenAI-compatible provider discovery", () => {
 
   it.each([
     ["http://169.254.169.254/latest", undefined],
-    ["http://10.0.0.2/v1", undefined],
     ["http://192.0.2.10/v1", undefined],
     ["http://192.88.99.10/v1", undefined],
     ["http://198.18.0.1/v1", undefined],
     ["http://240.0.0.1/v1", undefined],
-    ["https://private.example/v1", async () => [{ address: "192.168.1.2", family: 4 as const }]],
     ["https://mixed.example/v1", async () => [
       { address: "93.184.216.34", family: 4 as const },
       { address: "10.0.0.2", family: 4 as const },
@@ -348,7 +345,7 @@ describe("OpenAI-compatible provider discovery", () => {
     ["http://[::ffff:169.254.169.254]/v1", undefined],
     ["http://[64:ff9b::a9fe:a9fe]/v1", undefined],
     ["http://[2002:a9fe:a9fe::]/v1", undefined],
-  ])("blocks metadata and private targets: %s", async (baseURL, resolveHost) => {
+  ])("blocks metadata and non-LAN special targets: %s", async (baseURL, resolveHost) => {
     const request = vi.fn();
     await expect(discoverProviderModels({
       protocol: "openai-chat",
@@ -360,7 +357,37 @@ describe("OpenAI-compatible provider discovery", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it("requires HTTPS for every non-loopback discovery target", async () => {
+  it.each([
+    ["http://10.0.0.2/v1", { address: "10.0.0.2", family: 4 }],
+    ["http://192.168.1.50:11434/v1", { address: "192.168.1.50", family: 4 }],
+    ["http://172.16.5.9/v1", { address: "172.16.5.9", family: 4 }],
+  ])("allows user-configured RFC1918 LAN endpoints for local models: %s", async (baseURL, pinnedAddress) => {
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "lan-model" }] })));
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL,
+      credentials: {},
+      request,
+    })).resolves.toEqual([{ id: "lan-model" }]);
+    expect(request.mock.calls[0]?.[1].pinnedAddress).toMatchObject({
+      ...pinnedAddress,
+      privateLan: true,
+      loopback: false,
+    });
+  });
+
+  it("allows HTTPS hostname that resolves only to RFC1918", async () => {
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "home-nas" }] })));
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://ollama.home/v1",
+      credentials: {},
+      resolveHost: async () => [{ address: "192.168.1.2", family: 4 as const }],
+      request,
+    })).resolves.toEqual([{ id: "home-nas" }]);
+  });
+
+  it("requires HTTPS for public non-loopback discovery targets", async () => {
     const request = vi.fn(async () => response(200, JSON.stringify({ data: [] })));
     await expect(discoverProviderModels({
       protocol: "openai-chat",

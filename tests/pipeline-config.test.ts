@@ -50,10 +50,23 @@ describe("Pipeline v1 config", () => {
       "department",
       "approval",
       "department",
+      "approval",
       "action",
       "department",
       "truth-gate",
     ]);
+    const acceptance = result.definitions[0]?.stages.find((stage: { id: string }) => stage.id === "acceptance");
+    expect(acceptance).toMatchObject({
+      kind: "truth-gate",
+      checks: [expect.objectContaining({
+        id: "unit",
+        command: "npm test --silent",
+        ecosystem: "node",
+        testDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      })],
+    });
+    const apply = result.definitions[0]?.stages.find((stage: { id: string }) => stage.id === "apply-changes");
+    expect(apply).toMatchObject({ dependsOn: ["approve-implementation"] });
   });
 
   it("clamps tolerant budgets and strips unknown fields including credential-shaped values", () => {
@@ -146,10 +159,16 @@ describe("Pipeline v1 config", () => {
       .toThrow("pipeline_stage_dependency_unavailable");
   });
 
+  function replaceStage(definition: { stages: Array<{ id: string }> }, id: string, patch: Record<string, unknown>) {
+    const index = definition.stages.findIndex((stage) => stage.id === id);
+    definition.stages[index] = { ...definition.stages[index], ...patch };
+  }
+
   it("rejects actions without prior approval or a later truth gate", () => {
-    const noApproval = codingPipeline();
-    noApproval.stages[3] = { ...noApproval.stages[3], dependsOn: ["planning"] };
-    expect(() => validatePipelinesInput({ version: 1, definitions: [noApproval] }, profiles))
+    const noDirectApproval = codingPipeline();
+    // Action must depend on an approval that directly consumes a department — not only on a department.
+    replaceStage(noDirectApproval, "apply-changes", { dependsOn: ["implementation"] });
+    expect(() => validatePipelinesInput({ version: 1, definitions: [noDirectApproval] }, profiles))
       .toThrow("pipeline_transition_unsafe");
 
     const noGate = codingPipeline();
@@ -167,17 +186,34 @@ describe("Pipeline v1 config", () => {
       allowedHelpFrom: [],
       retry: { maxAttempts: 1, backoffMs: 0 },
     });
-    partiallyApproved.stages[4] = {
-      ...partiallyApproved.stages[4],
-      dependsOn: ["implementation", "unapproved-work"],
-    };
+    replaceStage(partiallyApproved, "apply-changes", {
+      dependsOn: ["approve-implementation", "unapproved-work"],
+    });
     expect(() => validatePipelinesInput({ version: 1, definitions: [partiallyApproved] }, profiles))
+      .toThrow("pipeline_transition_unsafe");
+  });
+
+  it("rejects truth-gates with zero or multiple action ancestors", () => {
+    const multiAction = codingPipeline();
+    multiAction.stages.push({
+      id: "apply-extra",
+      name: "Apply extra",
+      kind: "action",
+      action: "workspace.apply",
+      dependsOn: ["approve-implementation"],
+      allowedHelpFrom: [],
+      retry: { maxAttempts: 1, backoffMs: 0 },
+    });
+    replaceStage(multiAction, "verification", {
+      dependsOn: ["apply-changes", "apply-extra"],
+    });
+    expect(() => validatePipelinesInput({ version: 1, definitions: [multiAction] }, profiles))
       .toThrow("pipeline_transition_unsafe");
   });
 
   it("rejects action identifiers that are not implemented by the control plane", () => {
     const definition = codingPipeline();
-    definition.stages[4] = { ...definition.stages[4], action: "workspace.delete" };
+    replaceStage(definition, "apply-changes", { action: "workspace.delete" });
     expect(() => validatePipelinesInput({ version: 1, definitions: [definition] }, profiles))
       .toThrow("pipeline_stage_action_invalid");
     expect(normalizePipelines({ version: 1, definitions: [definition] }, profiles).definitions[0])
@@ -186,25 +222,24 @@ describe("Pipeline v1 config", () => {
 
   it("rejects unsafe roots, non-ancestor help, non-department help, and repeated actions", () => {
     const actionRoot = codingPipeline();
-    actionRoot.stages[4] = { ...actionRoot.stages[4], dependsOn: [] };
+    replaceStage(actionRoot, "apply-changes", { dependsOn: [] });
     expect(() => validatePipelinesInput({ version: 1, definitions: [actionRoot] }, profiles))
       .toThrow("pipeline_transition_unsafe");
 
     const futureHelp = codingPipeline();
-    futureHelp.stages[1] = { ...futureHelp.stages[1], allowedHelpFrom: ["verification"] };
+    replaceStage(futureHelp, "planning", { allowedHelpFrom: ["verification"] });
     expect(() => validatePipelinesInput({ version: 1, definitions: [futureHelp] }, profiles))
       .toThrow("pipeline_transition_unsafe");
 
     const approvalHelp = codingPipeline();
-    approvalHelp.stages[2] = { ...approvalHelp.stages[2], allowedHelpFrom: ["research"] };
+    replaceStage(approvalHelp, "approve-plan", { allowedHelpFrom: ["research"] });
     expect(() => validatePipelinesInput({ version: 1, definitions: [approvalHelp] }, profiles))
       .toThrow("pipeline_transition_unsafe");
 
     const repeatedAction = codingPipeline();
-    repeatedAction.stages[4] = {
-      ...repeatedAction.stages[4],
+    replaceStage(repeatedAction, "apply-changes", {
       retry: { maxAttempts: 2, backoffMs: 1_000 },
-    };
+    });
     expect(() => validatePipelinesInput({ version: 1, definitions: [repeatedAction] }, profiles))
       .toThrow("pipeline_transition_unsafe");
   });

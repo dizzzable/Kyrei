@@ -70,6 +70,37 @@ export async function evaluateToolApproval(input: {
   workspace: string;
   config: EngineConfig;
 }): Promise<ToolApprovalEvaluation | null> {
+  // MCP tools: permission-gated even though they are not workspace file mutators.
+  if (input.toolName === "mcp_list_tools") {
+    const actions: ActionContext[] = [{ tool: "mcp_list_tools" }];
+    const decision = decideAll(input.config.permissions, actions);
+    return {
+      decision,
+      reason: decision === "deny" ? "mcp_list_denied" : "mcp_list_allowed",
+      args: input.args,
+      actions,
+    };
+  }
+  if (input.toolName === "mcp_call") {
+    const args = record(input.args);
+    const serverId = typeof args.serverId === "string" ? args.serverId.trim() : "";
+    const tool = typeof args.tool === "string" ? args.tool.trim() : "";
+    const target = serverId && tool ? `${serverId}:${tool}` : serverId || tool || "mcp";
+    const actions: ActionContext[] = [{ tool: "mcp_call", target }];
+    const decision = decideAll(input.config.permissions, actions);
+    return {
+      decision,
+      reason:
+        decision === "ask"
+          ? "mcp_call_requires_approval"
+          : decision === "deny"
+            ? "mcp_call_denied"
+            : "mcp_call_allowed",
+      args: input.args,
+      actions,
+    };
+  }
+
   if (!["run_command", "write_file", "edit_file", "diagnostics"].includes(input.toolName)) return null;
   const toolName = input.toolName as GuardedToolName;
   let actions: ActionContext[];

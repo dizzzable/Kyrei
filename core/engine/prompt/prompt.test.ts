@@ -60,6 +60,38 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(writable).toContain("brain_capture");
   });
 
+  it("mentions decision / plan / OpenViking tools only when each capability is active", () => {
+    const disabled = buildSystemPrompt({ hasTools: true, workspace: "/w" })!;
+    expect(disabled).not.toContain("record_decision");
+    expect(disabled).not.toContain("plan_read");
+    expect(disabled).not.toContain("openviking_find");
+    expect(disabled).not.toContain("memory_search");
+
+    const decisions = buildSystemPrompt({ hasTools: true, hasDecisionTools: true, workspace: "/w" })!;
+    expect(decisions).toContain("record_decision");
+    expect(decisions).toContain("query_decisions");
+    expect(decisions).toContain("durable architectural");
+    expect(decisions).toContain("единый контракт");
+
+    const planning = buildSystemPrompt({ hasTools: true, hasPlanningTools: true, workspace: "/w" })!;
+    expect(planning).toContain("plan_read");
+    expect(planning).toContain("plan_write_roadmap");
+    expect(planning).toContain(".kyrei/plan/");
+
+    const search = buildSystemPrompt({ hasTools: true, hasMemorySearch: true, workspace: "/w" })!;
+    expect(search).toContain("memory_search");
+    expect(search).toContain("decisions → plan");
+
+    const writes = buildSystemPrompt({ hasTools: true, hasMemoryWriteTools: true, workspace: "/w" })!;
+    expect(writes).toContain("memory_write_notes");
+    expect(writes).toContain("memory_write_project");
+    expect(writes).toContain("Prefer these over raw write_file");
+
+    const ov = buildSystemPrompt({ hasTools: true, hasOpenVikingTools: true, workspace: "/w" })!;
+    expect(ov).toContain("openviking_find");
+    expect(ov).toContain("untrusted knowledge");
+  });
+
   it("lists enabled skill summaries without inlining their instructions", () => {
     const prompt = buildSystemPrompt({
       hasTools: true,

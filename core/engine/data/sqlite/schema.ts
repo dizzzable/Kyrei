@@ -1,6 +1,7 @@
 /** SQLite DDL for the Kyrei data layer (Phase 5). Requirements §10.1. */
 
-export const SCHEMA_VERSION = 1;
+/** v2: session provider binding + message clientId/pending/turnStatus for cutover. */
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -12,6 +13,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at  TEXT NOT NULL,
   ended_at    TEXT,
   status      TEXT NOT NULL DEFAULT 'active',
+  provider_id TEXT,
+  model_id    TEXT,
+  provider_account_id TEXT,
   meta_json   TEXT,
   jsonl_path  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
@@ -30,6 +34,10 @@ CREATE TABLE IF NOT EXISTS messages (
   compacted    INTEGER NOT NULL DEFAULT 0,
   ccr_hash     TEXT,
   created_at   TEXT NOT NULL,
+  client_id    TEXT,
+  pending      INTEGER NOT NULL DEFAULT 0,
+  turn_status  TEXT,
+  approval_model_params_json TEXT,
   UNIQUE(session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);

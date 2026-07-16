@@ -1,99 +1,111 @@
 # Hermes → Kyrei: settings and capability parity matrix
 
-**Audit date:** 2026-07-13
-**Hermes source:** local Hermes Agent Desktop, commit `3b2ef789dfcf`
-**Kyrei baseline:** `d191596db7fe`
-**Method:** read-only source audit; credential values were not inspected
+**Last refresh:** 2026-07-16  
+**Hermes source:** local tree under `hermes/hermes-agent` (desktop + CLI; historical audit also used commit `3b2ef789dfcf`)  
+**Kyrei baseline:** main branch as of refresh (package `0.4.2`+)  
+**Method:** code-backed review of `core/engine`, `core/gateway.js`, Settings UI, and prior audit rows  
 
-`Port` means transfer the behavior closely, `Adapt` means keep the product idea behind Kyrei's local-first boundaries, and `Reject` means deliberately exclude it.
+`Port` = transfer behavior closely · `Adapt` = product idea inside Kyrei local-first bounds · `Reject` = deliberately exclude  
+
+When this file and old plans disagree, **this matrix + `.kyrei/memory/MEMORY.md` win**.
+
+---
 
 ## Settings surface
 
-Hermes sources: `apps/desktop/src/app/settings/index.tsx`, `apps/desktop/src/app/settings/constants.ts`, `hermes_cli/config.py:976`, and `hermes_cli/web_server.py:609-824`.
-
-| Area | Hermes capability | Kyrei state | Decision |
+| Area | Hermes capability | Kyrei state (2026-07-16) | Decision |
 |---|---|---|---|
-| Import/export/reset | Whole config through Settings footer | Runtime and provider profiles export without secrets | Port versioning, preview diff, section selection |
-| Model | Main provider/model, context override, fallbacks, reasoning, fast tier | Unlimited profiles; roles/fallback UI partly dormant | Adapt role routing and scoped fallback profiles |
-| Chat | Personality, timezone, reasoning blocks, image mode | Personality/reasoning visibility | Port timezone and image mode |
-| Appearance | Language, theme profiles, zoom, translucency, tool view, embed consent | Theme/import, scale, density, tool view, language | Adapt translucency; reject third-party inline embeds |
-| Workspace | cwd, project/strict execution, persistent shell, env passthrough, read cap | Workspace jail and read cap | Adapt local PTY/process and optional Docker |
-| Safety | approvals, timeout, allowlist, secret redaction, private URLs, checkpoints | Durable signed allow-once/deny resume plus guided persistent exact rules; fail-closed policy/pre-hooks/audit remain authoritative | Add session-scoped decisions; keep raw regex expert-only |
-| Memory/context | Built-in/external memory, compression thresholds and protected messages | Strong dormant stores, CCR pruning, GBrain/OpenViking | Adapt structured summary and reviewed learning |
-| Voice | STT/TTS provider matrix plus local engines | Web Speech | Keep Web Speech; optional Piper/Whisper later |
-| Advanced | Toolsets, backend, caps, retries, delegation, updates | Base caps/retries only | Adapt schema-driven UI; hide unsupported controls |
-| Notifications | Per-event desktop notifications and approval actions | Completion notification/sound | Port after approval lifecycle |
-| Providers/keys | OAuth accounts and dynamic env catalogue | Encrypted unlimited profiles | Add health/catalog; reject account marketplace coupling |
-| Gateway | Local, remote, cloud | Loopback local only | Reject remote/cloud gateway |
-| Tool keys | Capability/plugin credentials | Model provider secrets only | Adapt capability-scoped vault after skills/MCP |
-| Sessions | Default project, archive/restore/delete | Search/pin/export/rename/delete | Port archive/restore and default workspace |
-| About/updates | Check/apply/restart/manual fallback/uninstall | Missing | Port after runtime P0 |
-| Skills/MCP | Dedicated Capabilities UI and runtime | Missing | Port progressively |
+| Import/export/reset | Whole config footer | Runtime/provider export without secrets | Port versioning/diff later |
+| Model | Main model, fallbacks, reasoning, aux roles | Unlimited profiles; `modelAssignments.worker` + fallbacks; default reasoning | Adapt full aux role map later |
+| Chat | Personality, timezone, reasoning, image mode | **Shipped:** personality catalog, timezone, show reasoning, image input mode | Keep |
+| Appearance | Theme, zoom, translucency, tool view | Theme/import, scale, density, language, tool view | Adapt translucency optional |
+| Workspace | cwd, PTY, env, read cap | Workspace jail + read cap; no persistent PTY settings | Local PTY later |
+| Safety | once/always/deny, allowlist, checkpoints | Signed allow-once/deny; **Always allow/deny → exact rules**; protected paths; sandbox | Session-scoped TTL optional |
+| Memory/context | External plugins, compression, curator | Hybrid SQLite FTS + mirror; compression prune; **memory curator** (archive); GBrain/OV opt-in | Keep built-in SoT |
+| Voice | STT/TTS matrix | Web Speech only | Reject full matrix for now |
+| Advanced | Toolsets, backends, delegation, updates | Caps, retries, delegation, MCP, reliability toolLoop | Hide unsupported backends |
+| Notifications | Per-event desktop | Completion notification/sound | Port granularity later |
+| Providers/keys | OAuth catalog | Encrypted profiles + Kiro connectors; no Hermes/Nous coupling | Reject marketplace OAuth |
+| Gateway | Local/remote/cloud | Loopback local only | **Reject** remote/cloud |
+| Skills/MCP | Capabilities UI | **Shipped:** Skills settings + MCP settings | Controlled install later |
+| Sessions | Archive/restore/delete/branch | **Shipped:** soft archive, restore, delete, curate, **fork lineage** | Git worktree later |
+| About/updates | Check/apply/restart | Version in app; no auto-updater | Port after stability |
+| Skills curator | Skill catalog hygiene + patches | **Opt-in** heuristic + optional LLM **proposal** patches; no silent rewrite | Keep safe defaults |
 
-## Provider catalogue
-
-Hermes source: `plugins/model-providers/<slug>/__init__.py`, `providers/__init__.py`, and `providers/base.py`.
-
-Kyrei does not need one transport implementation per brand. Its provider profiles can represent the catalogue as presets while keeping six explicit native protocols.
-
-| Transport | Hermes profiles | Kyrei decision |
-|---|---|---|
-| OpenAI-compatible | alibaba, alibaba-coding-plan, arcee, azure-foundry, custom, deepseek, gmi, huggingface, kilocode, kimi-coding, kimi-coding-cn, novita, nvidia, ollama-cloud, opencode-zen, opencode-go, openrouter, stepfun, xiaomi, zai | Provider presets on `openai-chat` |
-| Anthropic Messages | anthropic, minimax, minimax-cn, minimax-oauth | Native transport; MiniMax presets; reject OAuth coupling |
-| Google | gemini | Already native |
-| Bedrock | bedrock | Already native |
-| Vertex | vertex | Already native |
-| Responses-like | xai, openai-codex | xAI preset; reject proprietary ChatGPT/Codex OAuth |
-| Account/device auth | nous, qwen-oauth, minimax-oauth | Prefer API-key profiles; reject Hermes/Nous coupling |
-| External process | copilot, copilot-acp | Reject ACP core coupling; possible future coding-agent plugin |
-
-Hermes additionally supports profile `.env`, `auth.json`, 1Password, and Bitwarden (`agent/credential_sources.py`, `agent/secret_sources/*`). Kyrei should adapt external secret references without copying resolved values into config.
+---
 
 ## Runtime parity
 
-| Capability | Hermes behavior | Kyrei state | Decision |
+| Capability | Hermes behavior | Kyrei state (2026-07-16) | Decision |
 |---|---|---|---|
-| Fallback chain | Provider/model chain with scoped auth | Model IDs pinned to active endpoint | Adapt to provider-profile IDs |
-| Auxiliary roles | Vision, extraction, compression, skills, approvals, MCP, title, curator, review, MoA | `default/small/plan` stored but not routed | Typed role router |
-| MoA | Reference models plus aggregator | Missing | After bounded delegation |
-| Context compression | Compressor at 50%, target 20%, protects last 20/first 3 | Large tool-output pruning only | Add structured summary + CCR pointers |
-| External memory | 8 plugins: byterover, hindsight, holographic, honcho, mem0, openviking, retaindb, supermemory | GBrain/OpenViking adapters; built-in SQLite dormant | Keep built-in authoritative; one optional external layer |
-| Post-turn learning | Background memory/skill review and curator | Missing live wiring | Proposals with explicit review; never silent self-edit |
-| Terminal backends | Local, Docker, Singularity, Modal, Daytona, SSH; PTY/background | One-shot local command | Local PTY + optional Docker; reject cloud/SSH core |
-| Approvals | Manual default, once/always/deny, grouped UI, native actions | Signed allow-once/deny pause-and-resume is durable; persistent command/path/tool rules are managed in Safety settings | Add expiring session scope and promote-to-persistent from the approval card |
-| Agent browser | Search/extract plus click/type/snapshot/CDP/dialogs | Safe text search/fetch | Disposable agent-only browser; reject arbitrary eval/profile reuse |
-| Skills | Progressive list/view/manage/install with provenance and AST checks | Missing | Trusted-root list/view first, controlled install second |
-| Delegation | Isolated sync/background children, concurrency 3, depth 1 | Reviewer contracts only | Flat read-only workers, single writer, strict budgets |
-| Sessions/projects | Archive, branch tree, worktree groups, resume, artifacts | Core session actions only | Archive/resume/lineage first |
-| Checkpoints | Once-per-turn snapshots; 20/500 MB/7-day limits; restore UI | Immediate copy snapshot/rollback | History, retention, restore, audit |
-| Computer use | Cross-platform CUA, all side effects approved | Missing | Opt-in only after approvals |
-| Goals/cron/Kanban | Bounded Ralph, schedules, multi-agent board | Dormant goal verifier | Goals after safety; schedules/Kanban later |
-| Updates | 30-minute/focus checks, apply/restart, skew handling | Missing | Local signed update flow after core stability |
+| Fallback chain | Provider/model chain | Active endpoint + modelAssignments fallbacks | Enrich profile-scoped chain later |
+| Auxiliary roles | Vision, compress, skills, title, curator… | Worker assignment used by delegate/curators; not full role map | Typed router later |
+| MoA | Multi-model aggregate | Missing | After deliberate need |
+| Context compression | Structured summary + protect windows | **Two-stage:** tool CCR prune + middle REFERENCE-ONLY summary (model projection; UI history full). `summaryUseLlm` opt-in. Dual-trigger: max(local estimate, last-step provider usage) | Keep; dual-trigger shipped |
+| External memory | Many plugins | GBrain + OpenViking adapters; local FTS authoritative | Keep |
+| Post-turn learning | `background_review` memory/skills | **Memory curator** on archive (not every turn); **skills curator** on-demand scan | No silent every-turn self-edit |
+| Skills hygiene | Skill Curator lifecycle | Opt-in scan; propose/disable stale; LLM suggest_patch explicit apply | **Never** auto-patch SKILL.md |
+| Terminal backends | Local/Docker/SSH/cloud | One-shot local command + sandbox | Local PTY + optional Docker later |
+| Approvals | once/always/deny + promote | **Shipped** promote-to-persistent exact rule | Session TTL optional |
+| Agent browser | Click/type/CDP | Safe `web_search` / `web_fetch` | Disposable browser later |
+| Skills runtime | Progressive load, provenance | **Shipped** store + progressive tools | Marketplace/AST later |
+| Delegation | Isolated children | Bounded delegation + team + pipeline | Keep budgets strict |
+| Sessions | Archive, branch, worktree | Soft archive + **fork lineage** (`parentSessionId` / `rootSessionId`, `POST …/fork`); no git worktree | Worktree later |
+| Checkpoints | Retention/history UI | Turn snapshots + revert/changes panel | History retention UI later |
+| Computer use | CUA | Missing | Opt-in far later |
+| Goals/cron/Kanban | Ralph, schedules, board | Cron **shipped**; goal verifier exists; no Kanban board | Board later |
+| Updates | Check/apply | Missing auto-updater | After core stability |
 
-## Current Kyrei truth table
+---
+
+## Current Kyrei truth table (code-backed)
 
 | Status | Capabilities |
 |---|---|
-| Implemented | Electron-only shell, loopback authenticated gateway, provider profiles, six transports, stream/tool loop, workspace tools/jail, safe web search/fetch, project context, project intelligence, GBrain opt-in, session basics |
-| Partial | Secret fallback on Linux, active-provider-only fallbacks, interactive approvals, OS sandbox, context management, composer, settings, voice |
-| Dormant | Role models, SQLite/vector memory, LTM writer/handoff, OpenViking, reliability modules, reviewer/plans, draft/history helpers |
-| Missing live | Image inputs, skills, MCP, subagents, MoA, persistent PTY, LSP, archive/branch lineage, update manager |
+| **Implemented** | Electron shell, loopback gateway, multi-provider profiles, six transports, stream/tool loop, workspace tools/jail, safe web tools, project intel, hybrid memory + session mirror, session soft-archive, **session fork lineage**, memory curator, personality catalog, image input modes, skills store + optional skills curator (proposal-first), MCP opt-in, delegation/team/pipeline, cron, supervised file review (hunk), approval promote-to-rule, **two-stage context compression** (CCR prune + middle summary), tool-loop guardrails, timezone/reasoning defaults, prompt profiles, planning files, messaging webhook opt-in, GBrain/OpenViking opt-in, Kiro CLI + org pool connectors, EN/RU i18n |
+| **Partial** | Aux model roles (worker only), fallback chain richness, checkpoint history UI, notification granularity, secret store UX on Linux, OS sandbox strict modes, transcript import (some adapters), agent browser automation |
+| **Missing / reject** | Remote/cloud gateway, Hermes/Nous OAuth marketplace, pets, MoA, Computer Use, STT/TTS matrix, silent post-turn skill/memory rewrite, persistent multi-backend PTY/SSH core, git worktree isolation, auto update manager |
 
-The original critical defect and its UI lifecycle are now closed for execution: `run_command`, `diagnostics`, `write_file`, and `edit_file` enforce deny/ask/allow, secret scanning, cancellation barriers, live workspace target validation, correlated metadata-only audit, and a durable signed allow-once/deny resume. Workspace Safety also exposes exact persistent rules without requiring regex; malformed legacy policy locks guided editing instead of being silently weakened. `web_search` and `web_fetch` intentionally expose only Allow/Deny rules until they join the signed approval path.
+---
 
-## Prioritised delivery order
+## Skills / memory learning — explicit safety contract
 
-1. Session-scoped approval decisions and safe promotion from allow-once to a persistent exact rule.
-2. Flat bounded read-only subagents with a single writer.
-3. Skills list/view with provenance, then controlled install/manage.
-4. Two-stage context compression with structured summaries and reversible CCR recall.
-5. Typed auxiliary model router and provider-profile-scoped fallbacks.
-6. Session archive/resume/branch lineage and interrupted-run recovery.
-7. Disposable agent-only browser automation on the existing SSRF boundary.
-8. Persistent local PTY/processes and optional Docker isolation.
-9. Checkpoint history, retention, restore, and audit.
-10. Bounded post-turn memory/skill proposals with explicit user review.
+| Action | Automatic? | Notes |
+|---|---|---|
+| Memory curator on archive | If enabled (default on) | Background after soft-archive (HTTP non-blocking, 25s abort); `apply_safe` writes notes/LTM/handoff; MEMORY.md needs apply_all or manual apply |
+| Skills curator scan | Only if enabled (**default off**) + user Scan | Manual or future schedule; not silent post-turn |
+| Disable stale skill | Only `apply_safe` after scan | State flag only; no file delete |
+| LLM skill patch | Never automatic | Proposal + **Apply patch** on owned skill |
+| Full SKILL.md / MEMORY rewrite | Never silent | Product boundary |
+
+---
+
+## Prioritised remaining delivery (honest)
+
+**Done (do not re-list as missing):** skills list/manage, archive/curate memory, promote-to-rule, image mode, personality catalog, optional skills curator proposals, **two-stage compression**, **session fork lineage**.
+
+1. Session-scoped approval TTL (expiring allow-once beyond current session map).
+2. Richer aux role router (compress/title/vision) reusing worker pattern — still no silent writes.
+3. Interrupted-run recovery polish.
+4. ~~Provider-usage dual-trigger~~ **shipped** (`providerUsageFromSteps` in prepareStep).
+5. ~~Sidebar fork tree~~ **shipped** (nest under parent when both listed).
+6. Disposable agent-only browser on existing SSRF boundary.
+7. Local persistent PTY + optional Docker isolation.
+8. Checkpoint history retention UI + audit browse.
+9. Controlled skills install from trusted archives (still no silent patch).
+10. About/update manager (signed local updates).
+11. Broader transcript import (Cursor/Hermes DB) behind adapters.
+
+---
 
 ## Product boundary
 
-Port Hermes runtime contracts, not its cloud ecosystem. Kyrei remains a Windows/macOS/Linux desktop application with no user-facing embedded browser, no remote Hermes gateway, no mass messaging platform layer, no proprietary Hermes provider, and no silent autonomous modification of its own skills or memory.
+Port Hermes **runtime contracts**, not its cloud ecosystem. Kyrei stays a Windows/macOS/Linux desktop app with:
+
+- no user-facing embedded browser for product chrome  
+- no remote Hermes gateway  
+- no mass messaging platform layer as core  
+- no proprietary Hermes/Nous provider coupling  
+- **no silent autonomous modification of skills or durable memory catalogs**
+
+Historical planning docs (`docs/hermes-parity-plan.md`, `docs/superpowers/plans/*`) may lag; update **this matrix** when shipping parity work.

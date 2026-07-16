@@ -7,6 +7,7 @@ export type SettingsSectionId =
   | "skills"
   | "chat"
   | "memory"
+  | "sessions"
   | "appearance"
   | "notifications"
   | "voice"
@@ -22,6 +23,7 @@ export const SETTINGS_SECTIONS = [
   { id: "appearance", labelKey: "settings.sections.appearance" },
   { id: "workspace", labelKey: "settings.sections.workspace" },
   { id: "memory", labelKey: "settings.sections.memory" },
+  { id: "sessions", labelKey: "settings.sections.sessions" },
   { id: "notifications", labelKey: "settings.sections.notifications" },
   { id: "providers", labelKey: "settings.sections.providers" },
   { id: "skills", labelKey: "settings.sections.skills" },

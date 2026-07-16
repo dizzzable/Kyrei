@@ -189,4 +189,32 @@ describe("stream-bridge (synthetic parts)", () => {
     expect(complete?.type === "tool.complete" && complete.payload.error).toBe("boom");
     expect(out.status).toBe("complete");
   });
+
+  it("reports a runtime guard stop as max_steps even after a normal stream finish", async () => {
+    const out = await bridgeStream(
+      parts([
+        { type: "start-step" },
+        { type: "tool-call", toolCallId: "repeat", toolName: "read_file", input: { path: "same.ts" } },
+        { type: "tool-result", toolCallId: "repeat", output: "same" },
+        { type: "finish", finishReason: "tool-calls" },
+      ]),
+      () => undefined,
+      ctx({ guardStopReason: () => "repeated_tool_call" }),
+    );
+
+    expect(out.status).toBe("max_steps");
+  });
+
+  it("reports heal_handoff guard stop as heal_handoff status", async () => {
+    const out = await bridgeStream(
+      parts([
+        { type: "start-step" },
+        { type: "tool-error", toolCallId: "t1", toolName: "run_command", error: "fail" },
+        { type: "finish", finishReason: "stop" },
+      ]),
+      () => undefined,
+      ctx({ guardStopReason: () => "heal_handoff" }),
+    );
+    expect(out.status).toBe("heal_handoff");
+  });
 });

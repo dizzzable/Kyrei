@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"Add logging to core/gateway.js"},"timestamp":"2026-07-15T10:00:00.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Implemented structured logs in core/gateway.js. TODO: wire log levels."}]},"timestamp":"2026-07-15T10:01:00.000Z"}

@@ -34,6 +34,20 @@ function stageDependenciesSatisfied(run, stage) {
   return stage.dependsOn.every((dependencyId) => byId.get(dependencyId)?.status === COMPLETED_STAGE_STATUS);
 }
 
+function ancestorStageIds(run, stage) {
+  const byId = new Map(run.stages.map((candidate) => [candidate.id, candidate]));
+  const seen = new Set();
+  const pending = [...(stage.dependsOn ?? [])];
+  while (pending.length) {
+    const stageId = pending.pop();
+    if (seen.has(stageId)) continue;
+    seen.add(stageId);
+    const candidate = byId.get(stageId);
+    if (candidate?.dependsOn?.length) pending.push(...candidate.dependsOn);
+  }
+  return seen;
+}
+
 function dependencyArtifacts(run, stage) {
   const byStage = new Map();
   for (const artifact of run.artifacts) {
@@ -41,7 +55,12 @@ function dependencyArtifacts(run, stage) {
     values.push(structuredClone(artifact));
     byStage.set(artifact.stageId, values);
   }
-  return Object.fromEntries(stage.dependsOn.map((stageId) => [stageId, byStage.get(stageId) ?? []]));
+  // Write/truth-gate stages need upstream department artifacts (e.g. patch evidence
+  // on implementation) even when they only directly depend on an approval stage.
+  const stageIds = (isWriteStage(stage) || stage.kind === "truth-gate")
+    ? [...ancestorStageIds(run, stage)]
+    : [...(stage.dependsOn ?? [])];
+  return Object.fromEntries(stageIds.map((stageId) => [stageId, byStage.get(stageId) ?? []]));
 }
 
 function upstreamActionReceiptDigests(run, stage) {

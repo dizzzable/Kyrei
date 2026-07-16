@@ -56,6 +56,12 @@ export interface TeamArtifact {
   readonly validation: readonly string[];
   readonly uncertainties: readonly string[];
   readonly whatWasNotChecked: readonly string[];
+  /**
+   * Optional context-anchored patch for pipeline implementation stages.
+   * Multi-line body must be preserved (never whitespace-collapsed). The
+   * deterministic action executor applies it — team roles stay read-only.
+   */
+  readonly applicablePatch?: string;
   /** Successful direct web-fetches captured by runtime code, never model text. */
   readonly sources?: readonly TeamSourceReceipt[];
   readonly metrics?: TeamArtifactMetrics;

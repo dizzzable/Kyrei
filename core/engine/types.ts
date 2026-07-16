@@ -92,7 +92,56 @@ export type SubagentEvent =
     };
 
 /** Terminal reason for a turn (ACP-like stopReason, see requirements §2.3). */
-export type TurnStatus = "complete" | "interrupted" | "error" | "max_steps" | "awaiting_approval";
+export type TurnStatus =
+  | "complete"
+  | "interrupted"
+  | "error"
+  | "max_steps"
+  | "awaiting_approval"
+  /**
+   * Supervised execution mode: file-modifying tools ran; user must accept or
+   * reject (reject restores pre-turn snapshots) before the next turn.
+   */
+  | "awaiting_file_review"
+  /** Goal verifier found the completion condition unmet. */
+  | "goal_unsatisfied"
+  /** Budget guard (tokens/cost/subagents) ended the loop. */
+  | "budget_exceeded"
+  /** Self-heal FSM exhausted retries; distilled handoff written for human/fresh window. */
+  | "heal_handoff";
+
+/** Kiro-style execution mode: review workflow for file mutations (not shell scope). */
+export type ExecutionMode = "autopilot" | "supervised";
+
+/** One hunk inside a file review (Kiro Supervised per-hunk). */
+export interface FileReviewHunk {
+  id: string;
+  status: "pending" | "accepted" | "rejected";
+  start: number;
+  end: number;
+  preview: string;
+}
+
+/** One file entry inside a supervised review (accept/reject per file or hunk). */
+export interface FileReviewFile {
+  path: string;
+  tool: string;
+  snapshotId?: string;
+  /** Per-file decision; pending until user acts (or derived from hunks). */
+  status: "pending" | "accepted" | "rejected";
+  /** Optional unified diff preview (from tool meta). */
+  diffPreview?: string;
+  diffOps?: Array<{ kind: " " | "+" | "-"; text: string }>;
+  hunks?: FileReviewHunk[];
+}
+
+/** Pending file-edit review after a supervised turn (Kiro Supervised analogue). */
+export interface FileReviewState {
+  status: "pending" | "accepted" | "rejected" | "partial";
+  files: FileReviewFile[];
+  snapshotIds: string[];
+  resolvedAt?: string;
+}
 
 /** Events emitted by the engine and relayed by the gateway over SSE. */
 export type KyreiEvent =
@@ -196,6 +245,17 @@ export interface PermissionConfig {
   web: "off" | "search" | "read";
   review: "always" | "agent" | "request";
   rules: Array<{ pattern: string; action: "allow" | "ask" | "deny" }>;
+  /**
+   * Kiro-style protected paths: writes always require approval (both autopilot
+   * and supervised). Patterns: exact basename (`mcp.json`) or path substring
+   * (`.git/`, `.vscode/`).
+   */
+  protectedPaths: string[];
+  /**
+   * Session-scoped allow-once targets (canonical paths) that already passed a
+   * protected-path approval this session. Not a durable security policy.
+   */
+  protectedPathAllowOnce?: string[];
 }
 
 export interface DelegationConfig {
@@ -219,12 +279,58 @@ export interface PromptProfile {
   systemPrompt: string;
 }
 
+/**
+ * Hermes-style context compression:
+ * Stage A — tool-output prune via CCR (reversible).
+ * Stage B — structured middle-turn summary (model projection only; chat JSON SoT untouched).
+ */
+export interface CompressionConfig {
+  /** When false, soft overflow does not prune tool outputs (hard path may still summarize if summaryEnabled). */
+  enabled: boolean;
+  /** Preserve the last N messages untouched while pruning older tool outputs / as tail floor. */
+  protectLastN: number;
+  /** Target size for a truncated tool result (chars, after markers). */
+  pruneToChars: number;
+  /** Stage B: inject structured middle summary into model history (not chat UI). Default true. */
+  summaryEnabled: boolean;
+  /** Optional LLM pass for stage B; fail-open to heuristic. Default false. */
+  summaryUseLlm: boolean;
+  /** Head turns (non-system) kept verbatim when summarizing middle. */
+  protectFirstN: number;
+  /** Skip stage B when transcript shorter than this. */
+  summaryMinMessages: number;
+  /** Anti-thrash cooldown after a successful summary (ms). */
+  summaryCooldownoffMs: number;
+}
+
+/**
+ * Hermes-style tool-loop guardrails (repeated identical calls + heal handoff).
+ * Maps to Hermes `tool_loop_guardrails.*`.
+ */
+export interface ToolLoopConfig {
+  /** Stop when the last N tool signatures are identical (idempotent no-progress). */
+  repeatedCallThreshold: number;
+  /** When false, skip the repeated-call hard stop (heal handoff may still run). */
+  hardStopEnabled: boolean;
+  /** Consecutive hard tool-errors before heal_handoff (self-heal FSM length). */
+  healAfterFailures: number;
+}
+
 export interface EngineConfig {
   maxSteps: number;
   commandTimeoutMs: number;
   maxToolOutput: number;
   contextBudget: { softPct: number; hardPct: number };
+  /** Soft-budget tool-output prune (Hermes compression analogue). */
+  compression: CompressionConfig;
   permissions: PermissionConfig;
+  /**
+   * Kiro-style execution mode.
+   * - autopilot: file writes apply immediately (default; review/revert after).
+   * - supervised: after a turn that edited files, pause for accept/reject.
+   * Shell trusted-policy remains permissions.terminal / rules (separate axis).
+   */
+  executionMode: ExecutionMode;
   fallbackChain: string[];
   /** Optional OS sandbox. strict-required blocks commands when enforcement is unavailable. */
   sandbox: "off" | "strict" | "strict-required";
@@ -232,6 +338,29 @@ export interface EngineConfig {
   apiMaxRetries: number;
   /** Optional assistant personality/style prepended to the system prompt. */
   personality: string;
+  /**
+   * Built-in personality catalog id (`none` | preset id | `custom`).
+   * Effective text is resolved via `resolvePersonalityText` (preset body or free text).
+   */
+  personalityPresetId: string;
+  /**
+   * IANA timezone (e.g. `Europe/Moscow`) injected into the system prompt so
+   * the model can reason about local times. Empty = omit.
+   */
+  timezone: string;
+  /**
+   * Default reasoning effort for turns that do not pass modelParams.effort
+   * (Hermes `agent.reasoning_effort`). Empty = no default.
+   */
+  defaultReasoningEffort: string;
+  /**
+   * How user-attached images are presented to the model
+   * (Hermes `agent.image_input_mode`):
+   * - auto: native when model reports vision, else text labels
+   * - native: always multimodal image parts
+   * - text: never send pixels (labels/paths only)
+   */
+  imageInputMode: "auto" | "native" | "text";
   /** Bounded user-authored prompt profiles available to the main agent and Team roles. */
   promptProfiles: PromptProfile[];
   /** Empty means no additional profile is assigned to the main agent. */
@@ -241,7 +370,157 @@ export interface EngineConfig {
   /** Flat, bounded, read-only subagent delegation. */
   delegation: DelegationConfig;
   /** Optional external knowledge adapters. Built-in project memory remains canonical. */
-  memory: { gbrain: GBrainConfig };
+  memory: { 
+    gbrain: GBrainConfig;
+    /** Long-term memory bridge: append events/checkpoints to ltm/store/*.jsonl */
+    ltm: { enabled: boolean };
+    /** OpenViking local service adapter (optional AGPLv3 server, user-managed) */
+    openviking: { enabled: boolean; baseURL?: string };
+    /**
+     * Rebuildable FTS/index projection of Tier A files.
+     * Default sqlite under `.kyrei/index/`. Postgres optional for team share.
+     * Never replaces plan/LTM/graph file SoT.
+     */
+    index: {
+      enabled: boolean;
+      backend: "sqlite" | "postgres" | "off";
+      /** Required when backend is postgres (team multi-host FTS). */
+      connectionString?: string;
+      /**
+       * Embedding path for vector projection. Default lexical (offline).
+       * `http` uses an OpenAI-compatible /v1/embeddings endpoint.
+       */
+      embed: {
+        mode: "lexical" | "http";
+        baseURL?: string;
+        model?: string;
+        /** Optional; prefer env/secrets in production. */
+        apiKey?: string;
+        timeoutMs?: number;
+        dim?: number;
+      };
+    };
+    /**
+     * Dual-write gateway chat → engine SessionStore (SQLite under userData).
+     * JSON chat remains SoT; mirror is FTS/migration readiness + optional read path.
+     */
+    sessionMirror: {
+      /** Write path: mirror messages after successful turns. */
+      enabled: boolean;
+      /**
+       * Read path: use mirror SessionStore FTS inside memory_search when
+       * sessionMirrorDir is provided by the gateway. JSON remains UI SoT.
+       */
+      readSearch: boolean;
+      /**
+       * A4b+A4c: public GET prefers engine when caught up; mutations dual-commit
+       * JSON→engine (strict fail on mirror write). Approval/rewind algorithms
+       * still execute on the JSON store first, then write-through.
+       */
+      enginePrimary: boolean;
+    };
+    /**
+     * Session → durable memory curator (archive / on-demand).
+     * Small bounded distill into notes / MEMORY / LTM / handoff catalogs.
+     */
+    curator: {
+      enabled: boolean;
+      /** Run curator after soft-archive (fail-open background). Recommended: true. */
+      autoOnArchive: boolean;
+      /** propose | apply_safe (notes+LTM+handoff) | apply_all (+MEMORY.md append). Recommended: apply_safe. */
+      applyMode: "propose" | "apply_safe" | "apply_all";
+      maxTranscriptChars: number;
+      /** Use a one-shot LLM pass when a model is available; else heuristic only. */
+      useLlm: boolean;
+      /**
+       * Model for LLM pass: worker (Settings worker/small assignment, recommended),
+       * session (chat model), or default (active app model).
+       */
+      modelSource: "worker" | "session" | "default";
+    };
+  };
+  /** Plan-as-files support (.kyrei/plan/ROADMAP.md, STATE.json, phase-N.md) */
+  planning: { enabled: boolean };
+  /**
+   * Clean-context code review (fresh LLM sees only the diff, no conversation
+   * history). Uses the same model as delegation's worker role when configured,
+   * otherwise falls back to the primary session model. Never a separate
+   * provider target — the engine has no credential-bearing config field.
+   */
+  review: { cleanContext: boolean; timeoutMs: number };
+  /**
+   * Phase-4 reliability guardrails. Budget limits layer on top of maxSteps;
+   * goalVerify runs an optional post-turn judge when RunKyreiChatOpts.goal is set.
+   */
+  reliability: {
+    goalVerify: boolean;
+    /**
+     * Stop the tool loop after consecutive hard tool failures (self-heal FSM)
+     * and write a distilled handoff for human / clean-window resume.
+     */
+    healHandoff: boolean;
+    maxTokens?: number;
+    maxCostUsd?: number;
+    maxSubagents?: number;
+    /** Hermes tool_loop_guardrails (repeated call + heal thresholds). */
+    toolLoop: ToolLoopConfig;
+  };
+  /**
+   * Optional MCP client (stdio servers). Off by default — user must enable
+   * and allowlist servers. Tools are untrusted external capabilities.
+   */
+  mcp: {
+    enabled: boolean;
+    servers: Array<{
+      id: string;
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+      enabled?: boolean;
+    }>;
+    timeoutMs: number;
+    maxServers: number;
+    maxToolsPerServer: number;
+    maxResultChars: number;
+  };
+  /**
+   * Opt-in inbound messaging webhook (gateway). No Slack/Telegram SDK —
+   * generic HTTP ingress that can create/append sessions. Token lives in secrets.
+   */
+  messaging: {
+    enabled: boolean;
+    /** When true, inbound text also starts an agent turn (async). */
+    autoRun: boolean;
+    maxBodyChars: number;
+  };
+  /**
+   * Optional Skills catalog curator (Hermes Skill Curator analogue).
+   * Default OFF. Proposal-first; never rewrites SKILL.md or deletes skills.
+   */
+  skills: {
+    curator: {
+      /** Master switch — default false (opt-in). */
+      enabled: boolean;
+      /** propose = review JSON only; apply_safe = auto-disable stale skills only. */
+      applyMode: "propose" | "apply_safe";
+      /** Days without use before a skill is considered stale. */
+      staleDays: number;
+      /** Cap proposals per scan. */
+      maxProposals: number;
+      /**
+       * Optional second layer: LLM suggest_patch proposals (description / SKILL.md draft).
+       * Never auto-applied — explicit apply-one only. Default false.
+       */
+      useLlm: boolean;
+      /** Prefer worker (small), else session model, else app default. */
+      modelSource: "worker" | "session" | "default";
+      /** Max owned skills sent to the LLM per scan. */
+      maxLlmSkills: number;
+      /** Clip each skill body before the LLM call. */
+      maxSkillChars: number;
+    };
+  };
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -249,11 +528,39 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   commandTimeoutMs: 60_000,
   maxToolOutput: 12_000,
   contextBudget: { softPct: 0.75, hardPct: 0.9 },
-  permissions: { terminal: "auto", web: "read", review: "agent", rules: [] },
+  compression: {
+    enabled: true,
+    protectLastN: 6,
+    pruneToChars: 500,
+    summaryEnabled: true,
+    summaryUseLlm: false,
+    protectFirstN: 2,
+    summaryMinMessages: 12,
+    summaryCooldownoffMs: 60_000,
+  },
+  permissions: {
+    terminal: "auto",
+    web: "read",
+    review: "agent",
+    rules: [],
+    protectedPaths: [
+      ".git/",
+      ".git",
+      ".vscode/",
+      "mcp.json",
+      ".kyrei/secrets",
+      "kyrei-secrets.json",
+    ],
+  },
+  executionMode: "autopilot",
   fallbackChain: [],
   sandbox: "off",
   apiMaxRetries: 2,
   personality: "",
+  personalityPresetId: "none",
+  timezone: "",
+  defaultReasoningEffort: "",
+  imageInputMode: "auto",
   promptProfiles: [],
   activePromptProfileId: "",
   fileReadMaxChars: 250_000,
@@ -270,6 +577,62 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       command: "gbrain",
       timeoutMs: 180_000,
       maxOutputBytes: 200_000,
+    },
+    /** Local durable ledger under workspace/ltm — on by default (no Docker). */
+    ltm: { enabled: true },
+    openviking: { enabled: false },
+    /** Local SQLite FTS projection; files remain SoT. */
+    index: {
+      enabled: true,
+      backend: "sqlite",
+      embed: { mode: "lexical" },
+    },
+    /** Dual-write chat into engine SessionStore for FTS/migration. */
+    sessionMirror: { enabled: true, readSearch: true, enginePrimary: true },
+    curator: {
+      enabled: true,
+      autoOnArchive: true,
+      applyMode: "apply_safe",
+      maxTranscriptChars: 24_000,
+      useLlm: true,
+      modelSource: "worker",
+    },
+  },
+  /** Local plan-as-files under .kyrei/plan — on by default (no external deps). */
+  planning: { enabled: true },
+  review: { cleanContext: false, timeoutMs: 30_000 },
+  reliability: {
+    goalVerify: true,
+    healHandoff: true,
+    toolLoop: {
+      repeatedCallThreshold: 3,
+      hardStopEnabled: true,
+      healAfterFailures: 3,
+    },
+  },
+  messaging: {
+    enabled: false,
+    autoRun: false,
+    maxBodyChars: 8_000,
+  },
+  mcp: {
+    enabled: false,
+    servers: [],
+    timeoutMs: 30_000,
+    maxServers: 8,
+    maxToolsPerServer: 64,
+    maxResultChars: 24_000,
+  },
+  skills: {
+    curator: {
+      enabled: false,
+      applyMode: "propose",
+      staleDays: 90,
+      maxProposals: 40,
+      useLlm: false,
+      modelSource: "worker",
+      maxLlmSkills: 6,
+      maxSkillChars: 6_000,
     },
   },
 };
@@ -491,6 +854,22 @@ export interface RunKyreiChatOpts {
   /** Optional multi-provider team available to the acting session model. */
   team?: RuntimeTeamSpec;
   workspace?: string;
+  /**
+   * Optional completion condition for the goal verifier. When set (and
+   * reliability.goalVerify is on), a cheap post-turn judge checks whether the
+   * transcript satisfies the goal before the run is treated as fully done.
+   */
+  goal?: string;
+  /**
+   * User-global memory directory (…/kyrei/memory) for GLOBAL.md layer.
+   * Gateway-owned path under userData; never accepted from the renderer payload.
+   */
+  globalMemoryDir?: string;
+  /**
+   * Directory of the engine SessionStore dual-write mirror (…/session-mirror).
+   * Gateway-owned; enables optional FTS read path without migrating UI chat SoT.
+   */
+  sessionMirrorDir?: string;
   /** Gateway-owned local audit location; never supplied by the renderer. */
   auditLogPath?: string;
   /** Gateway-owned session correlation for local audit records. */
@@ -527,6 +906,15 @@ export interface RunKyreiChatResult {
     modelId: string;
     accountId?: string;
   };
+  /** Present when goal verification ran. */
+  goalVerify?: {
+    satisfied: boolean;
+    gap?: string;
+  };
+  /** Path to distilled handoff when self-heal FSM stopped the turn. */
+  healHandoffPath?: string;
+  /** Present when supervised mode requires accept/reject of file edits. */
+  fileReview?: FileReviewState;
 }
 
 /** A single hunk of a context-anchored patch (apply engine, requirements §3). */

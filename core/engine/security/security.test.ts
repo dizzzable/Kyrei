@@ -116,6 +116,20 @@ describe("permissions engine (deny-wins, two-axis)", () => {
     expect(decide({ ...base, web: "search" }, { tool: "web_fetch", target: "https://example.com" })).toBe("deny");
     expect(decide({ ...base, web: "off" }, { tool: "web_search", target: "framework docs" })).toBe("deny");
   });
+  it("protected paths ask unless session allow-once listed", () => {
+    const cfg: PermissionConfig = {
+      ...base,
+      protectedPaths: ["mcp.json", ".env"],
+    };
+    expect(decide(cfg, { tool: "write_file", target: "project/mcp.json" })).toBe("ask");
+    expect(decide(cfg, { tool: "edit_file", target: ".env" })).toBe("ask");
+    const once: PermissionConfig = {
+      ...cfg,
+      protectedPathAllowOnce: ["project/mcp.json"],
+    };
+    expect(decide(once, { tool: "write_file", target: "project/mcp.json" })).toBe("allow");
+    expect(decide(once, { tool: "write_file", target: ".env" })).toBe("ask");
+  });
 });
 
 describe("pre-hook secret scan", () => {

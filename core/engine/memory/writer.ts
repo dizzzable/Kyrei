@@ -16,7 +16,8 @@ const WRITE_PATTERNS: Record<MemoryRole, RegExp[]> = {
     /[/\\]\.kyrei[/\\]memory[/\\]MEMORY\.md$/,
     /[/\\]\.kyrei[/\\]memory[/\\]notes\.md$/,
     /[/\\]\.kyrei[/\\]handoff[/\\][\w.-]+\.md$/,
-    /[/\\]kyrei[/\\]memory[/\\]GLOBAL\.md$/,
+    // User-global preferences under …/kyrei/memory/GLOBAL.md or …/memory/GLOBAL.md
+    /[/\\](?:kyrei[/\\])?memory[/\\]GLOBAL\.md$/,
   ],
 };
 

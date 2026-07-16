@@ -1,6 +1,14 @@
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import {
+  APPROVAL_TTL_MS,
+  SessionMutationError,
+  resolveApprovalInMessages,
+  consumeApprovalInMessages,
+  planRewindInMessages,
+  commitRewindInMessages,
+} from "./session-mutations.js";
 
 /**
  * Durable, append-safe state for Kyrei sessions and the active mission.
@@ -12,7 +20,6 @@ import { randomUUID } from "node:crypto";
  */
 
 const SCHEMA_VERSION = 7;
-const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_ID_RE = /^msg-[a-zA-Z0-9_-]{8,80}$/;
 
 export class SessionApprovalError extends Error {
@@ -22,6 +29,8 @@ export class SessionApprovalError extends Error {
     this.code = code;
   }
 }
+
+export { SessionMutationError, APPROVAL_TTL_MS };
 
 export function isSessionMessageId(value) {
   return typeof value === "string" && MESSAGE_ID_RE.test(value);
@@ -140,15 +149,55 @@ function boundedTarget(value, maxLength) {
     : "";
 }
 
+function boundedSessionId(value) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const id = value.trim().slice(0, 128);
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id) ? id : "";
+}
+
 function normalizeSessionRecord(value) {
   const source = value && typeof value === "object" ? value : {};
   const accountBindingWasSupplied = Object.prototype.hasOwnProperty.call(source, "providerAccountId");
-  const { providerId: rawProviderId, modelId: rawModelId, providerAccountId: rawProviderAccountId, ...rest } = source;
+  const {
+    providerId: rawProviderId,
+    modelId: rawModelId,
+    providerAccountId: rawProviderAccountId,
+    parentSessionId: rawParent,
+    rootSessionId: rawRoot,
+    forkedFromMessageId: rawForkMsg,
+    forkedAt: rawForkedAt,
+    lineageKind: rawLineageKind,
+    ...rest
+  } = source;
   const providerId = boundedTarget(rawProviderId, 64);
   const modelId = boundedTarget(rawModelId, 512);
   const providerAccountId = boundedTarget(rawProviderAccountId, 64);
+  const archived = source.archived === true;
+  const archivedAt = typeof source.archivedAt === "string" && Number.isFinite(Date.parse(source.archivedAt))
+    ? source.archivedAt
+    : undefined;
+  const parentSessionId = boundedSessionId(rawParent);
+  const rootSessionId = boundedSessionId(rawRoot);
+  const forkedFromMessageId = typeof rawForkMsg === "string" && isSessionMessageId(rawForkMsg)
+    ? rawForkMsg
+    : (typeof rawForkMsg === "string" && rawForkMsg.startsWith("msg-") ? rawForkMsg.slice(0, 80) : "");
+  const forkedAt = typeof rawForkedAt === "string" && Number.isFinite(Date.parse(rawForkedAt))
+    ? rawForkedAt
+    : undefined;
+  const lineageKind = rawLineageKind === "branch" ? "branch" : undefined;
+  // Drop stale archive/lineage fields from rest so clears work.
+  const {
+    archived: _a,
+    archivedAt: _b,
+    parentSessionId: _p,
+    rootSessionId: _r,
+    forkedFromMessageId: _f,
+    forkedAt: _fa,
+    lineageKind: _lk,
+    ...cleanRest
+  } = rest;
   return {
-    ...rest,
+    ...cleanRest,
     ...(providerId ? { providerId } : {}),
     ...(modelId ? { modelId } : {}),
     ...(providerAccountId && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(providerAccountId)
@@ -156,6 +205,16 @@ function normalizeSessionRecord(value) {
       : accountBindingWasSupplied
         ? { providerAccountId: undefined }
         : {}),
+    // Soft-archive: hide from sidebar but keep messages for hybrid memory / restore.
+    ...(archived
+      ? { archived: true, archivedAt: archivedAt ?? new Date().toISOString() }
+      : { archived: false }),
+    // User fork lineage (never used for subagents / compression children).
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(rootSessionId ? { rootSessionId } : {}),
+    ...(forkedFromMessageId ? { forkedFromMessageId } : {}),
+    ...(forkedAt ? { forkedAt } : {}),
+    ...(lineageKind ? { lineageKind } : {}),
   };
 }
 const LEGACY_UNTITLED_TITLES = new Set(["Новый диалог", "New chat", "New session"]);
@@ -235,6 +294,132 @@ export class SessionStore {
     this.touch();
   }
 
+  /**
+   * Soft-archive (or restore). Messages stay on disk for FTS / hybrid memory.
+   * @param {string} id
+   * @param {boolean} archived
+   */
+  setSessionArchived(id, archived) {
+    const current = this.getSession(id);
+    if (!current) return null;
+    if (archived) {
+      return this.upsertSession({
+        ...current,
+        archived: true,
+        archivedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const { archivedAt: _drop, ...rest } = current;
+    return this.upsertSession({
+      ...rest,
+      archived: false,
+      archivedAt: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  /** Active (non-archived) sessions for the sidebar. */
+  listActiveSessions() {
+    return this.state.sessions.filter((s) => s?.archived !== true);
+  }
+
+  /** Soft-archived sessions (messages retained). */
+  listArchivedSessions() {
+    return this.state.sessions.filter((s) => s?.archived === true);
+  }
+
+  /**
+   * Fork a chat into a new session (full copy or prefix through messageId).
+   * Parent messages are never modified. LineageKind is always "branch".
+   * @param {string} parentId
+   * @param {{ messageId?: string, newId?: string, title?: string }} [opts]
+   */
+  forkSession(parentId, opts = {}) {
+    const parent = this.getSession(parentId);
+    if (!parent) return null;
+    const messages = this.getMessages(parentId);
+    let prefix = messages;
+    const messageId = typeof opts.messageId === "string" ? opts.messageId.trim() : "";
+    if (messageId) {
+      const idx = messages.findIndex((m) => m.id === messageId);
+      if (idx < 0) {
+        const err = new Error("fork_message_not_found");
+        err.code = "fork_message_not_found";
+        throw err;
+      }
+      if (messages[idx]?.role !== "user") {
+        const err = new Error("fork_message_not_user");
+        err.code = "fork_message_not_user";
+        throw err;
+      }
+      prefix = messages.slice(0, idx + 1);
+    }
+    const newId = typeof opts.newId === "string" && opts.newId.trim()
+      ? opts.newId.trim()
+      : `sess-${Date.now()}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    if (this.getSession(newId)) {
+      const err = new Error("fork_id_exists");
+      err.code = "fork_id_exists";
+      throw err;
+    }
+    const now = new Date().toISOString();
+    const rootSessionId = parent.rootSessionId || parent.id;
+    const parentTitle = typeof parent.title === "string" ? parent.title.trim() : "";
+    // Keep title locale-neutral (badge shows fork). Optional explicit title from caller.
+    const title = typeof opts.title === "string" && opts.title.trim()
+      ? opts.title.trim().slice(0, 200)
+      : parentTitle.slice(0, 200);
+    const child = this.upsertSession({
+      id: newId,
+      title,
+      source: parent.source === "cron" || parent.source === "import" || parent.source === "messaging"
+        ? parent.source
+        : "chat",
+      createdAt: now,
+      updatedAt: now,
+      ...(parent.providerId ? { providerId: parent.providerId } : {}),
+      ...(parent.modelId ? { modelId: parent.modelId } : {}),
+      ...(parent.providerAccountId ? { providerAccountId: parent.providerAccountId } : {}),
+      archived: false,
+      parentSessionId: parent.id,
+      rootSessionId,
+      lineageKind: "branch",
+      forkedAt: now,
+      ...(messageId ? { forkedFromMessageId: messageId } : {}),
+    });
+    this.state.messages[newId] = [];
+    for (const msg of prefix) {
+      const { id: _oldId, pending: _pending, turnStatus: _ts, ...rest } =
+        msg && typeof msg === "object" ? msg : {};
+      // Drop live turn / pending approval state so the fork is a clean snapshot.
+      let parts = Array.isArray(rest.parts) ? rest.parts : undefined;
+      if (parts) {
+        parts = parts.map((part) => {
+          if (!part || typeof part !== "object") return part;
+          if (part.type === "approval" && part.status === "pending") {
+            return {
+              ...part,
+              status: "denied",
+              deniedReason: "forked_session",
+              resolvedAt: now,
+            };
+          }
+          return part;
+        });
+      }
+      this.appendMessage(newId, {
+        ...rest,
+        ...(parts ? { parts } : {}),
+        pending: false,
+        // Fresh ids so exports/approvals never collide across sessions.
+        id: nextMessageId(),
+      });
+    }
+    this.touch();
+    return { session: child, messageCount: this.getMessages(newId).length };
+  }
+
   appendMessage(sessionId, message) {
     const list = this.state.messages[sessionId] ?? (this.state.messages[sessionId] = []);
     const requestedId = isSessionMessageId(message?.id)
@@ -308,109 +493,61 @@ export class SessionStore {
       && message.parts.some(part => part?.type === "approval" && !part.consumedAt));
   }
 
+  /**
+   * Replace the full message list for a session (used by engine-primary write-back).
+   */
+  replaceMessages(sessionId, messages) {
+    this.state.messages[sessionId] = Array.isArray(messages)
+      ? messages.map((message, index) => normalizeStoredMessage(message, sessionId, index))
+      : [];
+    this.touch();
+    return this.state.messages[sessionId];
+  }
+
   resolveApproval(sessionId, approvalId, { approved, reason = "", now = new Date().toISOString() } = {}) {
-    if (typeof approved !== "boolean") throw new SessionApprovalError("approval_decision_invalid");
-    const found = this.findApproval(sessionId, approvalId);
-    if (!found) throw new SessionApprovalError("approval_not_found");
-    const decisionAt = approvalTimestamp(now, new Date().toISOString());
-    const current = found.approval;
-    if (current.consumedAt) throw new SessionApprovalError("approval_already_consumed");
-    const expired = current.status === "expired"
-      || Date.parse(current.expiresAt) <= Date.parse(decisionAt);
-    // A denial has no side effect to guard, so its durable decision is also
-    // its one-shot consumption point. This lets a signed continuation (or a
-    // later user turn after a crash) carry the denial without stranding the
-    // session behind an effect callback that will never run.
-    if (expired) {
-      const approval = {
-        ...current,
-        status: "expired",
-        resolvedAt: current.resolvedAt ?? decisionAt,
-        decisionReason: "approval_expired",
-        consumedAt: current.consumedAt ?? decisionAt,
-      };
-      found.message.parts[found.partIndex] = approval;
-      const ready = found.message.parts
-        .filter(part => part?.type === "approval")
-        .every(part => part.status !== "pending");
+    try {
+      const list = this.state.messages[sessionId] ?? [];
+      const result = resolveApprovalInMessages(list, approvalId, { approved, reason, now });
+      this.state.messages[sessionId] = result.messages;
       this.touch();
       return {
-        approval,
-        messageId: found.message.id,
-        ready,
-        modelParams: found.message.approvalModelParams,
+        approval: result.approval,
+        messageId: result.messageId,
+        ready: result.ready,
+        modelParams: result.modelParams,
       };
+    } catch (error) {
+      if (error instanceof SessionMutationError) throw new SessionApprovalError(error.code);
+      throw error;
     }
-    const status = approved ? "approved" : "denied";
-    if (current.status !== "pending" && current.status !== status) {
-      throw new SessionApprovalError("approval_decision_conflict");
-    }
-    const approval = {
-      ...current,
-      status,
-      resolvedAt: current.resolvedAt ?? decisionAt,
-      ...(!approved ? { consumedAt: current.consumedAt ?? decisionAt } : {}),
-      ...(reason ? { decisionReason: String(reason).slice(0, 500) } : {}),
-    };
-    found.message.parts[found.partIndex] = approval;
-    const ready = found.message.parts
-      .filter(part => part?.type === "approval")
-      .every(part => part.status !== "pending");
-    this.touch();
-    return {
-      approval,
-      messageId: found.message.id,
-      ready,
-      modelParams: found.message.approvalModelParams,
-    };
   }
 
   consumeApproval(sessionId, approvalId, now = new Date().toISOString()) {
-    const found = this.findApproval(sessionId, approvalId);
-    if (!found) throw new SessionApprovalError("approval_not_found");
-    if (found.approval.consumedAt) return found.approval;
-    if (found.approval.status !== "approved" && found.approval.status !== "denied" && found.approval.status !== "expired") {
-      throw new SessionApprovalError("approval_not_resolved");
+    try {
+      const list = this.state.messages[sessionId] ?? [];
+      const result = consumeApprovalInMessages(list, approvalId, now);
+      this.state.messages[sessionId] = result.messages;
+      this.touch();
+      return result.approval;
+    } catch (error) {
+      if (error instanceof SessionMutationError) throw new SessionApprovalError(error.code);
+      throw error;
     }
-    const approval = {
-      ...found.approval,
-      consumedAt: approvalTimestamp(now, new Date().toISOString()),
-    };
-    found.message.parts[found.partIndex] = approval;
-    this.touch();
-    return approval;
   }
 
   planRewind(sessionId, messageId) {
     const list = this.state.messages[sessionId] ?? [];
-    const index = list.findIndex(message => message.id === messageId);
-    if (index < 0 || list[index]?.role !== "user") return null;
-    const removed = list.slice(index);
-    const snapshotIds = removed.flatMap(message => Array.isArray(message.parts)
-      ? message.parts.flatMap(part => part?.type === "tool" && typeof part.snapshotId === "string" ? [part.snapshotId] : [])
-      : []);
-    return {
-      sessionId,
-      messageId,
-      index,
-      expectedLength: list.length,
-      originalMessages: list.slice(),
-      originalSession: this.getSession(sessionId) ? { ...this.getSession(sessionId) } : null,
-      draft: typeof list[index].content === "string" ? list[index].content : "",
-      workspace: typeof list[index].workspace === "string" ? list[index].workspace : "",
-      snapshotIds,
-    };
+    const plan = planRewindInMessages(list, messageId, this.getSession(sessionId));
+    if (!plan) return null;
+    return { ...plan, sessionId };
   }
 
   commitRewind(plan) {
     if (!plan || typeof plan !== "object") return false;
     const list = this.state.messages[plan.sessionId] ?? [];
-    if (
-      list.length !== plan.expectedLength
-      || list[plan.index]?.id !== plan.messageId
-      || list[plan.index]?.role !== "user"
-    ) return false;
-    this.state.messages[plan.sessionId] = list.slice(0, plan.index);
+    const result = commitRewindInMessages(list, plan);
+    if (!result.ok) return false;
+    this.state.messages[plan.sessionId] = result.messages;
     const session = this.getSession(plan.sessionId);
     if (session) this.upsertSession({ id: plan.sessionId, updatedAt: new Date().toISOString() });
     else this.touch();
@@ -465,9 +602,15 @@ export class SessionStore {
   }
 
   async flush() {
+    // Cancel debounced write so we don't race a second flush on the same tmp name.
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
     const write = async () => {
       await mkdir(dirname(this.file), { recursive: true });
-      const tmp = `${this.file}.tmp`;
+      // Unique temp name (Windows-safe): concurrent flushes must not share state.json.tmp.
+      const tmp = `${this.file}.${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 12)}.tmp`;
       await writeFile(tmp, JSON.stringify(this.state, null, 2), "utf8");
       await rename(tmp, this.file);
     };

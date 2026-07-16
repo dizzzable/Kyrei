@@ -1,8 +1,13 @@
 # Hermes settings parity audit → Kyrei plan
 
+> **Status (2026-07-16):** Historical audit/plan. Many rows below are **stale** relative to shipped code
+> (archive, image mode, memory/skills curators, MCP, personality, promote-to-rule, etc.).
+> **Live truth:** [`docs/research/hermes-parity-matrix.md`](./research/hermes-parity-matrix.md) and
+> [`.kyrei/memory/MEMORY.md`](../.kyrei/memory/MEMORY.md). Prefer those when deciding what to build next.
+
 ## Scope and evidence
 
-This document is an **audit-only plan** for Hermes settings parity. It is based on the installed local Hermes copy and the current Kyrei worktree; no product code was changed.
+This document was an **audit-only plan** for Hermes settings parity from an earlier worktree snapshot.
 
 ### Hermes evidence used
 - Installed config structure: `/mnt/f/pi cli/Kyrei/hermes/config.yaml`.

@@ -180,6 +180,50 @@ describe("createTeamMemberRunner", () => {
     expect(result.whatWasNotChecked).toEqual(["page"]);
   });
 
+  it("preserves multi-line applicablePatch from structured team_artifact JSON", async () => {
+    const patch = "*** Begin Patch\n*** Add File: notes/a.txt\n+hello\n*** End Patch\n";
+    generateTextMock.mockResolvedValueOnce({
+      text: `<team_artifact>${JSON.stringify({
+        summary: "implemented notes",
+        confidence: 0.95,
+        evidence: ["read notes plan"],
+        validation: ["patch parses"],
+        uncertainties: [],
+        whatWasNotChecked: ["runtime tests"],
+        provenance: ["workspace"],
+        applicablePatch: patch,
+      })}</team_artifact>`,
+      steps: [],
+    });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner({
+      role: { ...role, canSpawn: false, maxChildren: 0 },
+      model: { id: "model" } as never,
+      tools: {},
+      nestedChildTools: {},
+      skills: [],
+      maxDepth: 1,
+      maxSteps: 3,
+      maxRetries: 1,
+      contextWindow: 32_000,
+      cost: { input: 1, output: 2 } as never,
+      emit: () => undefined,
+    });
+    const result = await runner({
+      task: { id: "impl-task", goal: "add notes" },
+      dependencyArtifacts: new Map(),
+      signal: new AbortController().signal,
+    }, {
+      runId: "run",
+      subagentId: "agent",
+      onProgress: () => undefined,
+      reserveNestedAgent: () => undefined,
+    });
+    expect(result.applicablePatch).toBe(patch);
+    expect(result.applicablePatch).toContain("\n");
+    expect(result.summary).toContain("implemented");
+  });
+
   it("does not let a model-written team artifact forge a source receipt", async () => {
     generateTextMock.mockResolvedValueOnce({
       text: `<team_artifact>${JSON.stringify({

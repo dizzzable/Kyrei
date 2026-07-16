@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { parsePatch } from "../apply/parse-patch.js";
 import type {
   ArtifactCheck,
   ArtifactClaim,
@@ -56,6 +57,8 @@ const MAX_COLLECTION_ITEMS = 2_000;
 const MAX_REFERENCES_PER_ITEM = 2_000;
 const MAX_IDENTIFIER_LENGTH = 512;
 const MAX_TEXT_LENGTH = 1_000_000;
+/** Raw applicable patch body limit (utf8 bytes). Leaves room under 512 KB envelope after JSON escape. */
+const MAX_PATCH_BYTES = 64 * 1_024;
 const MAX_ARTIFACT_SERIALIZED_BYTES = 512 * 1_024;
 const MAX_CANONICAL_DEPTH = 32;
 const MAX_CANONICAL_NODES = 20_000;
@@ -116,6 +119,7 @@ const EVIDENCE_KEYS = new Map<string, ReadonlySet<string>>([
   ["diagnostic", new Set([...EVIDENCE_BASE_KEYS, "tool", "outputDigest"])],
   ["url", new Set([...EVIDENCE_BASE_KEYS, "url", "contentDigest"])],
   ["artifact", new Set([...EVIDENCE_BASE_KEYS, "artifactId", "artifactDigest"])],
+  ["patch", new Set([...EVIDENCE_BASE_KEYS, "patch", "patchDigest"])],
 ]);
 
 type JsonRecord = Record<string, unknown>;
@@ -172,6 +176,60 @@ function validateDigest(
   if (validDigest(value)) return true;
   issues.push({ code: "invalid_digest", field, ...(id ? { id } : {}) });
   return false;
+}
+
+/** Reject absolute paths and parent-directory escapes (full jail is apply-time). */
+function isUnsafePatchPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/").trim();
+  if (!normalized) return true;
+  if (normalized.startsWith("/") || normalized.startsWith("//")) return true;
+  if (/^[a-zA-Z]:\//.test(normalized)) return true;
+  if (normalized.split("/").some((segment) => segment === ".." || segment === "")) return true;
+  return false;
+}
+
+function validatePatchEvidence(
+  value: JsonRecord,
+  issues: ArtifactValidationIssue[],
+  id: string,
+): void {
+  if (typeof value.patch !== "string" || value.patch.length === 0) {
+    invalidEvidence(issues, id, "evidence.patch");
+    return;
+  }
+  if (Buffer.byteLength(value.patch, "utf8") > MAX_PATCH_BYTES) {
+    issues.push({ code: "field_too_large", field: "evidence.patch", ...(id ? { id } : {}) });
+    return;
+  }
+  if (!validateDigest(value.patchDigest, "evidence.patchDigest", issues, id)) {
+    return;
+  }
+  const expected = createHash("sha256").update(value.patch, "utf8").digest("hex");
+  if (expected !== String(value.patchDigest).toLowerCase()) {
+    issues.push({ code: "invalid_digest", field: "evidence.patchDigest", ...(id ? { id } : {}) });
+    return;
+  }
+  let files;
+  try {
+    files = parsePatch(value.patch);
+  } catch {
+    invalidEvidence(issues, id, "evidence.patch");
+    return;
+  }
+  if (!Array.isArray(files) || files.length === 0) {
+    invalidEvidence(issues, id, "evidence.patch");
+    return;
+  }
+  for (const file of files) {
+    if (typeof file.file !== "string" || isUnsafePatchPath(file.file)) {
+      invalidEvidence(issues, id, "evidence.patch.path");
+      return;
+    }
+    if (file.dest !== undefined && (typeof file.dest !== "string" || isUnsafePatchPath(file.dest))) {
+      invalidEvidence(issues, id, "evidence.patch.path");
+      return;
+    }
+  }
 }
 
 function rejectUnknownKeys(
@@ -492,6 +550,9 @@ export function validateArtifactEnvelope(artifact: unknown): ArtifactValidationR
         validateText(value.artifactId, "evidence.artifact.artifactId", issues, id, MAX_IDENTIFIER_LENGTH);
         validateDigest(value.artifactDigest, "evidence.artifact.artifactDigest", issues, id);
         break;
+      case "patch":
+        validatePatchEvidence(value, issues, id);
+        break;
       default:
         invalidEvidence(issues, id, "evidence.kind");
     }
@@ -704,6 +765,13 @@ function cloneEvidence(evidence: EvidenceRef): EvidenceRef {
         kind: "artifact",
         artifactId: evidence.artifactId,
         artifactDigest: evidence.artifactDigest,
+      };
+    case "patch":
+      return {
+        ...base,
+        kind: "patch",
+        patch: evidence.patch,
+        patchDigest: evidence.patchDigest,
       };
   }
 }

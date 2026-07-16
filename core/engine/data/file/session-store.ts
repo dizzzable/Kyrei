@@ -6,7 +6,7 @@
  * Requirements §10.1–§10.3.
  */
 
-import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { SessionStore, SessionRecord, StoredMessage } from "../ports.js";
 
@@ -58,6 +58,22 @@ export function createFileSessionStore(baseDir: string): SessionStore {
       if (opts?.workspace) list = list.filter((s) => s.workspace === opts.workspace);
       list.sort((a, b) => (b.startedAt < a.startedAt ? -1 : 1));
       return opts?.limit ? list.slice(0, opts.limit) : list;
+    },
+
+    async deleteSession(id: string): Promise<void> {
+      const idx = await loadIndex();
+      delete idx[id];
+      await saveIndex(idx);
+      try {
+        await rm(transcriptPath(id), { force: true });
+      } catch {
+        /* missing transcript is fine */
+      }
+    },
+
+    async clearMessages(sessionId: string): Promise<void> {
+      await ensure();
+      await writeFile(transcriptPath(sessionId), "", "utf8");
     },
 
     async appendMessage(msg: StoredMessage): Promise<number> {

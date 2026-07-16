@@ -210,8 +210,30 @@ export function normalizeExplicitProviderId(value) {
 
 export function isLocalProviderUrl(baseURL) {
   try {
-    const host = new URL(baseURL).hostname.toLowerCase();
-    return host === "localhost" || host === "0.0.0.0" || host === "::1" || host === "[::1]" || host === "127.0.0.1";
+    const url = new URL(baseURL);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (
+      host === "localhost"
+      || host.endsWith(".localhost")
+      || host === "0.0.0.0"
+      || host === "::1"
+      || host === "127.0.0.1"
+    ) {
+      return true;
+    }
+    // Any 127/8 loopback
+    if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    // RFC1918 LAN (Ollama/LM Studio on another machine in the home network)
+    const parts = host.split(".").map(Number);
+    if (parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+      const [a, b] = parts;
+      if (a === 10) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 192 && b === 168) return true;
+    }
+    // Unique local IPv6 fc00::/7
+    if (host.includes(":") && (host.startsWith("fc") || host.startsWith("fd"))) return true;
+    return false;
   } catch {
     return false;
   }
@@ -620,11 +642,16 @@ export function normalizeProviderSecrets(value) {
     }
     if (Object.keys(providerAccounts).length) accounts[providerId] = providerAccounts;
   }
+  const messagingSource = object(source.messaging);
+  const messagingToken = secretText(messagingSource.webhookToken, 256);
   return {
     version: 3,
     providers,
     accounts,
     ...(approvalSigningKey ? { approvalSigningKey } : {}),
+    ...(messagingToken
+      ? { messaging: { webhookToken: messagingToken } }
+      : {}),
     kiroOrganization: serializeKiroOrganizationSecrets(
       normalizeKiroOrganizationSecrets(source.kiroOrganization),
     ),
@@ -746,6 +773,7 @@ export function publicGatewayConfig(config, secrets) {
     hasKey: hasReadyProviderCredentials(provider, secrets),
     hasStoredCredentials: Object.keys(getProviderAccountCredentials(secrets, provider.id)).length > 0,
   }));
+  const messaging = object(object(config.engine).messaging);
   return {
     provider: active?.baseURL ?? "",
     model: config.activeModelId ?? "",
@@ -759,6 +787,13 @@ export function publicGatewayConfig(config, secrets) {
     orchestration,
     pipelines: normalizePipelines(config.pipelines, orchestration.profiles),
     engine: object(config.engine),
+    messaging: {
+      enabled: messaging.enabled === true,
+      autoRun: messaging.autoRun === true,
+      maxBodyChars: typeof messaging.maxBodyChars === "number" ? messaging.maxBodyChars : 8_000,
+      hasToken: typeof secrets?.messaging?.webhookToken === "string"
+        && secrets.messaging.webhookToken.trim().length >= 16,
+    },
   };
 }
 

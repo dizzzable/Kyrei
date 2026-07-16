@@ -26,6 +26,9 @@ export interface ComposerAttachment {
   refText?: string;
   previewUrl?: string;
   path?: string;
+  /** Base64 image payload without data-URL prefix (image kind only; memory-only). */
+  dataBase64?: string;
+  mediaType?: string;
 }
 
 /** A parked composer state for one session scope. */

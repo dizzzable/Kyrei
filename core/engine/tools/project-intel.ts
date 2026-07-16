@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   analyzeProjectImpact,
   buildProjectIndex,
+  buildProjectIndexIncremental,
   formatProjectImpact,
   formatProjectIndex,
   loadProjectIndex,
@@ -19,11 +20,12 @@ export function buildProjectIntelTools(workspace: string): ToolSet {
       inputSchema: z.object({}),
       execute: async () => {
         try {
-          const index = await buildProjectIndex(workspace);
+          // Try incremental SQLite-backed indexing first (Phase 3C)
+          const index = await buildProjectIndexIncremental(workspace);
           await persistProjectIndex(workspace, index);
-          return `${formatProjectIndex(index, { edgeLimit: 80 })}\n\nSaved under .kyrei/intel/ for future turns.`;
-        } catch (error) {
-          return `Project indexing failed: ${(error as Error).message}`;
+          return `${formatProjectIndex(index, { edgeLimit: 80 })}\n\nSaved under .kyrei/intel/ for subsequent reads.`;
+        } catch (err) {
+          return `Indexing failed: ${err instanceof Error ? err.message : String(err)}`;
         }
       },
     }),

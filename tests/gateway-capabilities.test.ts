@@ -30,8 +30,20 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await server.close();
-  await rm(dataDir, { recursive: true, force: true });
+  try {
+    await server.close();
+  } catch {
+    /* ignore */
+  }
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (attempt === 7) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
 });
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -205,6 +217,9 @@ describe("gateway operational capabilities", () => {
         body: JSON.stringify({ apiKey: "shutdown-capability-test-credential" }),
       });
       const created = await request<{ id: string }>("/api/sessions", { method: "POST" });
+      // Session create may already load the engine for session-mirror dual-write.
+      // This test asserts cancel/shutdown during Skills setup does not start a chat turn.
+      engineLoader.mockClear();
       await request("/api/prompt", {
         method: "POST",
         body: JSON.stringify({ session: created.id, text: "Run during shutdown" }),

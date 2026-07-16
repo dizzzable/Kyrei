@@ -19,6 +19,33 @@ export interface ActionContext {
 const DESTRUCTIVE_RE = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/|mkfs|dd\s+if=|format\s|:\(\)\s*\{|shutdown|reboot)\b/i;
 const NETWORK_RE = /\b(curl|wget|nc|ncat|ssh|scp|ftp|Invoke-WebRequest|Invoke-RestMethod)\b/i;
 
+/**
+ * Kiro-style protected path match.
+ * - pattern ending with `/` or containing `/` (not only basename): path contains
+ * - otherwise: exact basename match (case-insensitive on win32)
+ */
+export function matchesProtectedPath(target: string, patterns: readonly string[]): boolean {
+  if (!target || !patterns?.length) return false;
+  const normalized = target.replaceAll("\\", "/");
+  const base = normalized.split("/").pop() ?? normalized;
+  const ci = process.platform === "win32";
+  for (const raw of patterns) {
+    const p = raw.trim();
+    if (!p) continue;
+    const pattern = p.replaceAll("\\", "/");
+    if (pattern.includes("/")) {
+      const hay = ci ? normalized.toLowerCase() : normalized;
+      const needle = ci ? pattern.toLowerCase() : pattern;
+      if (hay.includes(needle)) return true;
+    } else {
+      const left = ci ? base.toLowerCase() : base;
+      const right = ci ? pattern.toLowerCase() : pattern;
+      if (left === right) return true;
+    }
+  }
+  return false;
+}
+
 /** Explicit rules win by deny > ask > allow when multiple match. */
 function matchRules(cfg: PermissionConfig, key: string): Decision | null {
   let best: Decision | null = null;
@@ -68,11 +95,30 @@ export function decide(cfg: PermissionConfig, action: ActionContext): Decision {
     return ruled ?? "allow";
   }
 
-  // 4. Writes: gate by review policy.
+  // 4. Writes: protected paths always ask (both autopilot and supervised),
+  // unless this session already allow-once'd the target.
   if (action.tool === "write_file" || action.tool === "edit_file") {
+    if (action.target && matchesProtectedPath(action.target, cfg.protectedPaths ?? [])) {
+      const allowOnce = cfg.protectedPathAllowOnce ?? [];
+      const norm = action.target.replaceAll("\\", "/");
+      const allowed = allowOnce.some((p) => {
+        const n = p.replaceAll("\\", "/");
+        return n === norm || norm.endsWith(`/${n}`) || n.endsWith(`/${norm}`);
+      });
+      if (!allowed) return "ask";
+    }
     if (cfg.review === "always") return "ask";
     if (ruled === "allow") return "allow";
     return ruled ?? "allow"; // "agent"/"request" let the agent proceed (UI still reviews diffs)
+  }
+
+  // MCP: listing is allow-by-default once servers are user-configured;
+  // calls default to ask (servers are an attack surface).
+  if (action.tool === "mcp_list_tools") {
+    return ruled ?? "allow";
+  }
+  if (action.tool === "mcp_call") {
+    return ruled ?? "ask";
   }
 
   // 5. Read-only tools default allow.

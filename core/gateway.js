@@ -3,9 +3,55 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, relative } from "node:path";
-import { SessionStore, isSessionMessageId } from "./session-store.js";
-import { beginSnapshotRestore, SessionCheckpointError } from "./session-checkpoints.js";
+import { SessionStore, SessionApprovalError, isSessionMessageId } from "./session-store.js";
+import {
+  engineMessageToGateway,
+  engineSessionToGateway,
+  mergeSessionsPreferEngine,
+  preferMessagesForPrimary,
+} from "./session-engine-primary.js";
+import {
+  resolveApprovalInMessages,
+  planRewindInMessages,
+  commitRewindInMessages,
+  SessionMutationError,
+} from "./session-mutations.js";
+import {
+  normalizeMessagingConfig,
+  publicMessagingStatus,
+  generateMessagingToken,
+} from "./messaging-config.js";
+import {
+  applyFileReviewDecisions,
+  applyHunkDecisionsToFile,
+  collectSessionFileChanges,
+  withAggregatedReview,
+  needsSelectiveHunkApply,
+  applyHunksToOldText,
+} from "./session-file-review.js";
+import {
+  beginSnapshotRestore,
+  restoreSnapshotPaths,
+  readSnapshotRelativeFile,
+  writeWorkspaceRelativeFile,
+  SessionCheckpointError,
+} from "./session-checkpoints.js";
+import {
+  normalizePromptImages,
+  persistPromptImages,
+  imageAttachmentDisplayText,
+  userContentFromStoredMessage,
+  attachmentDirFor,
+} from "./image-attachments.js";
+import { permissionRuleFromApproval, mergePermissionRule } from "./permission-promote.js";
 import { SkillsStore } from "./skills-store.js";
+import {
+  curateSkills,
+  listSkillsCuratorProposals,
+  applyStoredSkillsCuratorProposal,
+  applySingleSkillsProposal,
+  normalizeSkillsCuratorConfig,
+} from "./skills-curator.js";
 import { CronStore } from "./cron-store.js";
 import { CronScheduler } from "./cron-scheduler.js";
 import { TeamRunStore } from "./team-run-store.js";
@@ -92,6 +138,9 @@ const PROMPT_SKILL_ID_RE = /^skill_[a-f0-9]{24}$/;
  *   POST /api/sessions                   -> create -> { id }
  *   GET  /api/sessions/:id/messages      -> { messages }
  *   POST /api/sessions/:id/rewind        -> restore edit checkpoints and truncate from one user message
+ *   POST /api/sessions/:id/file-review   -> supervised accept/reject { accept } or { files:[{path,accept}] }
+ *   GET  /api/sessions/:id/changes       -> list file mutations (view all changes)
+ *   POST /api/sessions/:id/revert-all    -> restore all session snapshots
  *   PATCH  /api/sessions/:id             -> rename { title }
  *   DELETE /api/sessions/:id             -> remove
  *   GET  /api/events?session=<id>        -> SSE event stream for a session
@@ -104,11 +153,14 @@ const PROMPT_SKILL_ID_RE = /^skill_[a-f0-9]{24}$/;
  *   POST /api/pipeline-runs/:id/*        -> start/pause/resume/cancel/approval/attach-session/artifact
  *   POST /api/prompt   { session, text, modelParams? } -> run a turn (emits over SSE)
  *   POST /api/cancel   { session }       -> cancel the running turn
+ *   GET  /api/messaging                  -> inbound webhook status (no secrets)
+ *   POST /api/messaging/token            -> rotate webhook token
+ *   POST /api/messaging/inbound          -> external ingress { text, sessionId? }
  */
 
 const CORS_BASE = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Kyrei-Gateway-Token",
+  "Access-Control-Allow-Headers": "Content-Type, X-Kyrei-Gateway-Token, Authorization, X-Kyrei-Messaging-Token",
 };
 
 function sendJson(res, status, body) {
@@ -1158,6 +1210,48 @@ function validateEngineConfigBoundary(value) {
     ) throw new TypeError("engine_active_prompt_profile_invalid");
     next.activePromptProfileId = activeId;
   }
+  // Lightweight memory.index boundary: keep invalid backends from reaching the engine.
+  if (Object.hasOwn(value, "memory") && value.memory && typeof value.memory === "object" && !Array.isArray(value.memory)) {
+    const memory = { ...value.memory };
+    if (Object.hasOwn(memory, "index") && memory.index && typeof memory.index === "object" && !Array.isArray(memory.index)) {
+      const index = { ...memory.index };
+      if (Object.hasOwn(index, "enabled") && typeof index.enabled !== "boolean") {
+        throw new TypeError("engine_memory_index_enabled_invalid");
+      }
+      if (Object.hasOwn(index, "backend")) {
+        if (!new Set(["sqlite", "postgres", "off"]).has(index.backend)) {
+          throw new TypeError("engine_memory_index_backend_invalid");
+        }
+      }
+      if (Object.hasOwn(index, "connectionString")) {
+        if (typeof index.connectionString !== "string" || index.connectionString.length > 4_000) {
+          throw new TypeError("engine_memory_index_connection_invalid");
+        }
+      }
+      memory.index = index;
+    }
+    if (Object.hasOwn(memory, "ltm") && memory.ltm && typeof memory.ltm === "object" && !Array.isArray(memory.ltm)) {
+      if (Object.hasOwn(memory.ltm, "enabled") && typeof memory.ltm.enabled !== "boolean") {
+        throw new TypeError("engine_memory_ltm_enabled_invalid");
+      }
+    }
+    if (Object.hasOwn(memory, "openviking") && memory.openviking && typeof memory.openviking === "object" && !Array.isArray(memory.openviking)) {
+      if (Object.hasOwn(memory.openviking, "enabled") && typeof memory.openviking.enabled !== "boolean") {
+        throw new TypeError("engine_memory_openviking_enabled_invalid");
+      }
+      if (Object.hasOwn(memory.openviking, "baseURL") && memory.openviking.baseURL != null) {
+        if (typeof memory.openviking.baseURL !== "string" || memory.openviking.baseURL.length > 2_048) {
+          throw new TypeError("engine_memory_openviking_url_invalid");
+        }
+      }
+    }
+    next.memory = memory;
+  }
+  if (Object.hasOwn(value, "planning") && value.planning && typeof value.planning === "object" && !Array.isArray(value.planning)) {
+    if (Object.hasOwn(value.planning, "enabled") && typeof value.planning.enabled !== "boolean") {
+      throw new TypeError("engine_planning_enabled_invalid");
+    }
+  }
   return next;
 }
 
@@ -1208,11 +1302,18 @@ async function verifyWriteResolutionMarker(marker, run, stage) {
   if (marker.outcome === "retry" && stage.workspaceDigestBefore !== observation.digest) {
     throw pipelineConflict("pipeline_write_outcome_uncertain");
   }
-  // Phase 1 has no signed Action Executor receipt or action-specific
-  // postcondition verifier, so accepting "applied" would turn a human claim
-  // into workspace truth. Fail closed until that receipt exists.
+  // applied is allowed only with a deterministic postcondition: current workspace
+  // digest matches the marker AND the workspace actually changed vs stage baseline.
+  // Free-form human claims without matching observation remain rejected.
   if (marker.outcome === "applied") {
-    throw pipelineConflict("pipeline_write_outcome_unverifiable");
+    const baseline = stage.workspaceDigestBefore;
+    if (
+      typeof baseline !== "string"
+      || !/^[a-f0-9]{64}$/i.test(baseline)
+      || observation.digest.toLowerCase() === baseline.toLowerCase()
+    ) {
+      throw pipelineConflict("pipeline_write_outcome_unverifiable");
+    }
   }
   return {
     ...marker,
@@ -1895,11 +1996,266 @@ export async function startGateway({
     collectRuntimeSensitiveValues(configState, secretState)
   );
   const runtimeSensitiveValues = () => runtimeSensitiveValuesFor(config, secrets);
+
+  // Dual-write chat → engine SessionStore. JSON remains write path for
+  // approvals/rewind; enginePrimary (A4b) prefers engine for public GET.
+  let sessionMirrorHandle = null;
+  let sessionMirrorStores = null;
+  const sessionMirrorConfig = () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    const mirror = isPlainRecord(memory.sessionMirror) ? memory.sessionMirror : {};
+    return {
+      enabled: mirror.enabled !== false,
+      readSearch: mirror.readSearch !== false,
+      enginePrimary: mirror.enginePrimary === true,
+    };
+  };
+  const sessionMirrorEnabled = () => sessionMirrorConfig().enabled;
+  const sessionMirrorEnginePrimary = () => sessionMirrorConfig().enabled && sessionMirrorConfig().enginePrimary;
+  const ensureSessionMirror = async () => {
+    if (!sessionMirrorEnabled()) return null;
+    if (sessionMirrorHandle) return sessionMirrorHandle;
+    try {
+      const mod = await getEngine();
+      if (typeof mod?.createStores !== "function" || typeof mod?.createSessionMirror !== "function") {
+        return null;
+      }
+      sessionMirrorStores = mod.createStores(join(dataDir, "session-mirror"));
+      sessionMirrorHandle = mod.createSessionMirror({
+        sessions: sessionMirrorStores.sessions,
+        jsonlPathPrefix: `gateway://${dataDir.replace(/\\/g, "/")}/sessions`,
+        sensitiveValues: runtimeSensitiveValues(),
+      });
+      return sessionMirrorHandle;
+    } catch (error) {
+      console.warn("[kyrei session-mirror] unavailable:", error?.message ?? error);
+      return null;
+    }
+  };
+  /**
+   * Dual-write one session JSON → engine mirror.
+   * @returns {{ ok: boolean, error?: string, skipped?: boolean }}
+   */
+  const mirrorGatewaySession = async (sessionId) => {
+    try {
+      const mirror = await ensureSessionMirror();
+      if (!mirror) {
+        return sessionMirrorEnabled()
+          ? { ok: false, error: "mirror_unavailable" }
+          : { ok: true, skipped: true };
+      }
+      const session = store.getSession(sessionId);
+      if (!session) return { ok: false, error: "session_not_found" };
+      const messages = store.getMessages(sessionId);
+      await mirror.syncSession(
+        {
+          id: sessionId,
+          title: session.title,
+          workspace: typeof config.workspace === "string" ? config.workspace : undefined,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          status: session.status,
+          providerId: session.providerId,
+          modelId: session.modelId,
+          providerAccountId: session.providerAccountId,
+          archived: session.archived === true,
+          ...(session.archived === true && typeof session.archivedAt === "string"
+            ? { archivedAt: session.archivedAt }
+            : {}),
+          ...(typeof session.parentSessionId === "string" && session.parentSessionId
+            ? { parentSessionId: session.parentSessionId }
+            : {}),
+          ...(typeof session.rootSessionId === "string" && session.rootSessionId
+            ? { rootSessionId: session.rootSessionId }
+            : {}),
+          ...(typeof session.forkedFromMessageId === "string" && session.forkedFromMessageId
+            ? { forkedFromMessageId: session.forkedFromMessageId }
+            : {}),
+          ...(typeof session.forkedAt === "string" && session.forkedAt
+            ? { forkedAt: session.forkedAt }
+            : {}),
+          ...(session.lineageKind === "branch" ? { lineageKind: "branch" } : {}),
+        },
+        messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          text:
+            typeof message.text === "string" && message.text.trim()
+              ? message.text
+              : typeof message.content === "string" && message.content.trim()
+                ? message.content
+                : Array.isArray(message.parts)
+                  ? textFromTurnParts(message.parts)
+                  : "",
+          at: message.at,
+          parts: message.parts,
+          pending: message.pending === true,
+          turnStatus: message.turnStatus,
+          approvalModelParams: message.approvalModelParams,
+        })),
+      );
+      return { ok: true };
+    } catch (error) {
+      const message = error?.message ?? "mirror_write_failed";
+      console.warn("[kyrei session-mirror] write failed:", message);
+      return { ok: false, error: message };
+    }
+  };
+
+  /**
+   * A4c write-through: when enginePrimary, require engine dual-commit after JSON mutation.
+   * When not primary, fail-open dual-write (best effort).
+   */
+  const commitSessionToEngine = async (sessionId, { required } = {}) => {
+    const must = required ?? sessionMirrorEnginePrimary();
+    if (!sessionMirrorEnabled()) {
+      return must ? { ok: false, error: "session_mirror_disabled" } : { ok: true, skipped: true };
+    }
+    const result = await mirrorGatewaySession(sessionId);
+    if (result.ok) return result;
+    if (must) return result;
+    return { ok: true, skipped: true, warning: result.error };
+  };
+
+  // ── Inbound messaging webhook (opt-in) ─────────────────────────────
+  const messagingRecent = [];
+  const messagingConfig = () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    return normalizeMessagingConfig(engine.messaging);
+  };
+  const messagingTokenEquals = (provided) => {
+    const expected = typeof secrets?.messaging?.webhookToken === "string"
+      ? secrets.messaging.webhookToken.trim()
+      : "";
+    if (!expected || expected.length < 16) return false;
+    const got = typeof provided === "string" ? provided.trim() : "";
+    if (!got || got.length !== expected.length) return false;
+    try {
+      return timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  };
+  const extractMessagingToken = (req, body) => {
+    const auth = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    if (auth.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
+    const header = req.headers["x-kyrei-messaging-token"];
+    if (typeof header === "string") return header.trim();
+    if (body && typeof body.token === "string") return body.token.trim();
+    return "";
+  };
+  const pushMessagingRecent = (entry) => {
+    messagingRecent.unshift(entry);
+    if (messagingRecent.length > 40) messagingRecent.length = 40;
+  };
+
+  /** A4b public list: prefer engine rows when enginePrimary, union with JSON backup. */
+  const listSessionsForApi = async ({ includeArchived = false, archivedOnly = false } = {}) => {
+    const decorate = (list) => (Array.isArray(list) ? list : []).map((s) => ({
+      ...s,
+      status: runtimeStatus.get(s.id) || "idle",
+      ...(runtimeActivity.has(s.id) ? { activity: runtimeActivity.get(s.id) } : {}),
+    }));
+    const filterArchive = (list) => {
+      if (archivedOnly) return list.filter((s) => s?.archived === true);
+      if (includeArchived) return list;
+      return list.filter((s) => s?.archived !== true);
+    };
+    const jsonSessions = Array.isArray(store.sessions) ? store.sessions : [];
+    if (!sessionMirrorEnginePrimary()) {
+      return decorate(filterArchive(jsonSessions));
+    }
+    try {
+      const mirror = await ensureSessionMirror();
+      if (!mirror || !sessionMirrorStores?.sessions) {
+        return decorate(filterArchive(jsonSessions));
+      }
+      const engRecs = await mirror.listSessions({ limit: 2_000 });
+      const engMapped = engRecs.map((r) => engineSessionToGateway(r)).filter(Boolean);
+      const merged = mergeSessionsPreferEngine(jsonSessions, engMapped);
+      // Prefer JSON archive flag when present (SoT for soft-archive UI).
+      const withArchive = merged.map((s) => {
+        const j = jsonSessions.find((x) => x?.id === s.id);
+        if (!j) return s;
+        return {
+          ...s,
+          archived: j.archived === true,
+          ...(j.archived === true && j.archivedAt ? { archivedAt: j.archivedAt } : {}),
+        };
+      });
+      return decorate(filterArchive(withArchive));
+    } catch (error) {
+      console.warn("[kyrei session-mirror] enginePrimary list fallback to JSON:", error?.message ?? error);
+      return decorate(filterArchive(jsonSessions));
+    }
+  };
+
+  /** A4b public messages: prefer engine when caught up; else JSON (approvals/in-flight). */
+  const getMessagesForApi = async (sessionId) => {
+    const jsonMessages = store.getMessages(sessionId);
+    if (!sessionMirrorEnginePrimary()) return jsonMessages;
+    try {
+      const mirror = await ensureSessionMirror();
+      if (!mirror || !sessionMirrorStores?.sessions) return jsonMessages;
+      const engRows = await sessionMirrorStores.sessions.getMessages(sessionId);
+      const engMapped = (engRows || []).map((m) => engineMessageToGateway(m, sessionId)).filter(Boolean);
+      const { messages } = preferMessagesForPrimary(jsonMessages, engMapped);
+      return messages;
+    } catch (error) {
+      console.warn("[kyrei session-mirror] enginePrimary messages fallback to JSON:", error?.message ?? error);
+      return jsonMessages;
+    }
+  };
+
+  /**
+   * Source messages for mutation algorithms. With enginePrimary, prefer engine
+   * when caught up so approval/rewind run on engine-backed history.
+   */
+  const loadMessagesForMutation = async (sessionId) => {
+    const jsonMessages = store.getMessages(sessionId);
+    if (!sessionMirrorEnginePrimary()) return { messages: jsonMessages, source: "json" };
+    try {
+      await ensureSessionMirror();
+      if (!sessionMirrorStores?.sessions) return { messages: jsonMessages, source: "json" };
+      const engRows = await sessionMirrorStores.sessions.getMessages(sessionId);
+      const engMapped = (engRows || []).map((m) => engineMessageToGateway(m, sessionId)).filter(Boolean);
+      const preferred = preferMessagesForPrimary(jsonMessages, engMapped);
+      return { messages: preferred.messages, source: preferred.source };
+    } catch {
+      return { messages: jsonMessages, source: "json" };
+    }
+  };
+
+  /**
+   * Persist mutation result: JSON list + dual-commit engine (strict when primary).
+   */
+  const persistMutatedMessages = async (sessionId, messages) => {
+    store.replaceMessages(sessionId, messages);
+    await store.flush();
+    const commit = await commitSessionToEngine(sessionId, { required: sessionMirrorEnginePrimary() });
+    if (!commit.ok && sessionMirrorEnginePrimary()) {
+      const err = new Error(commit.error ?? "engine_mirror_write_failed");
+      err.code = "engine_mirror_write_failed";
+      throw err;
+    }
+    return commit;
+  };
   const resolutionReceiptRegistry = new WeakSet();
+  const actionReceiptRegistry = new WeakSet();
+  const truthGateReceiptRegistry = new WeakSet();
   const isVerifiedResolution = (marker) => Boolean(marker && typeof marker === "object" && resolutionReceiptRegistry.has(marker));
+  const isVerifiedActionReceipt = (receipt) => Boolean(receipt && typeof receipt === "object" && actionReceiptRegistry.has(receipt));
+  const isVerifiedTruthGate = (receipt) => Boolean(receipt && typeof receipt === "object" && truthGateReceiptRegistry.has(receipt));
   const teamRunStore = new TeamRunStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
   await teamRunStore.recoverInterrupted().catch(() => []);
-  const pipelineRunStore = new PipelineRunStore({ dataDir, getSensitiveValues: runtimeSensitiveValues, isVerifiedResolution });
+  const pipelineRunStore = new PipelineRunStore({
+    dataDir,
+    getSensitiveValues: runtimeSensitiveValues,
+    isVerifiedResolution,
+    isVerifiedActionReceipt,
+    isVerifiedTruthGate,
+  });
   await pipelineRunStore.recoverInterrupted();
   const workspaceLeaseStore = new WorkspaceLeaseStore({ dataDir, getSensitiveValues: runtimeSensitiveValues, isVerifiedResolution });
   // The gateway is a single local process. A lease owned by an older instance
@@ -2107,9 +2463,49 @@ export async function startGateway({
   const runtimeActivity = new Map(); // sessionId -> public live/last turn activity
   const activePromptProviders = new Map(); // sessionId -> provider ids whose credentials may be in flight
   const subagentRuns = new Map(); // subagentId -> cross-session runtime summary
+  /** Session-scoped protected-path allow-once (after tool approval). Survives rest of session only. */
+  const sessionProtectedAllowOnce = new Map(); // sessionId -> string[]
   const shutdownController = new AbortController();
   let gatewayClosing = false;
   const activeHttpRequests = new Set();
+
+  const noteProtectedPathAllowOnce = (sessionId, approval) => {
+    if (!sessionId || !approval || approval.status !== "approved") return;
+    const name = approval.name;
+    if (name !== "write_file" && name !== "edit_file") return;
+    const raw = typeof approval.args?.path === "string"
+      ? approval.args.path
+      : typeof approval.args?.file === "string"
+        ? approval.args.file
+        : "";
+    const path = raw.replaceAll("\\", "/").trim();
+    if (!path) return;
+    const list = sessionProtectedAllowOnce.get(sessionId) ?? [];
+    if (list.includes(path)) return;
+    list.push(path);
+    sessionProtectedAllowOnce.set(sessionId, list.slice(0, 200));
+  };
+
+  const engineConfigForSession = (sessionId) => {
+    const base = isPlainRecord(config.engine) ? config.engine : {};
+    const allowOnce = sessionProtectedAllowOnce.get(sessionId) ?? [];
+    if (!allowOnce.length) return base;
+    const permissions = isPlainRecord(base.permissions) ? base.permissions : {};
+    const existing = Array.isArray(permissions.protectedPathAllowOnce)
+      ? permissions.protectedPathAllowOnce
+      : [];
+    const merged = [...existing];
+    for (const p of allowOnce) {
+      if (!merged.includes(p)) merged.push(p);
+    }
+    return {
+      ...base,
+      permissions: {
+        ...permissions,
+        protectedPathAllowOnce: merged.slice(0, 200),
+      },
+    };
+  };
 
   const gatewayShutdownError = () => {
     const error = new Error("gateway_shutdown");
@@ -2291,6 +2687,450 @@ export async function startGateway({
       throw gbrainGatewayError("gbrain_install_unverified");
     }
     return initializeGBrain();
+  };
+
+  /** Built-in project memory index (FTS + lexical vectors). Never replaces file SoT. */
+  const builtinMemoryIndexConfig = () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    const index = isPlainRecord(memory.index) ? memory.index : {};
+    const backend = index.backend === "postgres" || index.backend === "off" || index.backend === "sqlite"
+      ? index.backend
+      : "sqlite";
+    const embed = isPlainRecord(index.embed) ? index.embed : {};
+    const embedMode = embed.mode === "http" ? "http" : "lexical";
+    return {
+      enabled: index.enabled !== false,
+      backend,
+      ...(typeof index.connectionString === "string" && index.connectionString.trim()
+        ? { connectionString: index.connectionString.trim() }
+        : {}),
+      embed: {
+        mode: embedMode,
+        ...(typeof embed.baseURL === "string" && embed.baseURL.trim() ? { baseURL: embed.baseURL.trim() } : {}),
+        ...(typeof embed.model === "string" && embed.model.trim() ? { model: embed.model.trim() } : {}),
+        ...(typeof embed.apiKey === "string" && embed.apiKey.trim() ? { apiKey: embed.apiKey.trim() } : {}),
+        ...(Number.isFinite(embed.timeoutMs) ? { timeoutMs: embed.timeoutMs } : {}),
+        ...(Number.isFinite(embed.dim) ? { dim: embed.dim } : {}),
+      },
+    };
+  };
+
+  const inspectBuiltinMemoryIndex = async () => {
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return {
+        state: "error",
+        enabled: true,
+        backend: "off",
+        configuredBackend: "sqlite",
+        indexDir: null,
+        vectorSearch: "none",
+        docCount: 0,
+        vectorCapable: false,
+        tierA: {
+          memoryMd: false,
+          notesMd: false,
+          plan: false,
+          handoffs: 0,
+          ltmDecisions: false,
+          projectIndex: false,
+        },
+        message: "adapter_unavailable",
+      };
+    }
+    if (typeof mod?.inspectWorkspaceMemoryIndex !== "function") {
+      return {
+        state: "error",
+        enabled: true,
+        backend: "off",
+        configuredBackend: "sqlite",
+        indexDir: null,
+        vectorSearch: "none",
+        docCount: 0,
+        vectorCapable: false,
+        tierA: {
+          memoryMd: false,
+          notesMd: false,
+          plan: false,
+          handoffs: 0,
+          ltmDecisions: false,
+          projectIndex: false,
+        },
+        message: "adapter_unavailable",
+      };
+    }
+    return mod.inspectWorkspaceMemoryIndex({
+      workspace: typeof config.workspace === "string" ? config.workspace : "",
+      config: builtinMemoryIndexConfig(),
+    });
+  };
+
+  const extractStoredMessageText = (message) => {
+    if (typeof message?.text === "string" && message.text.trim()) return message.text;
+    if (typeof message?.content === "string" && message.content.trim()) return message.content;
+    if (Array.isArray(message?.parts)) {
+      // Prefer full part flatten when engine helper is unavailable; textFromTurnParts
+      // keeps text-only, which is enough for most user/assistant rows.
+      const textOnly = textFromTurnParts(message.parts);
+      if (textOnly.trim()) return textOnly;
+      // Fallback: include short tool breadcrumbs for searchability.
+      return message.parts
+        .map((part) => {
+          if (!part || typeof part !== "object") return "";
+          if (part.type === "tool") {
+            const name = typeof part.name === "string" ? part.name : "tool";
+            const result = typeof part.result === "string" ? part.result.slice(0, 400) : "";
+            return result ? `[tool:${name}] ${result}` : `[tool:${name}]`;
+          }
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    }
+    return "";
+  };
+
+  /** Chat JSON store stays SoT; project a search-friendly corpus into the index. */
+  const collectSessionsForMemoryIndex = (maxSessions = 40) => {
+    const sessions = Array.isArray(store.sessions) ? store.sessions.slice(0, maxSessions) : [];
+    return sessions.map((session) => ({
+      id: session.id,
+      title: typeof session.title === "string" ? session.title : "",
+      workspace: typeof config.workspace === "string" ? config.workspace : undefined,
+      messages: store.getMessages(session.id).map((message) => ({
+        id: message.id,
+        role: message.role,
+        text: extractStoredMessageText(message),
+        at: message.at,
+      })),
+    }));
+  };
+
+  let sessionProjectTimer = null;
+  let sessionProjectPending = new Set();
+  const scheduleSessionMemoryProject = (sessionId) => {
+    if (typeof sessionId !== "string" || !sessionId.trim()) return;
+    const indexCfg = builtinMemoryIndexConfig();
+    if (!indexCfg.enabled || indexCfg.backend === "off") return;
+    sessionProjectPending.add(sessionId);
+    if (sessionProjectTimer) return;
+    sessionProjectTimer = setTimeout(() => {
+      sessionProjectTimer = null;
+      const ids = [...sessionProjectPending];
+      sessionProjectPending = new Set();
+      void projectSessionsToMemoryIndex(ids).catch(() => undefined);
+    }, 1_500);
+    sessionProjectTimer.unref?.();
+  };
+
+  const projectSessionsToMemoryIndex = async (sessionIds) => {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace || !sessionIds?.length) return;
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return;
+    }
+    if (typeof mod?.createStores !== "function" || typeof mod?.projectSessionsIntoMemory !== "function") return;
+    const sessions = sessionIds
+      .map((id) => {
+        const session = store.getSession(id);
+        if (!session) return null;
+        return {
+          id,
+          title: typeof session.title === "string" ? session.title : "",
+          workspace,
+          messages: store.getMessages(id).map((message) => ({
+            id: message.id,
+            role: message.role,
+            text: extractStoredMessageText(message),
+            at: message.at,
+          })),
+        };
+      })
+      .filter(Boolean);
+    if (!sessions.length) return;
+    let stores;
+    try {
+      stores = mod.createStores(join(workspace, ".kyrei", "index"));
+      await mod.projectSessionsIntoMemory(sessions, {
+        workspace,
+        memory: stores.memory,
+        vectors: stores.vectors,
+        sensitiveValues: runtimeSensitiveValues(),
+        pruneStale: true,
+      });
+    } catch {
+      /* fail-open projection */
+    } finally {
+      try {
+        await stores?.close?.();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  const reindexBuiltinMemoryIndex = async () => {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace) {
+      return {
+        ok: false,
+        upserted: 0,
+        vectorsUpserted: 0,
+        sessionUpserted: 0,
+        sources: [],
+        status: await inspectBuiltinMemoryIndex(),
+        error: "workspace_not_configured",
+      };
+    }
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return {
+        ok: false,
+        upserted: 0,
+        vectorsUpserted: 0,
+        sessionUpserted: 0,
+        sources: [],
+        status: await inspectBuiltinMemoryIndex(),
+        error: "adapter_unavailable",
+      };
+    }
+    if (typeof mod?.reindexWorkspaceMemoryIndex !== "function") {
+      return {
+        ok: false,
+        upserted: 0,
+        vectorsUpserted: 0,
+        sessionUpserted: 0,
+        sources: [],
+        status: await inspectBuiltinMemoryIndex(),
+        error: "adapter_unavailable",
+      };
+    }
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    const planning = isPlainRecord(engine.planning) ? engine.planning : {};
+    return mod.reindexWorkspaceMemoryIndex({
+      workspace,
+      config: builtinMemoryIndexConfig(),
+      ltmEnabled: memory.ltm?.enabled !== false,
+      planningEnabled: planning.enabled !== false,
+      sessions: collectSessionsForMemoryIndex(40),
+      sensitiveValues: runtimeSensitiveValues(),
+    });
+  };
+
+  /** Rebuild LTM runtime snapshot (active-context / last-recall) from the ledger. */
+  const consolidateBuiltinLtm = async () => {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace) {
+      return { ok: false, error: "workspace_not_configured" };
+    }
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    if (memory.ltm?.enabled === false) {
+      return { ok: false, error: "ltm_disabled" };
+    }
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return { ok: false, error: "adapter_unavailable" };
+    }
+    if (typeof mod?.consolidateLtm !== "function") {
+      return { ok: false, error: "adapter_unavailable" };
+    }
+    try {
+      const result = await mod.consolidateLtm(workspace);
+      return {
+        ok: Boolean(result?.success),
+        via: result?.via,
+        ...(result?.error ? { error: result.error } : {}),
+        ...(result?.stdout ? { stdout: result.stdout } : {}),
+      };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? "consolidate_failed" };
+    }
+  };
+
+  /**
+   * Distill a session into notes / MEMORY / LTM / handoff (session-curator).
+   * Fail-open: never blocks archive. Optional small LLM when provider ready.
+   */
+  const runSessionCurator = async (sessionId, opts = {}) => {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace) return { ok: false, error: "no_workspace", sessionId };
+    const session = store.getSession(sessionId);
+    if (!session) return { ok: false, error: "session_not_found", sessionId };
+    const messages = store.getMessages(sessionId);
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    const curatorCfg = isPlainRecord(memory.curator) ? memory.curator : {};
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return { ok: false, error: "adapter_unavailable", sessionId };
+    }
+    if (typeof mod?.curateSession !== "function") {
+      return { ok: false, error: "adapter_unavailable", sessionId };
+    }
+    let model;
+    let modelSourceUsed = "none";
+    if (curatorCfg.useLlm !== false && typeof mod.buildModel === "function") {
+      try {
+        const source = curatorCfg.modelSource === "session" || curatorCfg.modelSource === "default"
+          ? curatorCfg.modelSource
+          : "worker";
+        /** @type {object | undefined} */
+        let target;
+        if (source === "worker") {
+          target = workerRuntimeTarget(sessionId);
+          if (target) modelSourceUsed = "worker";
+        }
+        if (!target && (source === "session" || source === "worker")) {
+          try {
+            const targets = privateRuntimeTargetsForConfig(
+              config,
+              secrets,
+              session.providerId || config.activeProviderId,
+              session.modelId || config.activeModelId,
+              {
+                fallbackToDefault: true,
+                sessionId,
+                preferredAccountId: session.providerAccountId,
+              },
+            );
+            target = targets[0];
+            if (target) modelSourceUsed = "session";
+          } catch {
+            target = undefined;
+          }
+        }
+        if (!target) {
+          try {
+            const targets = privateRuntimeTargetsForConfig(
+              config,
+              secrets,
+              config.activeProviderId,
+              config.activeModelId,
+              { fallbackToDefault: true, sessionId },
+            );
+            target = targets[0];
+            if (target) modelSourceUsed = "default";
+          } catch {
+            target = undefined;
+          }
+        }
+        if (target) {
+          model = mod.buildModel({
+            protocol: target.protocol,
+            baseURL: target.baseURL,
+            apiKey: typeof target.apiKey === "string" ? target.apiKey : "",
+            credentials: target.credentials ?? {},
+            model: target.model,
+            ...(target.headers ? { headers: target.headers } : {}),
+          });
+        }
+      } catch {
+        model = undefined; // heuristic only
+        modelSourceUsed = "none";
+      }
+    }
+    try {
+      const result = await mod.curateSession({
+        sessionId,
+        workspace,
+        title: session.title,
+        messages,
+        config: curatorCfg,
+        ...(model ? { model } : {}),
+        ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+        ...(opts.applyModeOverride ? { applyModeOverride: opts.applyModeOverride } : {}),
+      });
+      if (result?.applied?.length) {
+        // Refresh FTS projection so memory_search sees new notes/MEMORY soon.
+        void reindexBuiltinMemoryIndex().catch(() => undefined);
+      }
+      return { ...result, modelSource: modelSourceUsed };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? "curate_failed", sessionId };
+    }
+  };
+
+  /** Hard deadline for auto-archive curator so a stuck provider cannot hang the process forever. */
+  const ARCHIVE_CURATOR_TIMEOUT_MS = 25_000;
+
+  /**
+   * Fire-and-forget curator after soft-archive. Never blocks the HTTP response.
+   * Emits `session.curated` on success; fail-open on timeout/errors.
+   */
+  const scheduleArchiveCurator = (sessionId) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      try {
+        controller.abort();
+      } catch {
+        /* ignore */
+      }
+    }, ARCHIVE_CURATOR_TIMEOUT_MS);
+    void (async () => {
+      try {
+        const curator = await runSessionCurator(sessionId, { abortSignal: controller.signal });
+        if (curator?.ok) {
+          emitTo(sessionId, {
+            type: "session.curated",
+            payload: {
+              session_id: sessionId,
+              applied: curator.applied,
+              via: curator.via,
+              summary: curator.summary,
+            },
+          });
+        }
+      } catch {
+        /* fail-open: archive already committed */
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+  };
+
+  /** Batch-curate many sessions (e.g. all archived). Sequential, fail-open per id. */
+  const runSessionCuratorBatch = async ({ sessionIds, applyModeOverride } = {}) => {
+    let ids = Array.isArray(sessionIds) ? sessionIds.filter((id) => typeof id === "string" && id) : [];
+    if (!ids.length) {
+      ids = store.listArchivedSessions().map((s) => s.id);
+    }
+    ids = ids.slice(0, 40);
+    const results = [];
+    for (const id of ids) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await runSessionCurator(id, {
+        ...(applyModeOverride ? { applyModeOverride } : {}),
+      });
+      results.push({
+        sessionId: id,
+        ok: r?.ok !== false,
+        applied: r?.applied ?? [],
+        via: r?.via,
+        summary: r?.summary,
+        error: r?.error,
+        modelSource: r?.modelSource,
+      });
+    }
+    return {
+      ok: true,
+      count: results.length,
+      succeeded: results.filter((r) => r.ok).length,
+      results,
+    };
   };
 
   function trackSubagentEvent(sessionId, event) {
@@ -2483,6 +3323,7 @@ export async function startGateway({
     parts,
     modelMessages,
     approvalModelParams,
+    fileReview,
   } = {}) {
     if (turn.finalizePromise) return turn.finalizePromise;
     turn.acceptEvents = false;
@@ -2515,6 +3356,7 @@ export async function startGateway({
             turnStatus: terminalStatus,
             ...(Array.isArray(modelMessages) && modelMessages.length ? { modelMessages } : {}),
             ...(approvalModelParams ? { approvalModelParams } : {}),
+            ...(fileReview && typeof fileReview === "object" ? { fileReview } : {}),
             ...(turn.errorCode ? { errorCode: turn.errorCode } : {}),
             ...(turn.errorMessage ? { errorMessage: turn.errorMessage } : {}),
           });
@@ -2535,6 +3377,26 @@ export async function startGateway({
           publishPublicEvent(turn.sessionId, {
             type: "error",
             payload: { code: "session_persistence_failed" },
+          });
+          publishPublicEvent(turn.sessionId, {
+            type: "message.complete",
+            payload: { text: finalText, status: "error", durable: false },
+          });
+        }
+        return store.getMessage(turn.sessionId, turn.draftId);
+      }
+      // A4c: dual-commit engine after JSON flush (strict when enginePrimary).
+      const engineCommit = await commitSessionToEngine(turn.sessionId);
+      if (!engineCommit.ok && sessionMirrorEnginePrimary()) {
+        turn.persistenceFailed = true;
+        if (!turn.terminalPublished) {
+          turn.terminalPublished = true;
+          publishPublicEvent(turn.sessionId, {
+            type: "error",
+            payload: {
+              code: "engine_mirror_write_failed",
+              message: engineCommit.error ?? "engine_mirror_write_failed",
+            },
           });
           publishPublicEvent(turn.sessionId, {
             type: "message.complete",
@@ -3157,6 +4019,8 @@ export async function startGateway({
       && value.every((item) => isPipelineText(item, maxText));
   }
 
+  const MAX_APPLICABLE_PATCH_BYTES = 64 * 1_024;
+
   function isStructuredPipelineTeamArtifact(value) {
     return value !== null
       && typeof value === "object"
@@ -3170,7 +4034,66 @@ export async function startGateway({
       && isPipelineTextList(value.evidence, 48, 1_000)
       && isPipelineTextList(value.validation, 48, 1_000)
       && isPipelineTextList(value.uncertainties, 48, 1_000)
-      && isPipelineTextList(value.whatWasNotChecked, 48, 1_000);
+      && isPipelineTextList(value.whatWasNotChecked, 48, 1_000)
+      && (
+        value.applicablePatch === undefined
+        || (
+          typeof value.applicablePatch === "string"
+          && value.applicablePatch.length > 0
+          && Buffer.byteLength(value.applicablePatch, "utf8") <= MAX_APPLICABLE_PATCH_BYTES
+        )
+      );
+  }
+
+  /**
+   * Map team applicablePatch → PatchEvidenceRef without pipelineText collapse
+   * (multi-line patch format must be preserved).
+   */
+  function buildApplicablePatchEvidence(applicablePatch, { capturedAt, workspaceDigest, sensitiveValues }) {
+    if (typeof applicablePatch !== "string" || applicablePatch.length === 0) {
+      throw new Error("pipeline_department_patch_invalid");
+    }
+    if (Buffer.byteLength(applicablePatch, "utf8") > MAX_APPLICABLE_PATCH_BYTES) {
+      throw new Error("pipeline_artifact_patch_too_large");
+    }
+    if (redactSensitiveText(applicablePatch, sensitiveValues) !== applicablePatch) {
+      throw new Error("pipeline_artifact_sensitive_value");
+    }
+    if (!/\*\*\* (Add|Update|Delete|Move) File: /.test(applicablePatch)) {
+      throw new Error("pipeline_department_patch_invalid");
+    }
+    // Absolute paths / parent escapes — full parse happens in engine createArtifactEnvelope.
+    const pathMatches = applicablePatch.matchAll(
+      /\*\*\* (?:Add|Update|Delete|Move) File: ([^\n\r]+)/g,
+    );
+    for (const match of pathMatches) {
+      const path = String(match[1] ?? "").trim().replace(/\\/g, "/");
+      const destSplit = path.includes(" -> ") ? path.split(" -> ") : [path];
+      for (const part of destSplit) {
+        const normalized = part.trim();
+        if (
+          !normalized
+          || normalized.startsWith("/")
+          || /^[a-zA-Z]:\//.test(normalized)
+          || normalized.split("/").some((segment) => segment === ".." || segment === "")
+        ) {
+          throw new Error("pipeline_department_patch_invalid");
+        }
+      }
+    }
+    const patchDigest = createHash("sha256").update(applicablePatch, "utf8").digest("hex");
+    return {
+      id: "applicable-patch",
+      kind: "patch",
+      origin: "reported",
+      summary: "Applicable implementation patch",
+      capturedAt,
+      ...(typeof workspaceDigest === "string" && workspaceDigest
+        ? { workspaceDigest }
+        : {}),
+      patch: applicablePatch,
+      patchDigest,
+    };
   }
 
   function isStructuredPipelineTeamResult(value) {
@@ -3221,6 +4144,13 @@ export async function startGateway({
       // response. A model report never becomes trusted workspace evidence.
       outputDigest: digestJson(item),
     }));
+    if (source.applicablePatch !== undefined) {
+      evidence.push(buildApplicablePatchEvidence(source.applicablePatch, {
+        capturedAt,
+        workspaceDigest: run.workspaceCheckpointDigest,
+        sensitiveValues,
+      }));
+    }
     const successfulTasks = Array.isArray(result?.taskResults)
       ? result.taskResults.filter((entry) => entry?.status === "succeeded" && entry?.artifact)
       : [];
@@ -3385,12 +4315,106 @@ export async function startGateway({
     }
   }
 
+  async function executePipelineAction({ run, stage, dependencyArtifacts, signal, lease }) {
+    const sensitiveValues = runtimeSensitiveValues();
+    const startedAt = Date.now();
+    try {
+      await Promise.all([
+        assertPipelineRuntimeCurrent(run),
+        assertWorkspaceCheckpointCurrent(run),
+      ]);
+      throwIfAborted(signal ?? new AbortController().signal);
+      const mod = await getEngine();
+      if (typeof mod?.executeWorkspaceApply !== "function") {
+        throw new Error("action_executor_unavailable");
+      }
+      const { observeWorkspace } = await import("./workspace-evidence.js");
+      const outcome = await mod.executeWorkspaceApply({
+        run,
+        stage,
+        dependencyArtifacts,
+        signal,
+        lease,
+      }, { observeWorkspace });
+      throwIfAborted(signal ?? new AbortController().signal);
+      // Apply intentionally mutates the workspace; do not require the pre-apply
+      // checkpoint to still match. Runtime pin still must be unchanged.
+      await assertPipelineRuntimeCurrent(run);
+      return outcome;
+    } catch (error) {
+      throw sanitizePipelineError(error, sensitiveValues, startedAt);
+    }
+  }
+
+  async function executePipelineTruthGate({ run, stage, dependencyArtifacts, actionReceiptDigests, signal }) {
+    const sensitiveValues = runtimeSensitiveValues();
+    const startedAt = Date.now();
+    try {
+      await Promise.all([
+        assertPipelineRuntimeCurrent(run),
+        assertWorkspaceCheckpointCurrent(run),
+      ]);
+      throwIfAborted(signal ?? new AbortController().signal);
+      const mod = await getEngine();
+      if (typeof mod?.verifyPipelineTruthGate !== "function") {
+        throw new Error("truth_gate_verifier_unavailable");
+      }
+      const { observeWorkspace } = await import("./workspace-evidence.js");
+      // Prefer sandboxed trusted runner (mirrors run_command isolation). Falls open when
+      // the host has no sandbox primitive (Windows) or engine export is missing.
+      const sandboxMode = config.engine?.sandbox ?? "off";
+      const sandbox = typeof mod.createSandbox === "function"
+        ? mod.createSandbox(sandboxMode)
+        : null;
+      const runCommand = sandbox && typeof mod.createSandboxedTrustedCommandRunner === "function"
+        ? mod.createSandboxedTrustedCommandRunner(sandbox, {
+          allowNetwork: false,
+          required: sandboxMode === "strict-required",
+        })
+        : undefined;
+      const outcome = await mod.verifyPipelineTruthGate({
+        run,
+        stage,
+        dependencyArtifacts,
+        actionReceiptDigests,
+        signal,
+      }, {
+        observeWorkspace,
+        ...(runCommand ? { runCommand } : {}),
+      });
+      throwIfAborted(signal ?? new AbortController().signal);
+      await Promise.all([
+        assertPipelineRuntimeCurrent(run),
+        assertWorkspaceCheckpointCurrent(run),
+      ]);
+      return { truthGateReceipt: outcome.truthGateReceipt };
+    } catch (error) {
+      throw sanitizePipelineError(error, sensitiveValues, startedAt);
+    }
+  }
+
+  function authorizeActionReceipt(receipt) {
+    if (!receipt || typeof receipt !== "object") throw new Error("pipeline_action_receipt_invalid");
+    actionReceiptRegistry.add(receipt);
+    return receipt;
+  }
+
+  function authorizeTruthGateReceipt(receipt) {
+    if (!receipt || typeof receipt !== "object") throw new Error("pipeline_truth_gate_receipt_invalid");
+    truthGateReceiptRegistry.add(receipt);
+    return receipt;
+  }
+
   const pipelineAdvances = new Map();
   const pipelineAdvanceControllers = new Map();
   const pipelineMissionRunner = new PipelineMissionRunner({
     runStore: pipelineRunStore,
     workspaceLeaseStore,
     executeDepartment: executePipelineDepartment,
+    executeAction: executePipelineAction,
+    verifyTruthGate: executePipelineTruthGate,
+    authorizeActionReceipt,
+    authorizeTruthGateReceipt,
   });
 
   function schedulePipelineAdvance(runId) {
@@ -3434,23 +4458,66 @@ export async function startGateway({
     return pipelineRunStore.load(runId);
   }
 
-  function convoFor(sessionId) {
-    return store.getMessages(sessionId).flatMap(message => {
-      if (message.role === "user") return [{ role: "user", content: message.content }];
-      if (message.role !== "assistant") return [];
+  function attachmentsRoot() {
+    return attachmentDirFor(dataDir);
+  }
+
+  async function resolveImagePresentation(sessionId) {
+    const engineCfg = engineConfigForSession(sessionId);
+    const mode = engineCfg?.imageInputMode ?? "auto";
+    const session = store.getSession(sessionId);
+    const providerId = session?.providerId || config.activeProviderId;
+    const modelId = session?.modelId || config.activeModelId;
+    const providers = Array.isArray(config.providers) ? config.providers : [];
+    const provider = providers.find((p) => p && p.id === providerId);
+    const models = Array.isArray(provider?.models) ? provider.models : [];
+    let model = models.find((m) => m && (m.id === modelId || m.name === modelId)) ?? null;
+    if (!model && modelId) model = { id: modelId };
+    let supports = false;
+    try {
+      const mod = await getEngine();
+      if (typeof mod.modelSupportsImageInput === "function") {
+        supports = mod.modelSupportsImageInput(model) === true;
+      }
+    } catch {
+      supports = false;
+    }
+    try {
+      const mod = await getEngine();
+      if (typeof mod.decideImagePresentation === "function") {
+        return mod.decideImagePresentation(mode, supports);
+      }
+    } catch {
+      /* fall through */
+    }
+    if (mode === "native") return "native";
+    if (mode === "text") return "text";
+    return supports ? "native" : "text";
+  }
+
+  async function convoFor(sessionId) {
+    const root = attachmentsRoot();
+    const out = [];
+    for (const message of store.getMessages(sessionId)) {
+      if (message.role === "user") {
+        const content = await userContentFromStoredMessage(message, root);
+        out.push({ role: "user", content });
+        continue;
+      }
+      if (message.role !== "assistant") continue;
       // The durable draft is a crash-recovery artifact for the current turn,
       // never prior model context. Feeding it back would duplicate the live
       // answer and may expose an unfinished tool call to the provider.
-      if (message.pending === true || message.turnStatus === "streaming") return [];
+      if (message.pending === true || message.turnStatus === "streaming") continue;
       const structured = internalModelMessages(message.modelMessages);
       const history = structured.length
         ? structured
         : [{ role: "assistant", content: message.content }];
       const responses = approvalResponses(message.parts);
-      return responses.length
-        ? [...history, { role: "tool", content: responses }]
-        : history;
-    });
+      if (responses.length) out.push(...history, { role: "tool", content: responses });
+      else out.push(...history);
+    }
+    return out;
   }
 
   function createSession({ title = "", source = "chat" } = {}) {
@@ -3490,9 +4557,18 @@ export async function startGateway({
     return completion;
   }
 
+  function hasPendingFileReview(sessionId) {
+    return store.getMessages(sessionId).some((message) => (
+      message?.fileReview?.status === "pending"
+      || message?.fileReview?.status === "partial"
+      || message?.turnStatus === "awaiting_file_review"
+    ));
+  }
+
   async function executeReservedPrompt(sessionId, text, modelParams, messageId, {
     appendUser = true,
     skillIds,
+    images,
   } = {}) {
     if (shutdownController.signal.aborted) {
       return { status: "cancelled", sessionId, error: "gateway-shutdown" };
@@ -3500,6 +4576,10 @@ export async function startGateway({
     const session = store.getSession(sessionId);
     if (!session) return { status: "error", sessionId, error: "session-not-found" };
     if (controllers.has(sessionId)) return { status: "error", sessionId, error: "session_busy" };
+    // Supervised mode: block until user accepts/rejects pending file edits.
+    if (hasPendingFileReview(sessionId)) {
+      return { status: "error", sessionId, error: "file_review_pending" };
+    }
 
     const turn = beginActiveTurn(sessionId);
     const { controller } = turn;
@@ -3509,21 +4589,74 @@ export async function startGateway({
       config.providers.map((provider) => [provider.id, providerRuntimeGeneration(provider.id)]),
     );
 
+    // Normalize images early so a bad payload fails before we open a turn stream.
+    const { images: parsedImages, errors: imageErrors } = normalizePromptImages(images);
+    if (imageErrors.length && !parsedImages.length && Array.isArray(images) && images.length) {
+      // Turn already started — mark it failed so the session is not left streaming.
+      try {
+        await finalizeActiveTurn(turn, {
+          status: "error",
+          text: "",
+          parts: [{ type: "text", text: `image_input_invalid: ${imageErrors[0]}` }],
+        });
+      } catch {
+        controllers.delete(sessionId);
+        activeTurns.delete(sessionId);
+      }
+      return { status: "error", sessionId, error: imageErrors[0] || "image_input_invalid" };
+    }
+
     let storedUser = null;
     if (appendUser) {
       const safePromptText = redactSensitiveText(text, runtimeSensitiveValues());
+      let imageAttachments = [];
+      let imagePresentation = "text";
+      if (parsedImages.length) {
+        imagePresentation = await resolveImagePresentation(sessionId);
+        try {
+          imageAttachments = await persistPromptImages(attachmentsRoot(), sessionId, parsedImages);
+        } catch (error) {
+          try {
+            await finalizeActiveTurn(turn, {
+              status: "error",
+              text: "",
+              parts: [{ type: "text", text: `image_persist_failed: ${error?.message ?? error}` }],
+            });
+          } catch {
+            controllers.delete(sessionId);
+            activeTurns.delete(sessionId);
+          }
+          return { status: "error", sessionId, error: "image_persist_failed" };
+        }
+      }
+      // Keep content as user text only; imageAttachments drive model + UI labels.
       storedUser = store.appendMessage(sessionId, {
         id: messageId,
         role: "user",
         content: safePromptText,
+        ...(imageAttachments.length
+          ? {
+              imageAttachments,
+              imagePresentation,
+            }
+          : {}),
       });
       if (!session.title) {
+        const displayExtra = imageAttachmentDisplayText(imageAttachments);
+        const titleBase = safePromptText || displayExtra || "image";
         store.upsertSession({
           id: sessionId,
-          title: safePromptText.slice(0, 48) + (safePromptText.length > 48 ? "…" : ""),
+          title: titleBase.slice(0, 48) + (titleBase.length > 48 ? "…" : ""),
           updatedAt: new Date().toISOString(),
         });
         emitTo(sessionId, { type: "session.title", payload: { session_id: sessionId, title: store.getSession(sessionId).title } });
+      }
+      // A4c: dual-commit user append early when enginePrimary (crash safety).
+      if (sessionMirrorEnginePrimary()) {
+        const userCommit = await commitSessionToEngine(sessionId);
+        if (!userCommit.ok) {
+          console.warn("[kyrei session-mirror] user append dual-commit failed:", userCommit.error);
+        }
       }
     }
 
@@ -3617,7 +4750,7 @@ export async function startGateway({
       });
       const common = {
         emit: event => emitActiveTurnEvent(turn, event),
-        messages: convoFor(sessionId),
+        messages: await convoFor(sessionId),
         providerBase: mainTarget.baseURL,
         providerProtocol: mainTarget.protocol,
         providerId: mainTarget.providerId,
@@ -3633,6 +4766,8 @@ export async function startGateway({
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
         ...(team ? { team } : {}),
         workspace: config.workspace,
+        globalMemoryDir: join(dataDir, "memory"),
+        sessionMirrorDir: join(dataDir, "session-mirror"),
         auditLogPath: join(dataDir, "audit.jsonl"),
         sessionId,
         approvalSecret: secrets.approvalSigningKey,
@@ -3654,7 +4789,7 @@ export async function startGateway({
       const result = await mod.runKyreiChat({
         ...common,
         abortSignal: controller.signal,
-        config: config.engine,
+        config: engineConfigForSession(sessionId),
         ...(safeModelParams ? { modelParams: safeModelParams } : {}),
       });
       // UI parts and structured model history can legitimately share the same
@@ -3680,7 +4815,16 @@ export async function startGateway({
       if (controller.signal.aborted && turnStatus !== "interrupted") {
         throwIfAborted(controller.signal);
       }
-      const successfulTurn = turnStatus === "complete" || turnStatus === "max_steps" || turnStatus === "awaiting_approval";
+      const successfulTurn = turnStatus === "complete"
+        || turnStatus === "max_steps"
+        || turnStatus === "awaiting_approval"
+        || turnStatus === "awaiting_file_review"
+        || turnStatus === "goal_unsatisfied"
+        || turnStatus === "budget_exceeded"
+        || turnStatus === "heal_handoff";
+      const fileReview = publicResult?.fileReview && typeof publicResult.fileReview === "object"
+        ? publicResult.fileReview
+        : undefined;
       await finalizeActiveTurn(turn, {
         status: turnStatus,
         text: assistantText,
@@ -3689,7 +4833,15 @@ export async function startGateway({
         ...(turnStatus === "awaiting_approval" && safeModelParams
           ? { approvalModelParams: safeModelParams }
           : {}),
+        ...(fileReview ? { fileReview } : {}),
       });
+      // Project chat text into the rebuildable search index. Engine dual-commit
+      // already ran inside finalizeActiveTurn (A4c); re-sync only if needed later.
+      if (successfulTurn) {
+        scheduleSessionMemoryProject(sessionId);
+        // Fail-open catch-up when enginePrimary is off (finalize used fail-open).
+        if (!sessionMirrorEnginePrimary()) void mirrorGatewaySession(sessionId);
+      }
       // A non-cooperative provider can resolve after cancellation (including
       // with an explicit `interrupted` status). Its visible draft was already
       // finalized above, but it no longer owns this session and must not make
@@ -3723,7 +4875,11 @@ export async function startGateway({
         };
       }
       return {
-        status: turnStatus === "awaiting_approval" ? "awaiting_approval" : "success",
+        status: turnStatus === "awaiting_approval"
+          ? "awaiting_approval"
+          : turnStatus === "awaiting_file_review"
+            ? "awaiting_file_review"
+            : "success",
         sessionId,
         summary: assistantText.slice(0, 4000),
       };
@@ -4024,6 +5180,468 @@ export async function startGateway({
         return sendJson(res, 200, await installAndInitializeGBrain());
       }
 
+      if (path === "/api/memory/index" && req.method === "GET") {
+        return sendJson(res, 200, await inspectBuiltinMemoryIndex());
+      }
+
+      if (path === "/api/memory/index/reindex" && req.method === "POST") {
+        return sendJson(res, 200, await reindexBuiltinMemoryIndex());
+      }
+
+      // Rebuild LTM runtime projection (files/ledger remain SoT).
+      // Curate one session into notes / MEMORY / LTM / handoff catalogs.
+      const curateMatch = path.match(/^\/api\/sessions\/([^/]+)\/curate-memory$/);
+      if (curateMatch && req.method === "POST") {
+        const sessionId = decodeURIComponent(curateMatch[1]);
+        if (!store.getSession(sessionId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        const body = await readBody(req).catch(() => ({}));
+        const applyMode = body?.applyMode === "propose"
+          || body?.applyMode === "apply_safe"
+          || body?.applyMode === "apply_all"
+          ? body.applyMode
+          : undefined;
+        const result = await runSessionCurator(sessionId, {
+          ...(applyMode ? { applyModeOverride: applyMode } : {}),
+        });
+        if (!result.ok && result.error === "no_workspace") {
+          return sendJson(res, 400, { code: "no_workspace", error: "no_workspace" });
+        }
+        return sendJson(res, 200, { ok: result.ok !== false, ...result });
+      }
+
+      // Batch curate (default: all archived sessions).
+      if (path === "/api/memory/curator/batch" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const applyMode = body?.applyMode === "propose"
+          || body?.applyMode === "apply_safe"
+          || body?.applyMode === "apply_all"
+          ? body.applyMode
+          : undefined;
+        const sessionIds = Array.isArray(body?.sessionIds) ? body.sessionIds : undefined;
+        const result = await runSessionCuratorBatch({
+          sessionIds,
+          ...(applyMode ? { applyModeOverride: applyMode } : {}),
+        });
+        return sendJson(res, 200, result);
+      }
+
+      // List / apply curator proposals (review UI).
+      if (path === "/api/memory/curator/proposals" && req.method === "GET") {
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) return sendJson(res, 400, { code: "no_workspace", error: "no_workspace" });
+        try {
+          const mod = await getEngine();
+          if (typeof mod.listCuratorProposals !== "function") {
+            return sendJson(res, 503, { code: "adapter_unavailable", error: "adapter_unavailable" });
+          }
+          const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 40));
+          const proposals = await mod.listCuratorProposals(workspace, { limit });
+          // Strip full proposal bodies from list for bandwidth; include counts + meta.
+          return sendJson(res, 200, {
+            proposals: proposals.map((p) => ({
+              fileName: p.fileName,
+              path: p.path,
+              sessionId: p.sessionId,
+              title: p.title,
+              via: p.via,
+              applyMode: p.applyMode,
+              status: p.status,
+              at: p.at,
+              applied: p.applied,
+              proposalCount: p.proposalCount,
+              preview: (p.proposals || []).slice(0, 3).map((x) => ({
+                target: x.target,
+                rationale: x.rationale,
+                contentPreview: String(x.content || "").slice(0, 160),
+              })),
+            })),
+          });
+        } catch (error) {
+          return sendJson(res, 500, {
+            code: "list_proposals_failed",
+            error: error?.message ?? "list_proposals_failed",
+          });
+        }
+      }
+
+      if (path === "/api/memory/curator/proposals/apply" && req.method === "POST") {
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) return sendJson(res, 400, { code: "no_workspace", error: "no_workspace" });
+        const body = await readBody(req).catch(() => ({}));
+        const file = typeof body?.fileName === "string" && body.fileName
+          ? body.fileName
+          : typeof body?.path === "string"
+            ? body.path
+            : "";
+        if (!file) return sendJson(res, 400, { code: "file_required", error: "file_required" });
+        const applyMode = body?.applyMode === "apply_all" ? "apply_all" : "apply_safe";
+        try {
+          const mod = await getEngine();
+          if (typeof mod.applyStoredCuratorProposal !== "function") {
+            return sendJson(res, 503, { code: "adapter_unavailable", error: "adapter_unavailable" });
+          }
+          const result = await mod.applyStoredCuratorProposal(workspace, file, applyMode);
+          if (result.ok && result.applied?.length) {
+            void reindexBuiltinMemoryIndex().catch(() => undefined);
+          }
+          return sendJson(res, result.ok ? 200 : 400, result);
+        } catch (error) {
+          return sendJson(res, 500, {
+            code: "apply_proposal_failed",
+            error: error?.message ?? "apply_proposal_failed",
+          });
+        }
+      }
+
+      if (path === "/api/memory/ltm/consolidate" && req.method === "POST") {
+        return sendJson(res, 200, await consolidateBuiltinLtm());
+      }
+
+      // ── Messaging inbound webhook ─────────────────────────────────
+      if (path === "/api/messaging" && req.method === "GET") {
+        return sendJson(res, 200, publicMessagingStatus(
+          messagingConfig(),
+          secrets,
+          messagingRecent,
+        ));
+      }
+
+      if (path === "/api/messaging/token" && req.method === "POST") {
+        assertGatewayAcceptingMutations();
+        const token = generateMessagingToken();
+        secrets = normalizeProviderSecrets({
+          ...secrets,
+          messaging: { webhookToken: token },
+        });
+        await saveConfig(config, secrets);
+        // Return token once — never stored in public config.
+        return sendJson(res, 200, {
+          ok: true,
+          token,
+          status: publicMessagingStatus(messagingConfig(), secrets, messagingRecent),
+        });
+      }
+
+      if (path === "/api/messaging/inbound" && req.method === "POST") {
+        const msgCfg = messagingConfig();
+        if (!msgCfg.enabled) {
+          return sendJson(res, 403, { code: "messaging_disabled", error: "messaging_disabled" });
+        }
+        const body = await readBody(req);
+        if (!messagingTokenEquals(extractMessagingToken(req, body))) {
+          return sendJson(res, 401, { code: "messaging_unauthorized", error: "messaging_unauthorized" });
+        }
+        assertGatewayAcceptingMutations();
+        const text = typeof body.text === "string" ? body.text.trim() : "";
+        if (!text || text.length < 1) {
+          return sendJson(res, 400, { code: "text_required", error: "text_required" });
+        }
+        if (text.length > msgCfg.maxBodyChars) {
+          return sendJson(res, 413, { code: "text_too_long", error: "text_too_long" });
+        }
+        const safeText = redactSensitiveText(text, runtimeSensitiveValues());
+        let sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+        let created = false;
+        if (sessionId) {
+          if (!store.getSession(sessionId)) {
+            return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+          }
+        } else {
+          const title = typeof body.title === "string" && body.title.trim()
+            ? body.title.trim().slice(0, 80)
+            : `Inbound ${new Date().toISOString().slice(0, 16)}`;
+          const session = createSession({ title, source: "messaging" });
+          sessionId = session.id;
+          created = true;
+        }
+        const stored = store.appendMessage(sessionId, {
+          role: "user",
+          content: safeText,
+          text: safeText,
+          parts: [{ type: "text", text: safeText }],
+        });
+        store.upsertSession({
+          id: sessionId,
+          updatedAt: new Date().toISOString(),
+          ...(created ? {} : {}),
+        });
+        await store.flush();
+        const commit = await commitSessionToEngine(sessionId);
+        if (!commit.ok && sessionMirrorEnginePrimary()) {
+          return sendJson(res, 503, {
+            code: "engine_mirror_write_failed",
+            error: commit.error ?? "engine_mirror_write_failed",
+          });
+        }
+        const eventId = `msg-in-${Date.now().toString(36)}`;
+        let autoRunStarted = false;
+        if (msgCfg.autoRun) {
+          try {
+            // Message already appended; continue without duplicating the user turn.
+            void runPrompt(sessionId, "", undefined, undefined, undefined, { appendUser: false });
+            autoRunStarted = true;
+          } catch (error) {
+            console.warn("[kyrei messaging] autoRun failed:", error?.message ?? error);
+          }
+        }
+        pushMessagingRecent({
+          id: eventId,
+          at: new Date().toISOString(),
+          channel: typeof body.channel === "string" ? body.channel.slice(0, 40) : "webhook",
+          sessionId,
+          preview: safeText.slice(0, 120),
+          autoRun: autoRunStarted,
+          status: "accepted",
+        });
+        emitTo(sessionId, {
+          type: "message.start",
+          payload: { session_id: sessionId, message_id: stored.id, source: "messaging" },
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          sessionId,
+          messageId: stored.id,
+          created,
+          autoRun: autoRunStarted,
+          engineCommitted: Boolean(commit.ok && !commit.skipped),
+        });
+      }
+
+      // Dual-write chat mirror: JSON remains SoT; engine store is FTS/read path.
+      if (path === "/api/memory/session-mirror" && req.method === "GET") {
+        const cfg = sessionMirrorConfig();
+        if (!cfg.enabled) {
+          return sendJson(res, 200, {
+            enabled: false,
+            readSearch: false,
+            enginePrimary: false,
+            state: "disabled",
+            sessionCount: 0,
+            message: "session_mirror_disabled",
+          });
+        }
+        try {
+          const mirror = await ensureSessionMirror();
+          if (!mirror) {
+            return sendJson(res, 200, {
+              enabled: true,
+              readSearch: cfg.readSearch,
+              enginePrimary: cfg.enginePrimary,
+              state: "error",
+              sessionCount: 0,
+              message: "mirror_unavailable",
+            });
+          }
+          const sessions = await mirror.listSessions({
+            ...(typeof config.workspace === "string" ? { workspace: config.workspace } : {}),
+            limit: 500,
+          });
+          return sendJson(res, 200, {
+            enabled: true,
+            readSearch: cfg.readSearch,
+            enginePrimary: cfg.enginePrimary,
+            state: "ready",
+            sessionCount: sessions.length,
+            path: join(dataDir, "session-mirror"),
+            note: cfg.enginePrimary
+              ? "A4b: public GET prefers engine when caught up; JSON remains write path for approvals/rewind."
+              : "JSON remains write path; mirror is dual-write FTS. Enable enginePrimary for public GET preference.",
+          });
+        } catch (error) {
+          return sendJson(res, 200, {
+            enabled: true,
+            readSearch: cfg.readSearch,
+            enginePrimary: cfg.enginePrimary,
+            state: "error",
+            sessionCount: 0,
+            message: error?.message ?? "mirror_error",
+          });
+        }
+      }
+
+      if (path === "/api/memory/session-mirror/search" && req.method === "GET") {
+        const cfg = sessionMirrorConfig();
+        if (!cfg.enabled || !cfg.readSearch) {
+          return sendJson(res, 403, { code: "session_mirror_read_disabled", error: "session_mirror_read_disabled" });
+        }
+        const url = new URL(req.url || "/", "http://127.0.0.1");
+        const q = (url.searchParams.get("q") || "").trim();
+        if (!q) return sendJson(res, 400, { code: "query_required", error: "query_required" });
+        try {
+          const mirror = await ensureSessionMirror();
+          if (!mirror) return sendJson(res, 503, { code: "mirror_unavailable", error: "mirror_unavailable" });
+          const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") || 20) || 20));
+          const hits = await mirror.searchMessages(q, { limit });
+          return sendJson(res, 200, {
+            query: q,
+            hits: hits.map((m) => ({
+              sessionId: m.sessionId,
+              seq: m.seq,
+              role: m.role,
+              text: typeof m.text === "string" ? m.text.slice(0, 500) : "",
+              createdAt: m.createdAt,
+            })),
+          });
+        } catch (error) {
+          return sendJson(res, 500, { code: "mirror_search_failed", error: error?.message ?? "mirror_search_failed" });
+        }
+      }
+
+      if (path === "/api/memory/session-mirror/sync" && req.method === "POST") {
+        const cfg = sessionMirrorConfig();
+        if (!cfg.enabled) {
+          return sendJson(res, 403, { code: "session_mirror_disabled", error: "session_mirror_disabled" });
+        }
+        try {
+          const mirror = await ensureSessionMirror();
+          if (!mirror) return sendJson(res, 503, { code: "mirror_unavailable", error: "mirror_unavailable" });
+          const sessions = Array.isArray(store.sessions) ? store.sessions.slice(0, 80) : [];
+          let messages = 0;
+          for (const session of sessions) {
+            const list = store.getMessages(session.id);
+            await mirror.syncSession(
+              {
+                id: session.id,
+                title: session.title,
+                workspace: typeof config.workspace === "string" ? config.workspace : undefined,
+                createdAt: session.createdAt,
+                updatedAt: session.updatedAt,
+                status: session.status,
+                providerId: session.providerId,
+                modelId: session.modelId,
+                providerAccountId: session.providerAccountId,
+              },
+              list.map((message) => ({
+                id: message.id,
+                role: message.role,
+                text:
+                  typeof message.text === "string" && message.text.trim()
+                    ? message.text
+                    : typeof message.content === "string"
+                      ? message.content
+                      : Array.isArray(message.parts)
+                        ? textFromTurnParts(message.parts)
+                        : "",
+                at: message.at,
+                parts: message.parts,
+                pending: message.pending === true,
+                turnStatus: message.turnStatus,
+                approvalModelParams: message.approvalModelParams,
+              })),
+            );
+            messages += list.length;
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            sessions: sessions.length,
+            messages,
+            note: "Full resync from JSON chat SoT into engine SessionStore mirror.",
+          });
+        } catch (error) {
+          return sendJson(res, 500, { code: "mirror_sync_failed", error: error?.message ?? "mirror_sync_failed" });
+        }
+      }
+
+      // Progressive cutover readiness: compare JSON SoT vs engine mirror (never promotes SoT).
+      if (path === "/api/memory/session-mirror/parity" && req.method === "GET") {
+        const cfg = sessionMirrorConfig();
+        const jsonSessions = Array.isArray(store.sessions) ? store.sessions : [];
+        const jsonIds = new Set(jsonSessions.map((s) => s.id).filter(Boolean));
+        let jsonMessages = 0;
+        for (const session of jsonSessions) {
+          jsonMessages += store.getMessages(session.id)?.length ?? 0;
+        }
+        // A4a schema + A4b GET primary + A4c dual-commit mutations when enginePrimary.
+        const schemaReady = true;
+        const enginePrimary = cfg.enginePrimary === true;
+        const writeThrough = enginePrimary; // A4c: mutations dual-commit to engine (strict)
+        const baseBlockers = enginePrimary
+          ? ["json_mutation_logic_still_authoritative"]
+          : ["engine_primary_disabled", "json_mutation_logic_still_authoritative"];
+        if (!cfg.enabled) {
+          return sendJson(res, 200, {
+            enabled: false,
+            schemaReady,
+            enginePrimary: false,
+            writeThrough: false,
+            cutoverReady: false,
+            json: { sessions: jsonIds.size, messages: jsonMessages },
+            mirror: { sessions: 0, messages: 0 },
+            missingInMirror: [...jsonIds].slice(0, 50),
+            extraInMirror: [],
+            blockers: ["session_mirror_disabled", ...baseBlockers],
+            note: "Enable session mirror + enginePrimary for A4b GET + A4c dual-commit writes.",
+          });
+        }
+        try {
+          const mirror = await ensureSessionMirror();
+          if (!mirror) {
+            return sendJson(res, 200, {
+              enabled: true,
+              schemaReady,
+              enginePrimary,
+              writeThrough,
+              cutoverReady: false,
+              json: { sessions: jsonIds.size, messages: jsonMessages },
+              mirror: { sessions: 0, messages: 0 },
+              missingInMirror: [...jsonIds].slice(0, 50),
+              extraInMirror: [],
+              blockers: ["mirror_unavailable", ...baseBlockers],
+              note: "Mirror unavailable; public GET falls back to JSON.",
+            });
+          }
+          const mirrored = await mirror.listSessions({ limit: 2_000 });
+          const mirrorIds = new Set(mirrored.map((s) => s.id).filter(Boolean));
+          let mirrorMessages = 0;
+          for (const id of mirrorIds) {
+            try {
+              const msgs = await sessionMirrorStores?.sessions?.getMessages?.(id);
+              if (Array.isArray(msgs)) mirrorMessages += msgs.length;
+            } catch {
+              /* ignore per-session */
+            }
+          }
+          const missingInMirror = [...jsonIds].filter((id) => !mirrorIds.has(id)).slice(0, 50);
+          const extraInMirror = [...mirrorIds].filter((id) => !jsonIds.has(id)).slice(0, 50);
+          const blockers = [...baseBlockers];
+          if (missingInMirror.length) blockers.unshift("mirror_missing_sessions");
+          // Ready when enginePrimary on, mirror covers JSON, write-through dual-commit active.
+          const cutoverReady = enginePrimary && writeThrough && missingInMirror.length === 0;
+          return sendJson(res, 200, {
+            enabled: true,
+            schemaReady,
+            enginePrimary,
+            writeThrough,
+            cutoverReady,
+            json: { sessions: jsonIds.size, messages: jsonMessages },
+            mirror: { sessions: mirrorIds.size, messages: mirrorMessages },
+            missingInMirror,
+            extraInMirror,
+            blockers: cutoverReady ? [] : blockers,
+            note: cutoverReady
+              ? "A4b+A4c: GET prefers engine; approval/rewind pure algorithms on preferred history + dual-commit."
+              : "Resync mirror and enable enginePrimary for dual-commit + GET preference.",
+          });
+        } catch (error) {
+          return sendJson(res, 200, {
+            enabled: true,
+            schemaReady,
+            enginePrimary,
+            writeThrough,
+            cutoverReady: false,
+            json: { sessions: jsonIds.size, messages: jsonMessages },
+            mirror: { sessions: 0, messages: 0 },
+            missingInMirror: [...jsonIds].slice(0, 50),
+            extraInMirror: [],
+            blockers: ["parity_error", ...baseBlockers],
+            message: error?.message ?? "parity_error",
+            note: "JSON chat store is UI write path.",
+          });
+        }
+      }
+
       if (path === "/api/pipelines") {
         if (req.method === "GET") {
           return sendJson(res, 200, normalizePipelines(config.pipelines, config.orchestration.profiles));
@@ -4097,6 +5715,10 @@ export async function startGateway({
                   allowedHelpFrom: stage.allowedHelpFrom,
                   retry: stage.retry,
                   ...(stage.action ? { action: stage.action } : {}),
+                  // Pinned truth-gate checks (testDigest frozen at config normalize).
+                  ...(Array.isArray(stage.checks) && stage.checks.length
+                    ? { checks: stage.checks }
+                    : {}),
                 },
               })),
               budget: {
@@ -4997,6 +6619,207 @@ export async function startGateway({
         }
       }
 
+      // Optional Skills curator (default OFF). Proposal-first; LLM patches never auto-applied.
+      if (path === "/api/skills/curator/scan" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const engineSkills = isPlainRecord(config.engine?.skills) ? config.engine.skills : {};
+        const curatorCfg = normalizeSkillsCuratorConfig(
+          isPlainRecord(engineSkills.curator) ? engineSkills.curator : {},
+        );
+        // force=true is for offline/tests: always propose-only (never apply_safe without opt-in).
+        const force = body?.force === true;
+        const enabled = curatorCfg.enabled || force;
+        if (!enabled) {
+          return sendJson(res, 400, { code: "curator_disabled", error: "curator_disabled" });
+        }
+        let applyMode = body?.applyMode === "apply_safe" || body?.applyMode === "propose"
+          ? body.applyMode
+          : undefined;
+        if (force && !curatorCfg.enabled) applyMode = "propose";
+        const listed = await skillsStore.list();
+        let skills = listed;
+        let model;
+        let generateTextFn;
+        let modelSourceUsed = "none";
+        if (curatorCfg.useLlm) {
+          // Load content for owned skills (bounded) so the LLM can draft patches.
+          const owned = listed.filter((s) => s.owned).slice(0, Math.max(curatorCfg.maxLlmSkills * 3, 12));
+          /** @type {Map<string, object>} */
+          const enriched = new Map();
+          for (const s of owned) {
+            try {
+              const full = await skillsStore.get(s.id);
+              enriched.set(s.id, { ...s, content: full.content });
+            } catch {
+              enriched.set(s.id, s);
+            }
+          }
+          skills = listed.map((s) => enriched.get(s.id) || s);
+
+          try {
+            const mod = await getEngine();
+            if (typeof mod?.buildModel === "function") {
+              const source = curatorCfg.modelSource;
+              /** @type {object | undefined} */
+              let target;
+              if (source === "worker") {
+                target = workerRuntimeTarget(undefined);
+                if (target) modelSourceUsed = "worker";
+              }
+              if (!target && (source === "session" || source === "worker")) {
+                try {
+                  const targets = privateRuntimeTargetsForConfig(
+                    config,
+                    secrets,
+                    config.activeProviderId,
+                    config.activeModelId,
+                    { fallbackToDefault: true },
+                  );
+                  target = targets[0];
+                  if (target) modelSourceUsed = "session";
+                } catch {
+                  target = undefined;
+                }
+              }
+              if (!target) {
+                try {
+                  const targets = privateRuntimeTargetsForConfig(
+                    config,
+                    secrets,
+                    config.activeProviderId,
+                    config.activeModelId,
+                    { fallbackToDefault: true },
+                  );
+                  target = targets[0];
+                  if (target) modelSourceUsed = "default";
+                } catch {
+                  target = undefined;
+                }
+              }
+              if (target) {
+                model = mod.buildModel({
+                  protocol: target.protocol,
+                  baseURL: target.baseURL,
+                  apiKey: typeof target.apiKey === "string" ? target.apiKey : "",
+                  credentials: target.credentials ?? {},
+                  model: target.model,
+                  ...(target.headers ? { headers: target.headers } : {}),
+                });
+                const ai = await import("ai");
+                generateTextFn = ai.generateText;
+              }
+            }
+          } catch {
+            model = undefined;
+            modelSourceUsed = "none";
+          }
+        }
+        const result = await curateSkills({
+          dataDir,
+          skills,
+          skillsStore,
+          config: { ...curatorCfg, enabled: true },
+          ...(applyMode ? { applyModeOverride: applyMode } : {}),
+          ...(model ? { model } : {}),
+          ...(generateTextFn ? { generateText: generateTextFn } : {}),
+        });
+        return sendJson(res, result.ok ? 200 : 400, { ...result, modelSource: modelSourceUsed });
+      }
+
+      if (path === "/api/skills/curator/proposals" && req.method === "GET") {
+        const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 40));
+        const proposals = await listSkillsCuratorProposals(dataDir, { limit });
+        return sendJson(res, 200, {
+          proposals: proposals.map((p) => ({
+            fileName: p.fileName,
+            path: p.path,
+            via: p.via,
+            applyMode: p.applyMode,
+            status: p.status,
+            at: p.at,
+            applied: p.applied,
+            proposalCount: p.proposalCount,
+            preview: (p.proposals || []).slice(0, 8).map((x) => ({
+              id: x.id,
+              skillId: x.skillId,
+              skillName: x.skillName,
+              action: x.action,
+              kind: x.kind,
+              reason: x.reason,
+              detail: x.detail,
+              owned: x.owned,
+              patchSummary: x.patchSummary,
+              suggestedDescription: x.suggestedDescription
+                ? String(x.suggestedDescription).slice(0, 280)
+                : undefined,
+              hasContentPatch: Boolean(x.suggestedContent),
+            })),
+          })),
+        });
+      }
+
+      if (path === "/api/skills/curator/proposals/apply" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const file = typeof body?.fileName === "string" && body.fileName
+          ? body.fileName
+          : typeof body?.path === "string"
+            ? body.path
+            : "";
+        if (!file) return sendJson(res, 400, { code: "file_required", error: "file_required" });
+        const result = await applyStoredSkillsCuratorProposal(
+          dataDir,
+          file,
+          "apply_safe",
+          skillsStore,
+        );
+        return sendJson(res, result.ok ? 200 : 400, result);
+      }
+
+      if (path === "/api/skills/curator/proposals/apply-one" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const skillId = typeof body?.skillId === "string" ? body.skillId : "";
+        const action = body?.action === "enable"
+          || body?.action === "disable"
+          || body?.action === "apply_patch"
+          || body?.action === "suggest_patch"
+          ? body.action
+          : "";
+        if (!skillId || !action) {
+          return sendJson(res, 400, { code: "invalid_proposal", error: "skillId and action required" });
+        }
+        try {
+          // For LLM patches, resolve draft from stored proposal file when not inlined.
+          let suggestedContent = typeof body?.suggestedContent === "string" ? body.suggestedContent : undefined;
+          let suggestedDescription = typeof body?.suggestedDescription === "string"
+            ? body.suggestedDescription
+            : undefined;
+          if ((action === "apply_patch" || action === "suggest_patch")
+            && !suggestedContent && !suggestedDescription
+            && typeof body?.fileName === "string" && body.fileName
+            && typeof body?.proposalId === "string" && body.proposalId) {
+            const listed = await listSkillsCuratorProposals(dataDir, { limit: 100 });
+            const row = listed.find((p) => p.fileName === basename(body.fileName));
+            const hit = (row?.proposals || []).find((x) => x.id === body.proposalId && x.skillId === skillId);
+            if (hit) {
+              if (typeof hit.suggestedContent === "string") suggestedContent = hit.suggestedContent;
+              if (typeof hit.suggestedDescription === "string") suggestedDescription = hit.suggestedDescription;
+            }
+          }
+          const result = await applySingleSkillsProposal(skillsStore, {
+            skillId,
+            action,
+            ...(suggestedContent ? { suggestedContent } : {}),
+            ...(suggestedDescription ? { suggestedDescription } : {}),
+          });
+          return sendJson(res, result.ok ? 200 : 400, result);
+        } catch (error) {
+          return sendJson(res, 400, {
+            code: error?.code ?? "apply_failed",
+            error: error?.message ?? "apply_failed",
+          });
+        }
+      }
+
       if (path === "/api/skills/roots") {
         if (req.method === "POST") {
           const folder = chooseFolder ? await chooseFolder() : "";
@@ -5086,19 +6909,444 @@ export async function startGateway({
         }
       }
 
+      if (path === "/api/import/transcript" && req.method === "POST") {
+        assertGatewayAcceptingMutations();
+        const body = await readBody(req);
+        const fileName = typeof body.fileName === "string" && body.fileName.trim()
+          ? body.fileName.trim().slice(0, 260)
+          : "import.bin";
+        let bytes;
+        if (typeof body.contentBase64 === "string" && body.contentBase64.length) {
+          try {
+            bytes = Buffer.from(body.contentBase64, "base64");
+          } catch {
+            return sendJson(res, 400, { code: "import_invalid_input", error: "invalid contentBase64" });
+          }
+        } else {
+          return sendJson(res, 400, { code: "import_invalid_input", error: "contentBase64 required" });
+        }
+        if (bytes.byteLength > 32 * 1024 * 1024) {
+          return sendJson(res, 413, { code: "import_payload_too_large", error: "import_payload_too_large" });
+        }
+        const workspace = config.workspace;
+        if (typeof workspace !== "string" || !workspace.trim()) {
+          return sendJson(res, 400, { code: "import_workspace_invalid", error: "workspace not configured" });
+        }
+        const options = body.options && typeof body.options === "object" ? body.options : {};
+        const ltmDir = typeof config.engine?.memory?.ltm?.dir === "string"
+          ? config.engine.memory.ltm.dir
+          : (config.workspace ? join(config.workspace, "ltm") : undefined);
+        try {
+          const mod = await getEngine();
+          if (typeof mod?.orchestrateImport !== "function") {
+            return sendJson(res, 503, { code: "import_unavailable", error: "import_unavailable" });
+          }
+          const createSessionFlag = options.createSession !== false;
+          const result = await mod.orchestrateImport(
+            {
+              fileName,
+              bytes: new Uint8Array(bytes),
+            },
+            {
+              workspace,
+              ltmDir: options.writeLtm === false ? undefined : ltmDir,
+              adapterId: typeof body.adapterId === "string" ? body.adapterId : undefined,
+              writeHandoff: options.writeHandoff !== false,
+              writeLtm: options.writeLtm !== false,
+              createSession: createSessionFlag,
+              includeTranscriptExcerpt: options.includeTranscriptExcerpt === true,
+              dedupe: options.dedupe !== false,
+              dedupeMode: options.dedupeMode === "refresh" ? "refresh" : "skip",
+              sessionTitle: typeof options.sessionTitle === "string" ? options.sessionTitle : undefined,
+              reindex: options.reindex !== false,
+              index: config.engine?.memory?.index && typeof config.engine.memory.index === "object"
+                ? config.engine.memory.index
+                : undefined,
+            },
+            {
+              createSeedSession: createSessionFlag
+                ? async ({ title, seedText }) => {
+                  const session = createSession({ title, source: "import" });
+                  const safe = redactSensitiveText(seedText, runtimeSensitiveValues());
+                  store.appendMessage(session.id, {
+                    role: "user",
+                    content: safe.slice(0, 32_000),
+                  });
+                  store.upsertSession({
+                    id: session.id,
+                    title: session.title || title,
+                    updatedAt: new Date().toISOString(),
+                  });
+                  return { sessionId: session.id };
+                }
+                : undefined,
+            },
+          );
+          return sendJson(res, 200, {
+            report: result.report,
+            handoffId: result.report.handoffId,
+            sessionId: result.report.sessionId,
+          });
+        } catch (error) {
+          const code = error && typeof error === "object" && typeof error.code === "string"
+            ? error.code
+            : "import_failed";
+          const status = code === "import_payload_too_large"
+            ? 413
+            : code === "import_duplicate"
+              ? 409
+              : code === "import_format_unsupported" || code === "import_format_ambiguous"
+                || code === "import_adapter_parse_failed" || code === "import_transcript_empty"
+                || code === "import_invalid_input" || code === "import_workspace_invalid"
+                ? 422
+                : 400;
+          return sendJson(res, status, {
+            code,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
       if (path === "/api/sessions") {
         if (req.method === "GET") {
-          const sessions = store.sessions.map(s => ({
-            ...s,
-            status: runtimeStatus.get(s.id) || "idle",
-            ...(runtimeActivity.has(s.id) ? { activity: runtimeActivity.get(s.id) } : {}),
-          }));
-          return sendJson(res, 200, { sessions });
+          const archivedParam = url.searchParams.get("archived");
+          const archivedOnly = archivedParam === "1" || archivedParam === "only" || archivedParam === "true";
+          const includeArchived = archivedParam === "all";
+          const sessions = await listSessionsForApi({ archivedOnly, includeArchived });
+          return sendJson(res, 200, {
+            sessions,
+            ...(sessionMirrorEnginePrimary() ? { source: "engine_primary" } : { source: "json" }),
+            ...(archivedOnly ? { filter: "archived" } : includeArchived ? { filter: "all" } : { filter: "active" }),
+          });
         }
         if (req.method === "POST") {
           const session = createSession();
+          const commit = await commitSessionToEngine(session.id);
+          if (!commit.ok && sessionMirrorEnginePrimary()) {
+            store.removeSession(session.id);
+            return sendJson(res, 503, {
+              code: "engine_mirror_write_failed",
+              error: commit.error ?? "engine_mirror_write_failed",
+            });
+          }
           return sendJson(res, 200, { id: session.id, session });
         }
+      }
+
+      // Fork chat into a new session (lineageKind=branch). Parent history untouched.
+      const forkMatch = path.match(/^\/api\/sessions\/([^/]+)\/fork$/);
+      if (forkMatch && req.method === "POST") {
+        const parentId = decodeURIComponent(forkMatch[1]);
+        if (!store.getSession(parentId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        if (controllers.has(parentId) || sessionReservations.has(parentId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        assertGatewayAcceptingMutations();
+        const body = await readBody(req).catch(() => ({}));
+        const messageId = typeof body?.messageId === "string" && body.messageId.trim()
+          ? body.messageId.trim()
+          : undefined;
+        try {
+          const result = store.forkSession(parentId, { messageId });
+          if (!result?.session) {
+            return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+          }
+          await store.flush();
+          const commit = await commitSessionToEngine(result.session.id);
+          if (!commit.ok && sessionMirrorEnginePrimary()) {
+            // Roll back JSON + mirror so enginePrimary list does not ghost the fork.
+            try {
+              const mirror = await ensureSessionMirror();
+              if (mirror && typeof mirror.removeSession === "function") {
+                await mirror.removeSession(result.session.id);
+              }
+            } catch {
+              /* best-effort */
+            }
+            store.removeSession(result.session.id);
+            await store.flush().catch(() => {});
+            return sendJson(res, 503, {
+              code: "engine_mirror_write_failed",
+              error: commit.error ?? "engine_mirror_write_failed",
+            });
+          }
+          try {
+            emitTo(parentId, {
+              type: "session.forked",
+              payload: {
+                parent_session_id: parentId,
+                session_id: result.session.id,
+                message_count: result.messageCount,
+              },
+            });
+          } catch {
+            /* SSE notify is best-effort */
+          }
+          return sendJson(res, 200, {
+            id: result.session.id,
+            session: result.session,
+            messageCount: result.messageCount,
+            ...(sessionMirrorEnginePrimary() ? { engineCommitted: true } : {}),
+          });
+        } catch (error) {
+          const code = error?.code ?? "fork_failed";
+          const status = code === "fork_message_not_found" || code === "fork_message_not_user"
+            ? 400
+            : code === "fork_id_exists"
+              ? 409
+              : 500;
+          return sendJson(res, status, {
+            code,
+            error: error?.message ?? "fork_failed",
+          });
+        }
+      }
+
+      // View all file changes across the session (autopilot + supervised).
+      const changesMatch = path.match(/^\/api\/sessions\/([^/]+)\/changes$/);
+      if (changesMatch && req.method === "GET") {
+        const sessionId = decodeURIComponent(changesMatch[1]);
+        if (!store.getSession(sessionId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        const changes = collectSessionFileChanges(store.getMessages(sessionId));
+        return sendJson(res, 200, { sessionId, changes, count: changes.length });
+      }
+
+      // Revert all agent file mutations in the session (snapshot restore).
+      const revertAllMatch = path.match(/^\/api\/sessions\/([^/]+)\/revert-all$/);
+      if (revertAllMatch && req.method === "POST") {
+        const sessionId = decodeURIComponent(revertAllMatch[1]);
+        if (!store.getSession(sessionId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        await releaseFinalizedTurn(sessionId);
+        if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        assertGatewayAcceptingMutations();
+        const changes = collectSessionFileChanges(store.getMessages(sessionId));
+        const snapshotIds = [];
+        const seen = new Set();
+        for (const c of changes) {
+          if (c.snapshotId && !seen.has(c.snapshotId)) {
+            seen.add(c.snapshotId);
+            snapshotIds.push(c.snapshotId);
+          }
+        }
+        let restored = { restoredSnapshots: 0, restoredFiles: 0 };
+        if (snapshotIds.length && config.workspace) {
+          try {
+            const fileTransaction = await beginSnapshotRestore({
+              workspace: config.workspace,
+              snapshotIds: [...snapshotIds].reverse(),
+            });
+            restored = fileTransaction.result;
+            fileTransaction.commit();
+          } catch (error) {
+            if (error instanceof SessionCheckpointError) {
+              return sendJson(res, 409, { code: error.code, error: error.code });
+            }
+            return sendJson(res, 500, {
+              code: "revert_all_failed",
+              error: error?.message ?? "revert_all_failed",
+            });
+          }
+        }
+        // Clear any pending supervised review after full revert.
+        for (const message of store.getMessages(sessionId)) {
+          if (message?.fileReview?.status === "pending") {
+            store.updateMessage(sessionId, message.id, {
+              turnStatus: "interrupted",
+              fileReview: {
+                ...message.fileReview,
+                status: "rejected",
+                files: (message.fileReview.files || []).map((f) => ({ ...f, status: "rejected" })),
+                resolvedAt: new Date().toISOString(),
+              },
+            });
+          }
+        }
+        await store.flush();
+        await commitSessionToEngine(sessionId);
+        emitTo(sessionId, {
+          type: "session.reverted",
+          payload: { session_id: sessionId, ...restored, changeCount: changes.length },
+        });
+        return sendJson(res, 200, { ok: true, ...restored, changeCount: changes.length });
+      }
+
+      // Supervised file review: accept/reject all, per-file, or per-hunk.
+      const fileReviewMatch = path.match(/^\/api\/sessions\/([^/]+)\/file-review$/);
+      if (fileReviewMatch && req.method === "POST") {
+        const sessionId = decodeURIComponent(fileReviewMatch[1]);
+        if (!store.getSession(sessionId)) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        await releaseFinalizedTurn(sessionId);
+        if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        const body = await readBody(req);
+        assertGatewayAcceptingMutations();
+        const messages = store.getMessages(sessionId);
+        let target = null;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          const message = messages[i];
+          if (
+            message?.role === "assistant"
+            && (message?.fileReview?.status === "pending" || message?.fileReview?.status === "partial")
+          ) {
+            target = message;
+            break;
+          }
+        }
+        if (!target) {
+          return sendJson(res, 404, { code: "file_review_not_found", error: "file_review_not_found" });
+        }
+        const review = target.fileReview;
+        // Normalize legacy entries missing per-file status.
+        const normalized = {
+          ...review,
+          files: (Array.isArray(review.files) ? review.files : []).map((f) => ({
+            ...f,
+            status: f.status === "accepted" || f.status === "rejected" ? f.status : "pending",
+          })),
+        };
+
+        let nextFiles = normalized.files.map((f) => ({ ...f }));
+        let pathDecisions = [];
+        let usedHunks = false;
+
+        if (Array.isArray(body.files) && body.files.length) {
+          // 1) Per-hunk decisions (no shared-snapshot auto-link).
+          for (const entry of body.files) {
+            if (!entry || typeof entry.path !== "string") continue;
+            if (!Array.isArray(entry.hunks) || !entry.hunks.length) continue;
+            usedHunks = true;
+            const key = entry.path.replaceAll("\\", "/");
+            const idx = nextFiles.findIndex(
+              (f) => f.status === "pending" && String(f.path ?? "").replaceAll("\\", "/") === key,
+            );
+            if (idx < 0) continue;
+            const hunkDecisions = entry.hunks
+              .filter((h) => h && typeof h.id === "string")
+              .map((h) => ({ id: h.id, accept: h.accept === true }));
+            nextFiles[idx] = applyHunkDecisionsToFile(nextFiles[idx], hunkDecisions);
+          }
+          // 2) Path-level accept/reject (links shared snapshotId).
+          pathDecisions = body.files
+            .filter((f) => f && typeof f.path === "string" && typeof f.accept === "boolean" && !Array.isArray(f.hunks))
+            .map((f) => ({ path: f.path, accept: f.accept === true }));
+          if (pathDecisions.length) {
+            const afterPaths = applyFileReviewDecisions(
+              { ...normalized, files: nextFiles },
+              pathDecisions,
+            );
+            nextFiles = afterPaths.files;
+          }
+        } else if (typeof body.accept === "boolean") {
+          pathDecisions = nextFiles
+            .filter((f) => f.status === "pending")
+            .map((f) => ({ path: f.path, accept: body.accept }));
+          const afterPaths = applyFileReviewDecisions(
+            { ...normalized, files: nextFiles },
+            pathDecisions,
+          );
+          nextFiles = afterPaths.files;
+        } else {
+          return sendJson(res, 400, { code: "file_review_invalid", error: "file_review_invalid" });
+        }
+
+        if (!usedHunks && !pathDecisions.length && !(Array.isArray(body.files) && body.files.some((f) => f?.hunks?.length))) {
+          return sendJson(res, 400, { code: "file_review_invalid", error: "file_review_invalid" });
+        }
+
+        const nextReview = withAggregatedReview(normalized, nextFiles);
+
+        // Filesystem effects for newly decided files this request.
+        /** @type {Array<{ snapshotId: string, path: string }>} */
+        const pathRestores = [];
+        /** @type {typeof nextFiles} */
+        const selective = [];
+        for (let i = 0; i < nextFiles.length; i += 1) {
+          const prev = normalized.files[i];
+          const next = nextFiles[i];
+          if (!prev || !next || prev.status !== "pending" || next.status === "pending") continue;
+          if (next.status === "rejected" && next.snapshotId) {
+            pathRestores.push({ snapshotId: next.snapshotId, path: next.path });
+          } else if (needsSelectiveHunkApply(next) && next.snapshotId) {
+            selective.push(next);
+          }
+        }
+
+        if (config.workspace && (pathRestores.length || selective.length)) {
+          try {
+            // Group path restores by snapshotId.
+            const bySnap = new Map();
+            for (const row of pathRestores) {
+              const list = bySnap.get(row.snapshotId) ?? [];
+              list.push(row.path);
+              bySnap.set(row.snapshotId, list);
+            }
+            for (const [snapshotId, relPaths] of bySnap) {
+              await restoreSnapshotPaths({
+                workspace: config.workspace,
+                snapshotId,
+                relPaths,
+              });
+            }
+            for (const file of selective) {
+              const pre = await readSnapshotRelativeFile({
+                workspace: config.workspace,
+                snapshotId: file.snapshotId,
+                relPath: file.path,
+              });
+              const nextText = applyHunksToOldText(pre.text, file.diffOps, file.hunks);
+              await writeWorkspaceRelativeFile({
+                workspace: config.workspace,
+                relPath: file.path,
+                text: nextText,
+              });
+            }
+          } catch (error) {
+            if (error instanceof SessionCheckpointError) {
+              return sendJson(res, 409, { code: error.code, error: error.code });
+            }
+            return sendJson(res, 500, {
+              code: "file_review_restore_failed",
+              error: error?.message ?? "file_review_restore_failed",
+            });
+          }
+        }
+
+        const done = nextReview.status !== "pending";
+        store.updateMessage(sessionId, target.id, {
+          turnStatus: done
+            ? (nextReview.status === "rejected" ? "interrupted" : "complete")
+            : "awaiting_file_review",
+          fileReview: nextReview,
+        });
+        await store.flush();
+        await commitSessionToEngine(sessionId);
+        emitTo(sessionId, {
+          type: "file_review.resolved",
+          payload: {
+            session_id: sessionId,
+            message_id: target.id,
+            status: nextReview.status,
+            files: nextReview.files,
+            done,
+          },
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          done,
+          messageId: target.id,
+          fileReview: store.getMessage(sessionId, target.id)?.fileReview,
+        });
       }
 
       const approvalMatch = path.match(/^\/api\/sessions\/([^/]+)\/approvals\/([^/]+)$/);
@@ -5118,10 +7366,70 @@ export async function startGateway({
         try {
           const body = await readBody(req);
           assertGatewayAcceptingMutations();
-          const resolved = store.resolveApproval(sessionId, approvalId, {
-            approved: body.approved,
-            reason: typeof body.reason === "string" ? body.reason : "",
-          });
+          const promoteAlways = body.always === true || body.promote === true || body.scope === "always";
+          let resolved;
+          let promotedRule = null;
+          try {
+            // Prefer engine-backed history when primary; pure algorithm + dual-write.
+            const loaded = await loadMessagesForMutation(sessionId);
+            const pure = resolveApprovalInMessages(loaded.messages, approvalId, {
+              approved: body.approved,
+              reason: typeof body.reason === "string" ? body.reason : "",
+            });
+            await persistMutatedMessages(sessionId, pure.messages);
+            resolved = {
+              approval: pure.approval,
+              messageId: pure.messageId,
+              ready: pure.ready,
+              modelParams: pure.modelParams,
+              source: loaded.source,
+            };
+            // Session-scoped allow-once for protected write targets (subsequent turns).
+            noteProtectedPathAllowOnce(sessionId, pure.approval);
+
+            // Promote decision to a durable exact permission rule (Hermes always allow/deny).
+            if (
+              promoteAlways
+              && pure.approval
+              && (pure.approval.status === "approved" || pure.approval.status === "denied")
+            ) {
+              const action = pure.approval.status === "approved" ? "allow" : "deny";
+              const candidate = permissionRuleFromApproval(
+                pure.approval.name,
+                pure.approval.args,
+                action,
+              );
+              if (candidate) {
+                await mutateConfig(async () => {
+                  const engine = isPlainRecord(config.engine) ? { ...config.engine } : {};
+                  const permissions = isPlainRecord(engine.permissions)
+                    ? { ...engine.permissions }
+                    : {};
+                  const rules = Array.isArray(permissions.rules) ? permissions.rules : [];
+                  permissions.rules = mergePermissionRule(rules, candidate);
+                  engine.permissions = permissions;
+                  const nextConfig = { ...config, engine };
+                  await saveConfig(nextConfig, secrets);
+                  config = nextConfig;
+                  return publicGatewayConfig(config, secrets);
+                });
+                promotedRule = candidate;
+              }
+            }
+          } catch (error) {
+            if (error?.code === "engine_mirror_write_failed") {
+              return sendJson(res, 503, {
+                code: "engine_mirror_write_failed",
+                error: error.message ?? "engine_mirror_write_failed",
+              });
+            }
+            if (error instanceof SessionMutationError || error instanceof SessionApprovalError) {
+              const code = error.code || "approval_error";
+              const status = code === "approval_not_found" ? 404 : 409;
+              return sendJson(res, status, { code, error: code });
+            }
+            throw error;
+          }
           emitTo(sessionId, {
             type: "approval.resolved",
             payload: {
@@ -5130,16 +7438,30 @@ export async function startGateway({
               approved: resolved.approval.status === "approved",
               ...(resolved.approval.decisionReason ? { reason: resolved.approval.decisionReason } : {}),
               ...(resolved.approval.consumedAt ? { consumed: true } : {}),
+              ...(promotedRule ? { promoted: true, rule: promotedRule } : {}),
             },
           });
-          await store.flush();
           assertGatewayAcceptingMutations();
           if (!resolved.ready) {
-            return sendJson(res, 200, { status: "pending", approval: resolved.approval });
+            return sendJson(res, 200, {
+              status: "pending",
+              approval: resolved.approval,
+              ...(promotedRule ? { promotedRule } : {}),
+              ...(sessionMirrorEnginePrimary()
+                ? { engineCommitted: true, mutationSource: resolved.source }
+                : {}),
+            });
           }
 
           continuationStarted = true;
-          sendJson(res, 200, { status: "streaming", approval: resolved.approval });
+          sendJson(res, 200, {
+            status: "streaming",
+            approval: resolved.approval,
+            ...(promotedRule ? { promotedRule } : {}),
+            ...(sessionMirrorEnginePrimary()
+              ? { engineCommitted: true, mutationSource: resolved.source }
+              : {}),
+          });
           void runReservedPrompt(sessionId, "", resolved.modelParams, undefined, { appendUser: false })
             .finally(() => {
               if (sessionReservations.get(sessionId) === reservationToken) {
@@ -5158,7 +7480,12 @@ export async function startGateway({
       if (sessionMatch) {
         const id = decodeURIComponent(sessionMatch[1]);
         if (sessionMatch[2] === "/messages" && req.method === "GET") {
-          return sendJson(res, 200, { session_id: id, messages: publicStoredMessages(store.getMessages(id)) });
+          const messages = await getMessagesForApi(id);
+          return sendJson(res, 200, {
+            session_id: id,
+            messages: publicStoredMessages(messages),
+            ...(sessionMirrorEnginePrimary() ? { source: "engine_primary" } : { source: "json" }),
+          });
         }
         if (sessionMatch[2] === "/rewind" && req.method === "POST") {
           await releaseFinalizedTurn(id);
@@ -5173,8 +7500,11 @@ export async function startGateway({
             if (!isSessionMessageId(messageId)) {
               return sendJson(res, 400, { code: "message_id_invalid", error: "message_id_invalid" });
             }
-            const plan = store.planRewind(id, messageId);
+            // Pure plan on preferred message list (engine when primary + caught up).
+            const loaded = await loadMessagesForMutation(id);
+            const plan = planRewindInMessages(loaded.messages, messageId, store.getSession(id));
             if (!plan) return sendJson(res, 404, { code: "message_not_found", error: "message_not_found" });
+            plan.sessionId = id;
             let restored = { restoredSnapshots: 0, restoredFiles: 0 };
             let fileTransaction = null;
             try {
@@ -5201,21 +7531,31 @@ export async function startGateway({
               }
               throw error;
             }
-            if (!store.commitRewind(plan)) {
+            const truncated = commitRewindInMessages(loaded.messages, plan);
+            if (!truncated.ok) {
               await fileTransaction?.rollback();
               return sendJson(res, 409, { code: "session_changed", error: "session_changed" });
             }
             try {
-              await store.flush();
-            } catch {
-              const sessionRolledBack = store.rollbackRewind(plan);
-              const compensation = await Promise.allSettled([
-                fileTransaction?.rollback() ?? Promise.resolve(false),
-                sessionRolledBack ? store.flush() : Promise.reject(new Error("session_compensation_failed")),
-              ]);
-              const compensated = sessionRolledBack && compensation.every(result => result.status === "fulfilled");
-              const code = compensated ? "checkpoint_commit_failed" : "checkpoint_compensation_failed";
-              return sendJson(res, 500, { code, error: code });
+              await persistMutatedMessages(id, truncated.messages);
+            } catch (error) {
+              await fileTransaction?.rollback();
+              if (error?.code === "engine_mirror_write_failed") {
+                return sendJson(res, 503, {
+                  code: "engine_mirror_write_failed",
+                  error: error.message ?? "engine_mirror_write_failed",
+                });
+              }
+              // JSON flush failed — try legacy rollback if we still had original on JSON.
+              try {
+                if (Array.isArray(plan.originalMessages)) {
+                  store.replaceMessages(id, plan.originalMessages);
+                  await store.flush();
+                }
+              } catch {
+                /* best effort */
+              }
+              return sendJson(res, 500, { code: "checkpoint_commit_failed", error: "checkpoint_commit_failed" });
             }
             fileTransaction?.commit();
             runtimeActivity.delete(id);
@@ -5224,6 +7564,9 @@ export async function startGateway({
               session_id: id,
               draft: plan.draft,
               messages: publicStoredMessages(store.getMessages(id)),
+              ...(sessionMirrorEnginePrimary()
+                ? { engineCommitted: true, mutationSource: loaded.source }
+                : {}),
               ...restored,
             });
           } finally {
@@ -5237,6 +7580,26 @@ export async function startGateway({
           }
           store.removeSession(id);
           runtimeActivity.delete(id);
+          sessionProtectedAllowOnce.delete(id);
+          // A4c: delete from engine (required when enginePrimary).
+          try {
+            const mirror = await ensureSessionMirror();
+            if (mirror && typeof mirror.removeSession === "function") {
+              await mirror.removeSession(id);
+            } else if (sessionMirrorEnginePrimary() && sessionMirrorEnabled()) {
+              return sendJson(res, 503, {
+                code: "engine_mirror_write_failed",
+                error: "mirror_unavailable",
+              });
+            }
+          } catch (error) {
+            if (sessionMirrorEnginePrimary()) {
+              return sendJson(res, 503, {
+                code: "engine_mirror_write_failed",
+                error: error?.message ?? "engine_mirror_write_failed",
+              });
+            }
+          }
           return sendJson(res, 200, { ok: true });
         }
         if (!sessionMatch[2] && req.method === "PATCH") {
@@ -5267,8 +7630,59 @@ export async function startGateway({
             patch.modelId = target.model.id;
             if (target.provider.id !== current.providerId) patch.providerAccountId = undefined;
           }
+          // Soft-archive: keep messages for hybrid memory FTS; hide from sidebar.
+          if (Object.hasOwn(body, "archived")) {
+            if (typeof body.archived !== "boolean") {
+              return sendJson(res, 400, { code: "archived_invalid", error: "archived_invalid" });
+            }
+            if (controllers.has(id) || sessionReservations.has(id)) {
+              return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+            }
+            const next = store.setSessionArchived(id, body.archived);
+            if (!next) return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+            await store.flush();
+            const archCommit = await commitSessionToEngine(id);
+            if (!archCommit.ok && sessionMirrorEnginePrimary()) {
+              return sendJson(res, 503, {
+                code: "engine_mirror_write_failed",
+                error: archCommit.error ?? "engine_mirror_write_failed",
+              });
+            }
+            emitTo(id, {
+              type: body.archived ? "session.archived" : "session.unarchived",
+              payload: { session_id: id, archived: body.archived === true },
+            });
+            // Soft-archive → optional memory curator in the background (never blocks HTTP).
+            // Fail-open with a hard timeout so a stuck LLM cannot hang the UI lock.
+            let curatorScheduled = false;
+            if (body.archived === true) {
+              const engineMem = isPlainRecord(config.engine?.memory) ? config.engine.memory : {};
+              const curCfg = isPlainRecord(engineMem.curator) ? engineMem.curator : {};
+              if (curCfg.enabled !== false && curCfg.autoOnArchive !== false) {
+                curatorScheduled = true;
+                scheduleArchiveCurator(id);
+              }
+            }
+            return sendJson(res, 200, {
+              ok: true,
+              session: next,
+              ...(curatorScheduled ? { curatorScheduled: true } : {}),
+              ...(sessionMirrorEnginePrimary() ? { engineCommitted: true } : {}),
+            });
+          }
           const session = store.upsertSession(patch);
-          return sendJson(res, 200, { ok: true, session });
+          const patchCommit = await commitSessionToEngine(id);
+          if (!patchCommit.ok && sessionMirrorEnginePrimary()) {
+            return sendJson(res, 503, {
+              code: "engine_mirror_write_failed",
+              error: patchCommit.error ?? "engine_mirror_write_failed",
+            });
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            session,
+            ...(sessionMirrorEnginePrimary() ? { engineCommitted: true } : {}),
+          });
         }
       }
 
@@ -5292,7 +7706,10 @@ export async function startGateway({
         const body = await readBody(req);
         const sessionId = String(body.session || "");
         const text = String(body.text || "").trim();
-        if (!sessionId || !text) return sendJson(res, 400, { error: "session and text required" });
+        const hasImages = Array.isArray(body.images) && body.images.length > 0;
+        if (!sessionId || (!text && !hasImages)) {
+          return sendJson(res, 400, { error: "session and text (or images) required" });
+        }
         let skillIds;
         try {
           skillIds = await validatePromptSkillIds(body.skillIds);
@@ -5314,7 +7731,10 @@ export async function startGateway({
         const reservationToken = Symbol("prompt");
         sessionReservations.set(sessionId, reservationToken);
         sendJson(res, 200, { status: "streaming" });
-        void runPrompt(sessionId, text, body.modelParams, messageId, reservationToken, { skillIds });
+        void runPrompt(sessionId, text, body.modelParams, messageId, reservationToken, {
+          skillIds,
+          ...(hasImages ? { images: body.images } : {}),
+        });
         return;
       }
 
@@ -5373,7 +7793,7 @@ export async function startGateway({
         }
         try {
           const info = await stat(abs);
-          if (info.size > 500_000) return sendJson(res, 200, { path: rel, content: "[файл слишком большой для предпросмотра]", truncated: true });
+          if (info.size > 500_000) return sendJson(res, 200, { path: rel, content: "[file too large for preview]", truncated: true });
           const content = await readFile(abs, "utf8");
           return sendJson(res, 200, { path: rel, content });
         } catch (e) {
@@ -5502,6 +7922,16 @@ export async function startGateway({
       await pipelineRunStore.flush();
       await workspaceLeaseStore.flush();
       await store.close();
+      // Release SQLite session-mirror handles so Windows can delete temp dataDirs in tests.
+      try {
+        if (sessionMirrorStores && typeof sessionMirrorStores.close === "function") {
+          await sessionMirrorStores.close();
+        }
+      } catch {
+        /* best-effort */
+      }
+      sessionMirrorStores = null;
+      sessionMirrorHandle = null;
       await connectorClose;
       await organizationClose;
       await organizationAuditTail;

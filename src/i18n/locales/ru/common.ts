@@ -3,6 +3,7 @@ import type { enCommon } from "../en/common";
 
 export const ruCommon = {
   "common.cancel": "Отмена",
+  "common.dismiss": "Скрыть",
   "common.retry": "Повторить",
   "common.save": "Сохранить",
   "common.delete": "Удалить",

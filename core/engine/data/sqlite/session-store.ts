@@ -3,7 +3,12 @@ import type { DB } from "./open.js";
 
 function partsText(parts: StoredMessage["parts"]): string {
   return parts
-    .map((p) => (p.type === "text" || p.type === "reasoning" ? p.text : p.type === "tool" ? (p.result ?? "") : ""))
+    .map((p) => {
+      if (p.type === "text" || p.type === "reasoning") return p.text;
+      if (p.type === "tool") return p.result ?? "";
+      if (p.type === "approval") return `[approval:${p.name}:${p.status}]`;
+      return "";
+    })
     .join("\n")
     .trim();
 }
@@ -20,6 +25,9 @@ interface SessionRow {
   started_at: string;
   ended_at: string | null;
   status: string;
+  provider_id: string | null;
+  model_id: string | null;
+  provider_account_id: string | null;
   meta_json: string | null;
   jsonl_path: string;
   updated_at: string;
@@ -35,6 +43,10 @@ interface MsgRow {
   compacted: number;
   ccr_hash: string | null;
   created_at: string;
+  client_id: string | null;
+  pending: number;
+  turn_status: string | null;
+  approval_model_params_json: string | null;
 }
 
 function toRecord(r: SessionRow): SessionRecord {
@@ -45,6 +57,9 @@ function toRecord(r: SessionRow): SessionRecord {
     startedAt: r.started_at,
     endedAt: r.ended_at ?? undefined,
     status: r.status as SessionRecord["status"],
+    providerId: r.provider_id ?? undefined,
+    modelId: r.model_id ?? undefined,
+    providerAccountId: r.provider_account_id ?? undefined,
     meta: r.meta_json ? (JSON.parse(r.meta_json) as Record<string, unknown>) : undefined,
     jsonlPath: r.jsonl_path,
   };
@@ -61,6 +76,12 @@ function toMessage(r: MsgRow): StoredMessage {
     compacted: Boolean(r.compacted),
     ccrHash: r.ccr_hash ?? undefined,
     createdAt: r.created_at,
+    clientId: r.client_id ?? undefined,
+    pending: r.pending ? true : undefined,
+    turnStatus: r.turn_status ?? undefined,
+    approvalModelParams: r.approval_model_params_json
+      ? (JSON.parse(r.approval_model_params_json) as Record<string, unknown>)
+      : undefined,
   };
 }
 
@@ -68,8 +89,13 @@ export function createSqliteSessionStore(db: DB): SessionStore {
   return {
     async createSession(rec) {
       db.prepare(
-        `INSERT OR REPLACE INTO sessions(id,workspace,title,started_at,ended_at,status,meta_json,jsonl_path,updated_at)
-         VALUES (@id,@workspace,@title,@started_at,@ended_at,@status,@meta_json,@jsonl_path,@updated_at)`,
+        `INSERT OR REPLACE INTO sessions(
+           id,workspace,title,started_at,ended_at,status,
+           provider_id,model_id,provider_account_id,meta_json,jsonl_path,updated_at
+         ) VALUES (
+           @id,@workspace,@title,@started_at,@ended_at,@status,
+           @provider_id,@model_id,@provider_account_id,@meta_json,@jsonl_path,@updated_at
+         )`,
       ).run({
         id: rec.id,
         workspace: rec.workspace ?? null,
@@ -77,6 +103,9 @@ export function createSqliteSessionStore(db: DB): SessionStore {
         started_at: rec.startedAt,
         ended_at: rec.endedAt ?? null,
         status: rec.status,
+        provider_id: rec.providerId ?? null,
+        model_id: rec.modelId ?? null,
+        provider_account_id: rec.providerAccountId ?? null,
         meta_json: rec.meta ? JSON.stringify(rec.meta) : null,
         jsonl_path: rec.jsonlPath,
         updated_at: new Date().toISOString(),
@@ -88,13 +117,20 @@ export function createSqliteSessionStore(db: DB): SessionStore {
       if (!cur) return;
       const merged = { ...toRecord(cur), ...patch, id };
       db.prepare(
-        `UPDATE sessions SET workspace=@workspace,title=@title,ended_at=@ended_at,status=@status,meta_json=@meta_json,updated_at=@updated_at WHERE id=@id`,
+        `UPDATE sessions SET
+           workspace=@workspace,title=@title,ended_at=@ended_at,status=@status,
+           provider_id=@provider_id,model_id=@model_id,provider_account_id=@provider_account_id,
+           meta_json=@meta_json,updated_at=@updated_at
+         WHERE id=@id`,
       ).run({
         id,
         workspace: merged.workspace ?? null,
         title: merged.title ?? null,
         ended_at: merged.endedAt ?? null,
         status: merged.status,
+        provider_id: merged.providerId ?? null,
+        model_id: merged.modelId ?? null,
+        provider_account_id: merged.providerAccountId ?? null,
         meta_json: merged.meta ? JSON.stringify(merged.meta) : null,
         updated_at: new Date().toISOString(),
       });
@@ -115,10 +151,25 @@ export function createSqliteSessionStore(db: DB): SessionStore {
       return opts?.limit ? list.slice(0, opts.limit) : list;
     },
 
+    async deleteSession(id) {
+      // FTS cleaned by messages_ad trigger on DELETE.
+      db.prepare("DELETE FROM messages WHERE session_id=?").run(id);
+      db.prepare("DELETE FROM sessions WHERE id=?").run(id);
+    },
+
+    async clearMessages(sessionId) {
+      db.prepare("DELETE FROM messages WHERE session_id=?").run(sessionId);
+    },
+
     async appendMessage(msg) {
       db.prepare(
-        `INSERT OR REPLACE INTO messages(session_id,seq,role,parts_json,text,tool_call_id,token_est,compacted,ccr_hash,created_at)
-         VALUES (@session_id,@seq,@role,@parts_json,@text,@tool_call_id,@token_est,@compacted,@ccr_hash,@created_at)`,
+        `INSERT OR REPLACE INTO messages(
+           session_id,seq,role,parts_json,text,tool_call_id,token_est,compacted,ccr_hash,created_at,
+           client_id,pending,turn_status,approval_model_params_json
+         ) VALUES (
+           @session_id,@seq,@role,@parts_json,@text,@tool_call_id,@token_est,@compacted,@ccr_hash,@created_at,
+           @client_id,@pending,@turn_status,@approval_model_params_json
+         )`,
       ).run({
         session_id: msg.sessionId,
         seq: msg.seq,
@@ -130,6 +181,12 @@ export function createSqliteSessionStore(db: DB): SessionStore {
         compacted: msg.compacted ? 1 : 0,
         ccr_hash: msg.ccrHash ?? null,
         created_at: msg.createdAt,
+        client_id: msg.clientId ?? null,
+        pending: msg.pending ? 1 : 0,
+        turn_status: msg.turnStatus ?? null,
+        approval_model_params_json: msg.approvalModelParams
+          ? JSON.stringify(msg.approvalModelParams)
+          : null,
       });
       return msg.seq;
     },

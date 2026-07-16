@@ -7,6 +7,15 @@ import type {
   GatewayStatus,
   GBrainInitializationResult,
   GBrainRuntimeStatus,
+  MemoryIndexReindexResult,
+  MemoryIndexRuntimeStatus,
+  LtmConsolidateResult,
+  SessionMirrorRuntimeStatus,
+  SessionMirrorSearchResult,
+  SessionMirrorSyncResult,
+  SessionMirrorParityResult,
+  MessagingRuntimeStatus,
+  MessagingTokenResult,
   KiroCliConnectorStatus,
   KiroCliLoginInput,
   KiroCliLoginSnapshot,
@@ -132,6 +141,18 @@ export const gateway = {
   getGBrainStatus: () => json<GBrainRuntimeStatus>("/api/memory/gbrain"),
   initializeGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/initialize", { method: "POST" }),
   installGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/install", { method: "POST" }),
+  getMemoryIndexStatus: () => json<MemoryIndexRuntimeStatus>("/api/memory/index"),
+  reindexMemoryIndex: () => json<MemoryIndexReindexResult>("/api/memory/index/reindex", { method: "POST" }),
+  consolidateLtm: () => json<LtmConsolidateResult>("/api/memory/ltm/consolidate", { method: "POST" }),
+  getSessionMirrorStatus: () => json<SessionMirrorRuntimeStatus>("/api/memory/session-mirror"),
+  searchSessionMirror: (q: string, limit = 20) =>
+    json<SessionMirrorSearchResult>(
+      `/api/memory/session-mirror/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+  syncSessionMirror: () => json<SessionMirrorSyncResult>("/api/memory/session-mirror/sync", { method: "POST" }),
+  getSessionMirrorParity: () => json<SessionMirrorParityResult>("/api/memory/session-mirror/parity"),
+  getMessagingStatus: () => json<MessagingRuntimeStatus>("/api/messaging"),
+  rotateMessagingToken: () => json<MessagingTokenResult>("/api/messaging/token", { method: "POST" }),
   setConfig: (patch: Partial<{
     provider: string;
     apiKey: string;
@@ -349,6 +370,69 @@ export const gateway = {
   addSkillRoot: () => json<{ roots: SkillRoot[]; folder?: string }>("/api/skills/roots", { method: "POST" }),
   removeSkillRoot: (id: string) => json<{ roots: SkillRoot[] }>(`/api/skills/roots/${encodeURIComponent(id)}`, { method: "DELETE" }),
   openSkillRoot: (id: string) => json<{ ok: boolean }>(`/api/skills/roots/${encodeURIComponent(id)}/open`, { method: "POST" }),
+  /** Optional skills catalog curator (default OFF). */
+  scanSkillsCurator: (input?: { applyMode?: "propose" | "apply_safe"; force?: boolean }) =>
+    json<{
+      ok: boolean;
+      proposals?: Array<Record<string, unknown>>;
+      applied?: string[];
+      summary?: string;
+      error?: string;
+      fileName?: string;
+      proposalPath?: string;
+    }>("/api/skills/curator/scan", { method: "POST", body: JSON.stringify(input ?? {}) }),
+  listSkillsCuratorProposals: () =>
+    json<{
+      proposals: Array<{
+        fileName: string;
+        status?: string;
+        at?: string;
+        via?: string;
+        proposalCount?: number;
+        preview?: Array<{
+          id?: string;
+          skillId?: string;
+          skillName?: string;
+          action?: string;
+          kind?: string;
+          reason?: string;
+          detail?: string;
+          owned?: boolean;
+          patchSummary?: string;
+          suggestedDescription?: string;
+          hasContentPatch?: boolean;
+        }>;
+      }>;
+    }>("/api/skills/curator/proposals"),
+  applySkillsCuratorProposal: (fileName: string) =>
+    json<{ ok: boolean; applied?: string[]; summary?: string; error?: string }>(
+      "/api/skills/curator/proposals/apply",
+      { method: "POST", body: JSON.stringify({ fileName }) },
+    ),
+  applySkillsCuratorOne: (
+    skillId: string,
+    action: "enable" | "disable" | "apply_patch" | "suggest_patch",
+    opts?: {
+      fileName?: string;
+      proposalId?: string;
+      suggestedContent?: string;
+      suggestedDescription?: string;
+    },
+  ) =>
+    json<{ ok: boolean; skillId?: string; enabled?: boolean; patched?: boolean; error?: string }>(
+      "/api/skills/curator/proposals/apply-one",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          skillId,
+          action,
+          ...(opts?.fileName ? { fileName: opts.fileName } : {}),
+          ...(opts?.proposalId ? { proposalId: opts.proposalId } : {}),
+          ...(opts?.suggestedContent ? { suggestedContent: opts.suggestedContent } : {}),
+          ...(opts?.suggestedDescription ? { suggestedDescription: opts.suggestedDescription } : {}),
+        }),
+      },
+    ),
 
   listCronJobs: () => json<{ jobs: CronJob[] }>("/api/cron/jobs").then((result) => result.jobs),
   createCronJob: (input: { name: string; prompt: string; schedule: string; enabled?: boolean }) =>
@@ -361,8 +445,107 @@ export const gateway = {
   triggerCronJob: (id: string) => json<{ job: CronJob; run?: CronRun }>(`/api/cron/jobs/${encodeURIComponent(id)}/trigger`, { method: "POST" }),
   getCronRuns: (id: string) => json<{ runs: CronRun[] }>(`/api/cron/jobs/${encodeURIComponent(id)}/runs`).then((result) => result.runs),
 
-  listSessions: () => json<{ sessions: SessionInfo[] }>("/api/sessions").then(r => r.sessions),
+  listSessions: (opts?: { archived?: "only" | "all" }) =>
+    json<{ sessions: SessionInfo[]; filter?: string }>(
+      opts?.archived === "only"
+        ? "/api/sessions?archived=only"
+        : opts?.archived === "all"
+          ? "/api/sessions?archived=all"
+          : "/api/sessions",
+    ).then(r => r.sessions),
   createSession: () => json<{ id: string }>("/api/sessions", { method: "POST" }).then(r => r.id),
+  /** Soft-archive or restore. Messages stay for hybrid memory until permanent delete. */
+  forkSession: (id: string, opts?: { messageId?: string }) =>
+    json<{ id: string; session: SessionInfo; messageCount?: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/fork`,
+      {
+        method: "POST",
+        body: JSON.stringify(opts?.messageId ? { messageId: opts.messageId } : {}),
+      },
+    ),
+  setSessionArchived: (id: string, archived: boolean) =>
+    json<{ ok: boolean; session?: SessionInfo; curator?: Record<string, unknown> }>(
+      `/api/sessions/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ archived }),
+      },
+    ),
+
+  /** Distill session into notes / MEMORY / LTM / handoff catalogs. */
+  curateSessionMemory: (
+    id: string,
+    opts?: { applyMode?: "propose" | "apply_safe" | "apply_all" },
+  ) =>
+    json<{
+      ok: boolean;
+      sessionId?: string;
+      via?: string;
+      applied?: string[];
+      summary?: string;
+      proposalPath?: string;
+      handoffPath?: string;
+      modelSource?: string;
+      error?: string;
+    }>(`/api/sessions/${encodeURIComponent(id)}/curate-memory`, {
+      method: "POST",
+      body: JSON.stringify(opts ?? {}),
+    }),
+
+  /** Curate many sessions (default: all archived). */
+  curateSessionMemoryBatch: (opts?: {
+    sessionIds?: string[];
+    applyMode?: "propose" | "apply_safe" | "apply_all";
+  }) =>
+    json<{
+      ok: boolean;
+      count: number;
+      succeeded: number;
+      results: Array<{
+        sessionId: string;
+        ok: boolean;
+        applied?: string[];
+        via?: string;
+        summary?: string;
+        error?: string;
+        modelSource?: string;
+      }>;
+    }>("/api/memory/curator/batch", {
+      method: "POST",
+      body: JSON.stringify(opts ?? {}),
+    }),
+
+  listCuratorProposals: (limit = 40) =>
+    json<{
+      proposals: Array<{
+        fileName: string;
+        path: string;
+        sessionId: string;
+        title?: string;
+        via?: string;
+        applyMode?: string;
+        status?: string;
+        at?: string;
+        applied?: string[];
+        proposalCount: number;
+        preview: Array<{ target: string; rationale?: string; contentPreview: string }>;
+      }>;
+    }>(`/api/memory/curator/proposals?limit=${limit}`),
+
+  applyCuratorProposal: (
+    fileName: string,
+    applyMode: "apply_safe" | "apply_all" = "apply_safe",
+  ) =>
+    json<{
+      ok: boolean;
+      sessionId?: string;
+      applied?: string[];
+      path?: string;
+      error?: string;
+    }>("/api/memory/curator/proposals/apply", {
+      method: "POST",
+      body: JSON.stringify({ fileName, applyMode }),
+    }),
   deleteSession: (id: string) => json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   renameSession: (id: string, title: string) =>
     json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ title }) }),
@@ -376,14 +559,113 @@ export const gateway = {
       `/api/sessions/${encodeURIComponent(id)}/messages`,
     ).then(r => r.messages),
 
-  respondToApproval: (session: string, approvalId: string, approved: boolean, reason?: string) =>
-    json<{ status: "pending" | "streaming"; approval: import("./types").ApprovalPart }>(
+  /** Import a foreign/Kyrei conversation export into handoff memory (+ optional seed session). */
+  importTranscript: (input: {
+    fileName: string;
+    contentBase64: string;
+    adapterId?: string;
+    options?: {
+      createSession?: boolean;
+      writeLtm?: boolean;
+      writeHandoff?: boolean;
+      dedupe?: boolean;
+      sessionTitle?: string;
+    };
+  }) =>
+    json<{
+      report: {
+        adapterId: string;
+        source: string;
+        messageCount: number;
+        redactionCount: number;
+        contentDigest: string;
+        handoffPath?: string;
+        handoffId?: string;
+        sessionId?: string;
+        deduped?: boolean;
+        warnings: string[];
+        durationMs: number;
+      };
+      handoffId?: string;
+      sessionId?: string;
+    }>("/api/import/transcript", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  respondToApproval: (
+    session: string,
+    approvalId: string,
+    approved: boolean,
+    opts?: { reason?: string; always?: boolean },
+  ) =>
+    json<{
+      status: "pending" | "streaming";
+      approval: import("./types").ApprovalPart;
+      promotedRule?: { pattern: string; action: string };
+    }>(
       `/api/sessions/${encodeURIComponent(session)}/approvals/${encodeURIComponent(approvalId)}`,
       {
         method: "POST",
-        body: JSON.stringify({ approved, ...(reason ? { reason } : {}) }),
+        body: JSON.stringify({
+          approved,
+          ...(opts?.reason ? { reason: opts.reason } : {}),
+          ...(opts?.always ? { always: true } : {}),
+        }),
       },
     ),
+
+  respondToFileReview: (
+    session: string,
+    input:
+      | boolean
+      | {
+          accept?: boolean;
+          files?: Array<{
+            path: string;
+            accept?: boolean;
+            hunks?: Array<{ id: string; accept: boolean }>;
+          }>;
+        },
+  ) => {
+    const body = typeof input === "boolean"
+      ? { accept: input }
+      : input;
+    return json<{
+      ok: boolean;
+      done?: boolean;
+      messageId: string;
+      fileReview?: import("./types").FileReviewState;
+    }>(`/api/sessions/${encodeURIComponent(session)}/file-review`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  getSessionChanges: (session: string) =>
+    json<{
+      sessionId: string;
+      count: number;
+      changes: Array<{
+        messageId: string;
+        path: string;
+        tool: string;
+        snapshotId?: string;
+        at?: string;
+        diffPreview?: string;
+      }>;
+    }>(`/api/sessions/${encodeURIComponent(session)}/changes`),
+
+  revertAllSessionChanges: (session: string) =>
+    json<{
+      ok: boolean;
+      restoredSnapshots: number;
+      restoredFiles: number;
+      changeCount: number;
+    }>(`/api/sessions/${encodeURIComponent(session)}/revert-all`, {
+      method: "POST",
+      body: "{}",
+    }),
 
   sendPrompt: (
     session: string,
@@ -391,6 +673,7 @@ export const gateway = {
     modelParams?: ModelParams,
     messageId?: string,
     skillIds?: string[],
+    images?: Array<{ name: string; mediaType: string; data: string }>,
   ) =>
     json<{ status: string }>("/api/prompt", {
       method: "POST",
@@ -400,6 +683,7 @@ export const gateway = {
         ...(modelParams ? { modelParams } : {}),
         ...(messageId ? { messageId } : {}),
         ...(skillIds?.length ? { skillIds } : {}),
+        ...(images?.length ? { images } : {}),
       }),
     }),
   rewindSession: (session: string, messageId: string) =>

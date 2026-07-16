@@ -283,6 +283,28 @@ describe("SkillsStore safety and owned mutations", () => {
     await expect(store.get(created.id)).rejects.toMatchObject({ code: "skill_not_found" });
   });
 
+  it("updates owned skill content and description without renaming", async () => {
+    const store = new SkillsStore({ dataDir, workspace });
+    await store.load();
+    const created = await store.create({
+      name: "patch-me",
+      description: "old desc",
+      content: "Original body",
+      rootId: "workspace",
+    });
+    const updated = await store.update(created.id, {
+      description: "Use when applying an owned skill patch from the curator.",
+      content: "---\nname: patch-me\ndescription: \"Use when applying an owned skill patch from the curator.\"\n---\n\n# Patch me\n\nUpdated body.\n",
+    });
+    expect(updated.name).toBe("patch-me");
+    expect(updated.description).toMatch(/owned skill patch/i);
+    expect((await store.get(created.id)).content).toContain("Updated body");
+    await expect(store.update(created.id, {
+      content: "---\nname: renamed\n---\n\nnope\n",
+    })).rejects.toMatchObject({ code: "invalid_skill_document" });
+    await store.delete(created.id);
+  });
+
   it("rejects invalid names, path escapes, relative custom roots, and overlapping roots", async () => {
     const store = new SkillsStore({ dataDir, workspace });
     await store.load();

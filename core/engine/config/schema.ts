@@ -30,6 +30,10 @@ const PermissionConfigSchema = z.object({
   web: WebPermissionSchema.default(DEFAULT_ENGINE_CONFIG.permissions.web),
   review: ReviewPermissionSchema.default(DEFAULT_ENGINE_CONFIG.permissions.review),
   rules: z.array(PermissionRuleSchema).default([]),
+  protectedPaths: z.array(z.string().min(1).max(260)).max(64).default(
+    DEFAULT_ENGINE_CONFIG.permissions.protectedPaths,
+  ),
+  protectedPathAllowOnce: z.array(z.string().min(1).max(500)).max(200).optional(),
 });
 
 const DENY_ALL_RULE: PermissionConfig["rules"][number] = { pattern: ".*", action: "deny" };
@@ -70,6 +74,7 @@ function normalizePermissions(value: Record<string, unknown>, warnings: string[]
       web: "off",
       review: "always",
       rules: [{ ...DENY_ALL_RULE }],
+      protectedPaths: [...DEFAULT_ENGINE_CONFIG.permissions.protectedPaths],
     } satisfies PermissionConfig;
     return;
   }
@@ -133,8 +138,145 @@ const GBrainConfigSchema = z.object({
   maxOutputBytes: z.number().int().min(1_000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.maxOutputBytes),
 });
 
+const LtmConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.ltm.enabled),
+});
+
+const OpenVikingConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.openviking.enabled),
+  baseURL: z.string().trim().url().optional(),
+});
+
+const MemoryIndexEmbedSchema = z.object({
+  mode: z.enum(["lexical", "http"]).default(DEFAULT_ENGINE_CONFIG.memory.index.embed.mode),
+  baseURL: z.string().trim().url().optional(),
+  model: z.string().trim().min(1).max(256).optional(),
+  apiKey: z.string().trim().min(1).max(4_000).optional(),
+  timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
+  dim: z.number().int().min(8).max(8_192).optional(),
+});
+
+const MemoryIndexConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.index.enabled),
+  backend: z.enum(["sqlite", "postgres", "off"]).default(DEFAULT_ENGINE_CONFIG.memory.index.backend),
+  connectionString: z.string().trim().min(1).max(4_000).optional(),
+  embed: MemoryIndexEmbedSchema.default(DEFAULT_ENGINE_CONFIG.memory.index.embed),
+});
+
+const SessionMirrorConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.sessionMirror.enabled),
+  readSearch: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.sessionMirror.readSearch),
+  enginePrimary: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.sessionMirror.enginePrimary),
+});
+
+const MemoryCuratorConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.curator.enabled),
+  autoOnArchive: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.curator.autoOnArchive),
+  applyMode: z.enum(["propose", "apply_safe", "apply_all"]).default(
+    DEFAULT_ENGINE_CONFIG.memory.curator.applyMode,
+  ),
+  maxTranscriptChars: z.number().int().min(2_000).max(200_000).default(
+    DEFAULT_ENGINE_CONFIG.memory.curator.maxTranscriptChars,
+  ),
+  useLlm: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.curator.useLlm),
+  modelSource: z.enum(["worker", "session", "default"]).default(
+    DEFAULT_ENGINE_CONFIG.memory.curator.modelSource,
+  ),
+});
+
 const MemoryConfigSchema = z.object({
   gbrain: GBrainConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.gbrain),
+  ltm: LtmConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.ltm),
+  openviking: OpenVikingConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.openviking),
+  index: MemoryIndexConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.index),
+  sessionMirror: SessionMirrorConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.sessionMirror),
+  curator: MemoryCuratorConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.curator),
+});
+
+const PlanningConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.planning.enabled),
+});
+
+const ReviewConfigSchema = z.object({
+  cleanContext: z.boolean().default(DEFAULT_ENGINE_CONFIG.review.cleanContext),
+  timeoutMs: z.number().int().min(1_000).max(120_000).default(DEFAULT_ENGINE_CONFIG.review.timeoutMs),
+});
+
+const ToolLoopConfigSchema = z.object({
+  repeatedCallThreshold: z.number().int().min(2).max(20).default(
+    DEFAULT_ENGINE_CONFIG.reliability.toolLoop.repeatedCallThreshold,
+  ),
+  hardStopEnabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.reliability.toolLoop.hardStopEnabled),
+  healAfterFailures: z.number().int().min(1).max(20).default(
+    DEFAULT_ENGINE_CONFIG.reliability.toolLoop.healAfterFailures,
+  ),
+});
+
+const ReliabilityConfigSchema = z.object({
+  goalVerify: z.boolean().default(DEFAULT_ENGINE_CONFIG.reliability.goalVerify),
+  healHandoff: z.boolean().default(DEFAULT_ENGINE_CONFIG.reliability.healHandoff),
+  maxTokens: z.number().int().min(1_000).max(50_000_000).optional(),
+  maxCostUsd: z.number().min(0).max(1_000_000).optional(),
+  maxSubagents: z.number().int().min(1).max(64).optional(),
+  toolLoop: ToolLoopConfigSchema.default(DEFAULT_ENGINE_CONFIG.reliability.toolLoop),
+});
+
+const CompressionConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.compression.enabled),
+  protectLastN: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.compression.protectLastN),
+  pruneToChars: z.number().int().min(100).max(50_000).default(DEFAULT_ENGINE_CONFIG.compression.pruneToChars),
+  summaryEnabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.compression.summaryEnabled),
+  summaryUseLlm: z.boolean().default(DEFAULT_ENGINE_CONFIG.compression.summaryUseLlm),
+  protectFirstN: z.number().int().min(0).max(50).default(DEFAULT_ENGINE_CONFIG.compression.protectFirstN),
+  summaryMinMessages: z.number().int().min(4).max(500).default(
+    DEFAULT_ENGINE_CONFIG.compression.summaryMinMessages,
+  ),
+  summaryCooldownoffMs: z.number().int().min(0).max(3_600_000).default(
+    DEFAULT_ENGINE_CONFIG.compression.summaryCooldownoffMs,
+  ),
+});
+
+const McpServerConfigSchema = z.object({
+  id: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+  command: z.string().trim().min(1).max(1_024),
+  args: z.array(z.string().max(512)).max(32).optional(),
+  env: z.record(z.string().max(128), z.string().max(4_096)).optional(),
+  cwd: z.string().trim().max(1_024).optional(),
+  enabled: z.boolean().optional(),
+});
+
+const McpConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.mcp.enabled),
+  servers: z.array(McpServerConfigSchema).max(16).default(DEFAULT_ENGINE_CONFIG.mcp.servers),
+  timeoutMs: z.number().int().min(1_000).max(300_000).default(DEFAULT_ENGINE_CONFIG.mcp.timeoutMs),
+  maxServers: z.number().int().min(1).max(16).default(DEFAULT_ENGINE_CONFIG.mcp.maxServers),
+  maxToolsPerServer: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.mcp.maxToolsPerServer),
+  maxResultChars: z.number().int().min(1_000).max(200_000).default(DEFAULT_ENGINE_CONFIG.mcp.maxResultChars),
+});
+
+const MessagingConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.messaging.enabled),
+  autoRun: z.boolean().default(DEFAULT_ENGINE_CONFIG.messaging.autoRun),
+  maxBodyChars: z.number().int().min(1_000).max(20_000).default(DEFAULT_ENGINE_CONFIG.messaging.maxBodyChars),
+});
+
+const SkillsCuratorConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.skills.curator.enabled),
+  applyMode: z.enum(["propose", "apply_safe"]).default(DEFAULT_ENGINE_CONFIG.skills.curator.applyMode),
+  staleDays: z.number().int().min(7).max(3650).default(DEFAULT_ENGINE_CONFIG.skills.curator.staleDays),
+  maxProposals: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.skills.curator.maxProposals),
+  useLlm: z.boolean().default(DEFAULT_ENGINE_CONFIG.skills.curator.useLlm),
+  modelSource: z.enum(["worker", "session", "default"]).default(
+    DEFAULT_ENGINE_CONFIG.skills.curator.modelSource,
+  ),
+  maxLlmSkills: z.number().int().min(1).max(20).default(DEFAULT_ENGINE_CONFIG.skills.curator.maxLlmSkills),
+  maxSkillChars: z.number().int().min(500).max(40_000).default(
+    DEFAULT_ENGINE_CONFIG.skills.curator.maxSkillChars,
+  ),
+});
+
+const SkillsConfigSchema = z.object({
+  curator: SkillsCuratorConfigSchema.default(DEFAULT_ENGINE_CONFIG.skills.curator),
 });
 
 const DelegationConfigSchema = z.object({
@@ -162,21 +304,40 @@ const PromptProfilesSchema = z.array(PromptProfileSchema).max(64).refine(
 );
 
 /** Full engine config schema. All fields optional with sane defaults. */
+const ExecutionModeSchema = z.enum(["autopilot", "supervised"]);
+
+const ReasoningEffortSchema = z.string().max(32).refine(
+  (value) => value === "" || ["minimal", "low", "medium", "high", "xhigh", "max", "off"].includes(value),
+  "invalid reasoning effort",
+);
+
 export const EngineConfigSchema = z.object({
   maxSteps: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.maxSteps),
   commandTimeoutMs: z.number().int().min(1000).max(3_600_000).default(DEFAULT_ENGINE_CONFIG.commandTimeoutMs),
   maxToolOutput: z.number().int().min(500).max(200_000).default(DEFAULT_ENGINE_CONFIG.maxToolOutput),
   contextBudget: ContextBudgetSchema.default(DEFAULT_ENGINE_CONFIG.contextBudget),
+  compression: CompressionConfigSchema.default(DEFAULT_ENGINE_CONFIG.compression),
   permissions: PermissionConfigSchema.default(DEFAULT_ENGINE_CONFIG.permissions),
+  executionMode: ExecutionModeSchema.default(DEFAULT_ENGINE_CONFIG.executionMode),
   fallbackChain: z.array(z.string()).default([]),
   sandbox: z.enum(["off", "strict", "strict-required"]).default(DEFAULT_ENGINE_CONFIG.sandbox),
   apiMaxRetries: z.number().int().min(0).max(10).default(DEFAULT_ENGINE_CONFIG.apiMaxRetries),
   personality: z.string().max(4000).default(DEFAULT_ENGINE_CONFIG.personality),
+  personalityPresetId: z.string().max(64).default(DEFAULT_ENGINE_CONFIG.personalityPresetId),
+  timezone: z.string().max(80).default(DEFAULT_ENGINE_CONFIG.timezone),
+  defaultReasoningEffort: ReasoningEffortSchema.default(DEFAULT_ENGINE_CONFIG.defaultReasoningEffort || ""),
+  imageInputMode: z.enum(["auto", "native", "text"]).default(DEFAULT_ENGINE_CONFIG.imageInputMode),
   promptProfiles: PromptProfilesSchema.default(DEFAULT_ENGINE_CONFIG.promptProfiles),
   activePromptProfileId: z.union([PromptProfileIdSchema, z.literal("")]).default(DEFAULT_ENGINE_CONFIG.activePromptProfileId),
   fileReadMaxChars: z.number().int().min(1000).max(5_000_000).default(DEFAULT_ENGINE_CONFIG.fileReadMaxChars),
   delegation: DelegationConfigSchema.default(DEFAULT_ENGINE_CONFIG.delegation),
   memory: MemoryConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory),
+  planning: PlanningConfigSchema.default(DEFAULT_ENGINE_CONFIG.planning),
+  review: ReviewConfigSchema.default(DEFAULT_ENGINE_CONFIG.review),
+  reliability: ReliabilityConfigSchema.default(DEFAULT_ENGINE_CONFIG.reliability),
+  messaging: MessagingConfigSchema.default(DEFAULT_ENGINE_CONFIG.messaging),
+  mcp: McpConfigSchema.default(DEFAULT_ENGINE_CONFIG.mcp),
+  skills: SkillsConfigSchema.default(DEFAULT_ENGINE_CONFIG.skills),
 });
 
 export interface ResolveResult {
@@ -189,7 +350,12 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
   const warnings: string[] = [];
   if (raw == null || typeof raw !== "object") return { value: {}, warnings };
   const v = { ...(raw as Record<string, unknown>) };
-  const agent = v["agent"];
+  const agent = isRecord(v["agent"]) ? v["agent"] : null;
+  const terminal = isRecord(v["terminal"]) ? v["terminal"] : null;
+  const toolOutput = isRecord(v["tool_output"]) ? v["tool_output"] : null;
+  const compression = isRecord(v["compression"]) ? v["compression"] : null;
+  const toolLoop = isRecord(v["tool_loop_guardrails"]) ? v["tool_loop_guardrails"] : null;
+  const display = isRecord(v["display"]) ? v["display"] : null;
 
   // v0.1: flat `autonomy: "auto" | "turbo" | "off"` → permissions.terminal
   if (typeof v["autonomy"] === "string" && v["permissions"] == null) {
@@ -204,25 +370,149 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
     warnings.push("migrated legacy 'maxToolCalls' → maxSteps");
   }
   // Hermes nested config: `agent.max_turns` → `maxSteps`
-  if (v["maxSteps"] == null && agent && typeof agent === "object" && typeof (agent as Record<string, unknown>)["max_turns"] === "number") {
-    v["maxSteps"] = (agent as Record<string, unknown>)["max_turns"];
+  if (v["maxSteps"] == null && agent && typeof agent["max_turns"] === "number") {
+    v["maxSteps"] = agent["max_turns"];
     warnings.push("migrated Hermes 'agent.max_turns' → maxSteps");
   }
   // Hermes nested config: `agent.api_max_retries` → `apiMaxRetries`
-  if (
-    v["apiMaxRetries"] == null &&
-    agent &&
-    typeof agent === "object" &&
-    typeof (agent as Record<string, unknown>)["api_max_retries"] === "number"
-  ) {
-    v["apiMaxRetries"] = (agent as Record<string, unknown>)["api_max_retries"];
+  if (v["apiMaxRetries"] == null && agent && typeof agent["api_max_retries"] === "number") {
+    v["apiMaxRetries"] = agent["api_max_retries"];
     warnings.push("migrated Hermes 'agent.api_max_retries' → apiMaxRetries");
+  }
+  // Hermes `agent.reasoning_effort` → `defaultReasoningEffort`
+  if (
+    (v["defaultReasoningEffort"] == null || v["defaultReasoningEffort"] === "")
+    && agent
+    && typeof agent["reasoning_effort"] === "string"
+    && agent["reasoning_effort"].trim()
+  ) {
+    v["defaultReasoningEffort"] = String(agent["reasoning_effort"]).trim().toLowerCase();
+    warnings.push("migrated Hermes 'agent.reasoning_effort' → defaultReasoningEffort");
+  }
+  // Hermes `agent.image_input_mode` → `imageInputMode`
+  if (
+    v["imageInputMode"] == null
+    && agent
+    && typeof agent["image_input_mode"] === "string"
+  ) {
+    const mode = String(agent["image_input_mode"]).trim().toLowerCase();
+    if (mode === "auto" || mode === "native" || mode === "text") {
+      v["imageInputMode"] = mode;
+      warnings.push("migrated Hermes 'agent.image_input_mode' → imageInputMode");
+    }
   }
   // Hermes snake_case top-level: `file_read_max_chars` → `fileReadMaxChars`
   if (v["fileReadMaxChars"] == null && typeof v["file_read_max_chars"] === "number") {
     v["fileReadMaxChars"] = v["file_read_max_chars"];
     delete v["file_read_max_chars"];
     warnings.push("migrated Hermes 'file_read_max_chars' → fileReadMaxChars");
+  }
+  // Hermes `tool_output.max_bytes` → `maxToolOutput` (cap to schema max)
+  if (v["maxToolOutput"] == null && toolOutput && typeof toolOutput["max_bytes"] === "number") {
+    const bytes = toolOutput["max_bytes"];
+    v["maxToolOutput"] = Math.min(200_000, Math.max(500, Math.floor(bytes)));
+    warnings.push("migrated Hermes 'tool_output.max_bytes' → maxToolOutput");
+  }
+  // Hermes `terminal.timeout` (seconds) → `commandTimeoutMs`
+  if (v["commandTimeoutMs"] == null && terminal && typeof terminal["timeout"] === "number") {
+    const seconds = terminal["timeout"];
+    // Heuristic: values ≤ 3600 are seconds; larger values already look like ms.
+    v["commandTimeoutMs"] = seconds <= 3_600 ? Math.floor(seconds * 1_000) : Math.floor(seconds);
+    warnings.push("migrated Hermes 'terminal.timeout' → commandTimeoutMs");
+  }
+  // Hermes `display.personality` free text → personality when empty
+  if (
+    (v["personality"] == null || v["personality"] === "")
+    && display
+    && typeof display["personality"] === "string"
+    && display["personality"].trim()
+  ) {
+    v["personality"] = display["personality"].trim().slice(0, 4_000);
+    warnings.push("migrated Hermes 'display.personality' → personality");
+  }
+  // Normalize personalityPresetId when free text exists without an id.
+  if (
+    (v["personalityPresetId"] == null || v["personalityPresetId"] === "")
+    && typeof v["personality"] === "string"
+    && v["personality"].trim()
+  ) {
+    v["personalityPresetId"] = "custom";
+  }
+  if (v["personalityPresetId"] == null || v["personalityPresetId"] === "") {
+    v["personalityPresetId"] = "none";
+  }
+  // Hermes top-level `timezone`
+  if ((v["timezone"] == null || v["timezone"] === "") && typeof v["timezone"] !== "string") {
+    /* no-op: timezone key may already be string empty */
+  }
+  if (
+    (v["timezone"] == null || v["timezone"] === "")
+    && typeof (raw as Record<string, unknown>)["timezone"] === "string"
+  ) {
+    // already copied via spread when present
+  }
+  // Hermes compression → Kyrei compression + optional softPct from free-space threshold
+  if (compression) {
+    const nextComp = isRecord(v["compression"]) ? { ...v["compression"] } : {};
+    let cMigrated = false;
+    if (nextComp["enabled"] == null && typeof compression["enabled"] === "boolean") {
+      nextComp["enabled"] = compression["enabled"];
+      cMigrated = true;
+    }
+    if (nextComp["protectLastN"] == null && typeof compression["protect_last_n"] === "number") {
+      nextComp["protectLastN"] = compression["protect_last_n"];
+      cMigrated = true;
+    }
+    if (cMigrated) {
+      v["compression"] = nextComp;
+      warnings.push("migrated Hermes 'compression.*' → compression");
+    }
+    // Hermes threshold = free-space fraction; softPct ≈ 1 - threshold
+    if (
+      !isRecord(v["contextBudget"])
+      && typeof compression["threshold"] === "number"
+      && compression["threshold"] > 0
+      && compression["threshold"] < 1
+    ) {
+      const softPct = Math.min(0.95, Math.max(0.3, 1 - compression["threshold"]));
+      const hardPct = Math.min(0.99, Math.max(softPct + 0.05, softPct + 0.1));
+      v["contextBudget"] = { softPct, hardPct };
+      warnings.push("migrated Hermes 'compression.threshold' → contextBudget.softPct");
+    } else if (
+      isRecord(v["contextBudget"])
+      && (v["contextBudget"] as Record<string, unknown>)["softPct"] == null
+      && typeof compression["threshold"] === "number"
+      && compression["threshold"] > 0
+      && compression["threshold"] < 1
+    ) {
+      const softPct = Math.min(0.95, Math.max(0.3, 1 - compression["threshold"]));
+      v["contextBudget"] = { ...v["contextBudget"], softPct };
+      warnings.push("migrated Hermes 'compression.threshold' → contextBudget.softPct");
+    }
+  }
+  // Hermes tool_loop_guardrails → reliability.toolLoop
+  if (toolLoop) {
+    const reliability = isRecord(v["reliability"]) ? { ...v["reliability"] } : {};
+    const existingLoop = isRecord(reliability["toolLoop"]) ? { ...reliability["toolLoop"] } : {};
+    let loopMigrated = false;
+    if (existingLoop["hardStopEnabled"] == null && typeof toolLoop["hard_stop_enabled"] === "boolean") {
+      existingLoop["hardStopEnabled"] = toolLoop["hard_stop_enabled"];
+      loopMigrated = true;
+    }
+    const hardAfter = isRecord(toolLoop["hard_stop_after"]) ? toolLoop["hard_stop_after"] : null;
+    if (existingLoop["repeatedCallThreshold"] == null && hardAfter && typeof hardAfter["idempotent_no_progress"] === "number") {
+      existingLoop["repeatedCallThreshold"] = hardAfter["idempotent_no_progress"];
+      loopMigrated = true;
+    }
+    if (existingLoop["healAfterFailures"] == null && hardAfter && typeof hardAfter["exact_failure"] === "number") {
+      existingLoop["healAfterFailures"] = hardAfter["exact_failure"];
+      loopMigrated = true;
+    }
+    if (loopMigrated) {
+      reliability["toolLoop"] = existingLoop;
+      v["reliability"] = reliability;
+      warnings.push("migrated Hermes 'tool_loop_guardrails.*' → reliability.toolLoop");
+    }
   }
   // Early Kyrei builds exposed these aliases in Settings, but no runtime path
   // ever consumed them. Drop the cosmetic contract rather than unexpectedly
@@ -248,11 +538,29 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
       }
       delete delegation["max_concurrent_children"];
     }
-    if (migrated) {
+    if (typeof delegation["max_iterations"] === "number" && delegation["maxSteps"] == null) {
+      delegation["maxSteps"] = Math.min(24, Math.max(1, Math.floor(delegation["max_iterations"])));
+      delete delegation["max_iterations"];
+      migrated = true;
+      warnings.push("migrated Hermes 'delegation.max_iterations' → delegation.maxSteps");
+    }
+    if (typeof delegation["child_timeout_seconds"] === "number" && delegation["timeoutMs"] == null) {
+      delegation["timeoutMs"] = Math.min(300_000, Math.max(1_000, Math.floor(delegation["child_timeout_seconds"] * 1_000)));
+      delete delegation["child_timeout_seconds"];
+      migrated = true;
+      warnings.push("migrated Hermes 'delegation.child_timeout_seconds' → delegation.timeoutMs");
+    }
+    if (migrated && !warnings.some((w) => w.includes("max_concurrent_children") || w.includes("max_iterations") || w.includes("child_timeout"))) {
       warnings.push("migrated Hermes 'delegation.max_concurrent_children' to maxTasks/maxParallel");
+    } else if (migrated && typeof legacyConcurrency === "number") {
+      if (!warnings.some((w) => w.includes("max_concurrent_children"))) {
+        warnings.push("migrated Hermes 'delegation.max_concurrent_children' to maxTasks/maxParallel");
+      }
     }
     v["delegation"] = delegation;
   }
+  // Strip Hermes-only blobs so they do not fail Zod top-level open objects.
+  // (resolveEngineConfig only keeps known EngineConfig keys via schema.)
   return { value: v, warnings };
 }
 

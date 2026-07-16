@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CommandPalette } from "@/components/CommandPalette";
 import { Composer } from "@/components/Composer";
+import { ChangesPanel } from "@/components/chat/ChangesPanel";
 import { CronPanel } from "@/components/cron/CronPanel";
 import { PipelineMissionPanel } from "@/components/pipeline/PipelineMissionPanel";
 import { Message } from "@/components/Message";
@@ -54,6 +55,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [cronOpen, setCronOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
   const [missionOpen, setMissionOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId>("model");
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -74,6 +76,11 @@ export function App() {
   const [sessionModelPendingIds, setSessionModelPendingIds] = useState<ReadonlySet<string>>(() => new Set());
   const approvalBlocked = messages.some((message) => message.parts.some(
     (part) => part.type === "approval" && !part.consumedAt,
+  ));
+  const fileReviewBlocked = messages.some((message) => (
+    message.fileReview?.status === "pending"
+    || message.fileReview?.status === "partial"
+    || message.turnStatus === "awaiting_file_review"
   ));
 
   const pendingIdRef = useRef<string | null>(null);
@@ -405,6 +412,11 @@ export function App() {
             })));
           }
           break;
+        case "file_review.resolved":
+          void gateway.getMessages(currentId).then((stored) => {
+            if (alive) setMessages(hydrateStoredMessages(stored, translationRef.current));
+          }).catch(() => undefined);
+          break;
         case "status.update": {
           const usage = (event.payload as { usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number } }).usage;
           if (usage) {
@@ -474,7 +486,7 @@ export function App() {
               setRunState("idle");
               setTurnStartedAt(null);
             });
-          if (payload.status !== "awaiting_approval") {
+          if (payload.status !== "awaiting_approval" && payload.status !== "awaiting_file_review") {
             notifyTurnComplete(translationRef.current("shell.notification.turnComplete"));
           }
           if (payload.text && getUiSettings().autoSpeak) {
@@ -530,22 +542,42 @@ export function App() {
     if (element) element.scrollTop = messages.length === 0 ? 0 : element.scrollHeight;
   }, [messages]);
 
-  const send = useCallback((text: string, skillIds?: string[]) => {
-    if (!currentId || rewinding || approvalBlocked) return;
+  // Soft-archive restore from Settings → Sessions.
+  useEffect(() => {
+    const onRefresh = () => {
+      void gateway.listSessions().then(setSessions).catch(() => undefined);
+    };
+    window.addEventListener("kyrei:sessions-refresh", onRefresh);
+    return () => window.removeEventListener("kyrei:sessions-refresh", onRefresh);
+  }, []);
+
+  const send = useCallback((
+    text: string,
+    skillIds?: string[],
+    images?: Array<{ name: string; mediaType: string; data: string }>,
+  ) => {
+    if (!currentId || rewinding || approvalBlocked || fileReviewBlocked) return;
+    if (!text.trim() && !(images && images.length)) return;
     const userId = `msg-${globalThis.crypto.randomUUID()}`;
     const assistantId = pendingAssistantId(currentId);
     pendingIdRef.current = assistantId;
     setStartupError(null);
+    const imageLabels = images?.length
+      ? images.map((img) => `[image: ${img.name}]`).join(" ")
+      : "";
+    const displayText = text.trim()
+      ? (imageLabels ? `${text.trim()}\n${imageLabels}` : text.trim())
+      : imageLabels;
     setMessages((current) => [
       ...current,
-      { id: userId, role: "user", parts: [{ type: "text", text }] },
+      { id: userId, role: "user", parts: [{ type: "text", text: displayText }] },
       { id: assistantId, role: "assistant", parts: [], pending: true },
     ]);
     setRunState("running");
     setTurnStartedAt(Date.now());
     const protocol = config?.providers.find((candidate) => candidate.id === currentProviderId)?.protocol;
     const modelParams = executableModelParams(protocol, currentModelPreset);
-    gateway.sendPrompt(currentId, text, modelParams, userId, skillIds).catch((reason) => {
+    gateway.sendPrompt(currentId, text.trim(), modelParams, userId, skillIds, images).catch((reason) => {
       const message = describeError(reason);
       setMessages((current) => current.map((item) => item.id === assistantId
         ? { ...item, parts: [{ type: "text", text: message }], pending: false }
@@ -554,7 +586,50 @@ export function App() {
       setRunState("idle");
       setTurnStartedAt(null);
     });
-  }, [approvalBlocked, currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
+  }, [approvalBlocked, fileReviewBlocked, currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
+
+  const respondToFileReview = useCallback(async (accept: boolean) => {
+    if (!currentId || streaming || rewinding) return;
+    setStartupError(null);
+    try {
+      await gateway.respondToFileReview(currentId, accept);
+      const stored = await gateway.getMessages(currentId);
+      setMessages(hydrateStoredMessages(stored, translationRef.current));
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, describeError, rewinding, streaming]);
+
+  const respondToFileReviewFile = useCallback(async (path: string, accept: boolean) => {
+    if (!currentId || streaming || rewinding) return;
+    setStartupError(null);
+    try {
+      await gateway.respondToFileReview(currentId, { files: [{ path, accept }] });
+      const stored = await gateway.getMessages(currentId);
+      setMessages(hydrateStoredMessages(stored, translationRef.current));
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, describeError, rewinding, streaming]);
+
+  const respondToFileReviewHunk = useCallback(async (path: string, hunkId: string, accept: boolean) => {
+    if (!currentId || streaming || rewinding) return;
+    setStartupError(null);
+    try {
+      await gateway.respondToFileReview(currentId, {
+        files: [{ path, hunks: [{ id: hunkId, accept }] }],
+      });
+      const stored = await gateway.getMessages(currentId);
+      setMessages(hydrateStoredMessages(stored, translationRef.current));
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, describeError, rewinding, streaming]);
+
+  const openSessionChanges = useCallback(() => {
+    if (!currentId) return;
+    setChangesOpen(true);
+  }, [currentId]);
 
   const rewindToMessage = useCallback(async (messageId: string) => {
     if (!currentId || streaming || rewinding) return;
@@ -580,7 +655,78 @@ export function App() {
     }
   }, [currentId, describeError, rewinding, streaming, t]);
 
-  const respondToApproval = useCallback(async (approvalId: string, approved: boolean) => {
+  const openForkedSession = useCallback(async (result: { id: string }) => {
+    const list = await gateway.listSessions();
+    setSessions(list);
+    setCurrentId(result.id);
+    const stored = await gateway.getMessages(result.id);
+    setMessages(hydrateStoredMessages(stored, translationRef.current));
+    pendingIdRef.current = null;
+    setRunState("idle");
+  }, []);
+
+  const forkSession = useCallback(async (messageId?: string) => {
+    if (!currentId || streaming || rewinding) return;
+    const ok = window.confirm(
+      messageId ? t("chat.message.forkConfirm") : t("shell.session.forkConfirm"),
+    );
+    if (!ok) return;
+    setStartupError(null);
+    beginSessionMutation();
+    try {
+      const result = await gateway.forkSession(currentId, messageId ? { messageId } : undefined);
+      await openForkedSession(result);
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    } finally {
+      finishSessionMutation();
+    }
+  }, [
+    beginSessionMutation,
+    currentId,
+    describeError,
+    finishSessionMutation,
+    openForkedSession,
+    rewinding,
+    streaming,
+    t,
+  ]);
+
+  const forkSessionById = useCallback(async (sessionId: string) => {
+    if (!sessionId) return;
+    // Only block when the *target* session is busy (not an unrelated streaming chat).
+    const target = sessions.find((s) => s.id === sessionId);
+    const targetBusy = target?.status === "working"
+      || (sessionId === currentId && (streaming || rewinding));
+    if (targetBusy) return;
+    if (!window.confirm(t("shell.session.forkConfirm"))) return;
+    setStartupError(null);
+    beginSessionMutation();
+    try {
+      const result = await gateway.forkSession(sessionId);
+      await openForkedSession(result);
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    } finally {
+      finishSessionMutation();
+    }
+  }, [
+    beginSessionMutation,
+    currentId,
+    describeError,
+    finishSessionMutation,
+    openForkedSession,
+    rewinding,
+    sessions,
+    streaming,
+    t,
+  ]);
+
+  const respondToApproval = useCallback(async (
+    approvalId: string,
+    approved: boolean,
+    options?: { always?: boolean },
+  ) => {
     if (!currentId || streaming || rewinding) return;
     const assistantId = `assistant-approval-${Date.now()}`;
     pendingIdRef.current = assistantId;
@@ -592,13 +738,24 @@ export function App() {
     setRunState("running");
     setTurnStartedAt(Date.now());
     try {
-      const result = await gateway.respondToApproval(currentId, approvalId, approved);
+      const result = await gateway.respondToApproval(currentId, approvalId, approved, {
+        ...(options?.always ? { always: true } : {}),
+      });
       setMessages((current) => current.map((message) => ({
         ...message,
         parts: message.parts.map((part) => part.type === "approval" && part.approvalId === approvalId
           ? { ...part, ...result.approval }
           : part),
       })));
+      // Refresh config when a durable rule was promoted (Settings Safety list).
+      if (result.promotedRule && config) {
+        try {
+          const next = await gateway.getConfig();
+          setConfig(next);
+        } catch {
+          /* best effort */
+        }
+      }
       if (result.status === "pending") {
         setMessages((current) => current.filter((message) => message.id !== assistantId));
         pendingIdRef.current = null;
@@ -612,7 +769,7 @@ export function App() {
       setTurnStartedAt(null);
       setStartupError(describeError(reason));
     }
-  }, [currentId, describeError, rewinding, streaming]);
+  }, [currentId, describeError, rewinding, streaming, config]);
 
   const stop = useCallback(async () => {
     if (!currentId || stopping) return;
@@ -682,36 +839,58 @@ export function App() {
     }
   }, [beginSessionMutation, config, describeError, finishSessionMutation]);
 
-  const deleteSession = useCallback(async (id: string) => {
+  const leaveSessionIfCurrent = useCallback(async (id: string, remaining: SessionInfo[]) => {
+    if (currentId !== id) return;
+    if (remaining.length > 0) {
+      setCurrentId(remaining[0]!.id);
+      return;
+    }
+    try {
+      const nextId = await gateway.createSession();
+      setSessions([{
+        id: nextId,
+        title: "",
+        createdAt: new Date().toISOString(),
+        source: "chat",
+        providerId: config?.activeProviderId,
+        modelId: config?.activeModelId,
+      }]);
+      setCurrentId(nextId);
+    } catch (reason) {
+      setCurrentId(null);
+      setStartupError(describeError(reason));
+    }
+  }, [currentId, config, describeError]);
+
+  /** Soft-archive: hide from sidebar, keep messages for hybrid memory FTS. */
+  const archiveSession = useCallback(async (id: string) => {
+    if (!window.confirm(t("shell.session.archiveConfirm"))) return;
     beginSessionMutation();
     try {
-      await gateway.deleteSession(id).catch(() => {});
+      await gateway.setSessionArchived(id, true);
       const remaining = sessions.filter((session) => session.id !== id);
       setSessions(remaining);
-      if (currentId !== id) return;
-      if (remaining.length > 0) {
-        setCurrentId(remaining[0].id);
-        return;
-      }
-      try {
-        const nextId = await gateway.createSession();
-        setSessions([{
-          id: nextId,
-          title: "",
-          createdAt: new Date().toISOString(),
-          source: "chat",
-          providerId: config?.activeProviderId,
-          modelId: config?.activeModelId,
-        }]);
-        setCurrentId(nextId);
-      } catch (reason) {
-        setCurrentId(null);
-        setStartupError(describeError(reason));
-      }
+      await leaveSessionIfCurrent(id, remaining);
+    } catch (reason) {
+      setStartupError(describeError(reason));
     } finally {
       finishSessionMutation();
     }
-  }, [beginSessionMutation, sessions, currentId, config, describeError, finishSessionMutation]);
+  }, [beginSessionMutation, sessions, leaveSessionIfCurrent, describeError, finishSessionMutation, t]);
+
+  const deleteSession = useCallback(async (id: string) => {
+    beginSessionMutation();
+    try {
+      await gateway.deleteSession(id);
+      const remaining = sessions.filter((session) => session.id !== id);
+      setSessions(remaining);
+      await leaveSessionIfCurrent(id, remaining);
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    } finally {
+      finishSessionMutation();
+    }
+  }, [beginSessionMutation, sessions, leaveSessionIfCurrent, describeError, finishSessionMutation]);
 
   const runCommand = useCallback((name: string, argument?: string) => {
     switch (name) {
@@ -847,7 +1026,7 @@ export function App() {
       "keybinds.openPanel": () => openSettings("keybinds"),
     };
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || cronOpen || missionOpen) return;
+      if (settingsOpen || cronOpen || missionOpen || changesOpen) return;
       const combo = comboFromEvent(event);
       if (!combo) return;
       const action = actionForCombo(combo);
@@ -858,7 +1037,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [newSession, cycleSession, toggleMode, openSettings, currentId, toggleActivity, toggleDeveloper, settingsOpen, cronOpen, missionOpen]);
+  }, [newSession, cycleSession, toggleMode, openSettings, currentId, toggleActivity, toggleDeveloper, settingsOpen, cronOpen, missionOpen, changesOpen]);
 
   const currentTitle = sessionTitle(sessions.find((session) => session.id === currentId) ?? { id: "" }, t("shell.session.untitled"));
   const turbo = terminalPermission(config) === "turbo";
@@ -907,9 +1086,20 @@ export function App() {
         workingId={sessions.find((session) => session.status === "working")?.id ?? (streaming ? currentId : null)}
         onSelect={setCurrentId}
         onNew={newSession}
-        onDelete={deleteSession}
+        onArchive={archiveSession}
+        onFork={(id) => void forkSessionById(id)}
         onRename={renameSession}
-        onOpenActivity={(id) => openSettings(settingsSectionForActivity(id))}
+        onOpenActivity={(id) => {
+          if (id === "artifacts") {
+            openMissions();
+            return;
+          }
+          if (id === "messaging") {
+            openSettings("notifications");
+            return;
+          }
+          openSettings(settingsSectionForActivity(id as "capabilities" | "memory" | "providers"));
+        }}
         onHome={() => document.querySelector<HTMLInputElement>("[data-shell-session-search] input")?.focus()}
         onOpenSettings={() => openSettings("model")}
         onOpenPalette={() => setPaletteOpen(true)}
@@ -936,7 +1126,11 @@ export function App() {
                 <Message
                   message={message}
                   onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
+                  onFork={message.role === "user" && !streaming && !rewinding ? (id) => void forkSession(id) : undefined}
                   onApprovalDecision={message.role === "assistant" && !streaming && !rewinding ? respondToApproval : undefined}
+                  onFileReviewDecision={message.role === "assistant" && !streaming && !rewinding ? respondToFileReview : undefined}
+                  onFileReviewFileDecision={message.role === "assistant" && !streaming && !rewinding ? respondToFileReviewFile : undefined}
+                  onFileReviewHunkDecision={message.role === "assistant" && !streaming && !rewinding ? respondToFileReviewHunk : undefined}
                 />
               </div>
             ))}
@@ -946,13 +1140,25 @@ export function App() {
       <Composer
         streaming={streaming}
         stopping={stopping}
-        disabled={!config || !currentId || rewinding || approvalBlocked || sessionModelPendingIds.has(currentId)}
+        disabled={!config || !currentId || rewinding || approvalBlocked || fileReviewBlocked || sessionModelPendingIds.has(currentId)}
         sessionId={currentId}
         model={currentModelId}
         provider={currentProviderId}
         providers={config?.providers ?? []}
         hasWorkspace={Boolean(config?.workspace)}
         skillsSelectable={(config?.orchestration?.defaultMode ?? "single") === "single"}
+        executionMode={
+          isRecord(config?.engine) && config.engine.executionMode === "supervised"
+            ? "supervised"
+            : "autopilot"
+        }
+        onExecutionModeChange={(mode) => {
+          if (!config) return;
+          const engine = { ...(config.engine ?? {}), executionMode: mode };
+          setConfig({ ...config, engine });
+          gateway.setConfig({ engine }).then(setConfig).catch(() => setConfig(config));
+        }}
+        onViewChanges={() => void openSessionChanges()}
         onSend={send}
         onStop={stop}
         onCommand={runCommand}
@@ -1010,6 +1216,16 @@ export function App() {
         onClose={() => setCronOpen(false)}
         onOpenSession={(id) => { setCurrentId(id); setCronOpen(false); }}
       />
+      <ChangesPanel
+        open={changesOpen}
+        sessionId={currentId}
+        onClose={() => setChangesOpen(false)}
+        onReverted={async () => {
+          if (!currentId) return;
+          const stored = await gateway.getMessages(currentId);
+          setMessages(hydrateStoredMessages(stored, translationRef.current));
+        }}
+      />
       <PipelineMissionPanel
         open={missionOpen}
         onClose={() => setMissionOpen(false)}
@@ -1018,7 +1234,7 @@ export function App() {
         sessionId={currentId || undefined}
       />
       <CommandPalette
-        open={paletteOpen && !settingsOpen && !cronOpen && !missionOpen}
+        open={paletteOpen && !settingsOpen && !cronOpen && !missionOpen && !changesOpen}
         onClose={() => setPaletteOpen(false)}
         sessions={sessions}
         onNew={newSession}
@@ -1056,15 +1272,37 @@ function hydrateStoredMessages(
         : message.turnStatus === "error"
           ? translate?.("shell.error.fallback")
           : undefined;
+    let parts = (persistedParts.length
+      ? persistedParts
+      : errorText
+        ? [{ type: "text", text: errorText }]
+        : []) as MessagePart[];
+    // Surface image attachment labels on user turns when parts are text-only.
+    if (
+      message.role === "user"
+      && Array.isArray(message.imageAttachments)
+      && message.imageAttachments.length
+    ) {
+      const labels = message.imageAttachments.map((a) => `[image: ${a.name}]`).join(" ");
+      const hasLabels = parts.some((p) => p.type === "text" && p.text.includes("[image:"));
+      if (!hasLabels) {
+        const textPart = parts.find((p) => p.type === "text");
+        if (textPart && textPart.type === "text") {
+          parts = parts.map((p) => (p === textPart
+            ? { ...p, text: p.text.trim() ? `${p.text.trim()}\n${labels}` : labels }
+            : p));
+        } else {
+          parts = [...parts, { type: "text", text: labels }];
+        }
+      }
+    }
     return {
       id: message.id,
       role: message.role,
-      parts: (persistedParts.length
-        ? persistedParts
-        : errorText
-          ? [{ type: "text", text: errorText }]
-          : []) as MessagePart[],
+      parts,
       ...(message.pending ? { pending: true } : {}),
+      ...(message.turnStatus ? { turnStatus: message.turnStatus } : {}),
+      ...(message.fileReview ? { fileReview: message.fileReview } : {}),
     };
   });
 }

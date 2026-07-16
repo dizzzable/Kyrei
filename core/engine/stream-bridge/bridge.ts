@@ -20,6 +20,12 @@ export interface BridgeCtx {
   provider: string;
   model: string;
   maxSteps?: number;
+  guardStopReason?: () =>
+    | "max_steps"
+    | "repeated_tool_call"
+    | "budget_exceeded"
+    | "heal_handoff"
+    | undefined;
   approvalMeta?: Map<string, { reason: string; args: unknown; name?: string }>;
 }
 
@@ -310,7 +316,8 @@ export async function bridgeStream(
     }
   }
 
-  const status = computeStatus(st, ctx.maxSteps);
+  const guardReason = ctx.guardStopReason?.();
+  const status = computeStatus(st, ctx.maxSteps, guardReason ?? false);
   emit({ type: "message.complete", payload: { text: st.text, status, usage: st.usage } });
   return { text: st.text, parts: st.parts, usage: st.usage, status };
 }

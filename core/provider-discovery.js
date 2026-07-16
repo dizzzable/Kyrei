@@ -39,25 +39,37 @@ function isLoopbackIpv4(address) {
   return Boolean(parts && parts[0] === 127);
 }
 
+/** RFC1918 LAN — allowed for user-configured local model servers (Ollama etc.). */
+function isPrivateLanIpv4(address) {
+  const parts = ipv4Parts(address);
+  if (!parts) return false;
+  const [a, b] = parts;
+  return a === 10
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168);
+}
+
 function isBenchmarkIpv4(address) {
   const parts = ipv4Parts(address);
   return Boolean(parts && parts[0] === 198 && (parts[1] === 18 || parts[1] === 19));
 }
 
+/**
+ * Still blocked: unspecified, link-local/metadata, CGNAT, documentation ranges,
+ * 6to4 relay, multicast. RFC1918 is NOT blocked — see isPrivateLanIpv4.
+ */
 function isBlockedIpv4(address) {
   const parts = ipv4Parts(address);
   if (!parts) return true;
   const [a, b, c] = parts;
+  if (isPrivateLanIpv4(address)) return false;
   return (
     a === 0 ||
-    a === 10 ||
     a === 127 ||
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 0 && (c === 0 || c === 2)) ||
     (a === 192 && b === 88 && c === 99) ||
-    (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && c === 100) ||
     (a === 203 && b === 0 && c === 113) ||
@@ -106,6 +118,7 @@ function addressPolicy(address) {
   const family = isIP(normalized);
   if (family === 4) {
     if (isLoopbackIpv4(normalized)) return "loopback";
+    if (isPrivateLanIpv4(normalized)) return "private";
     if (isBenchmarkIpv4(normalized)) return "benchmark";
     return isBlockedIpv4(normalized) ? "blocked" : "public";
   }
@@ -113,14 +126,17 @@ function addressPolicy(address) {
   const words = parseIpv6Words(normalized);
   if (!words) return "blocked";
   if (normalized === "::1") return "loopback";
+  // Unique local addresses (fc00::/7) — home/lab private IPv6.
+  const first = words[0] ?? 0;
+  const second = words[1] ?? 0;
+  if ((first & 0xfe00) === 0xfc00) return "private";
   const embedded = mappedIpv4(words);
   if (embedded) {
     if (isLoopbackIpv4(embedded)) return "loopback";
+    if (isPrivateLanIpv4(embedded)) return "private";
     if (isBenchmarkIpv4(embedded)) return "benchmark";
     return isBlockedIpv4(embedded) ? "blocked" : "public";
   }
-  const first = words[0] ?? 0;
-  const second = words[1] ?? 0;
   if (
     words.every((word) => word === 0) ||
     (first === 0x0064 && second === 0xff9b && (
@@ -133,12 +149,15 @@ function addressPolicy(address) {
     first === 0x2002 ||
     (first === 0x3fff && (second & 0xf000) === 0) ||
     first === 0x5f00 ||
-    (first & 0xfe00) === 0xfc00 ||
     (first & 0xffc0) === 0xfe80 ||
     (first & 0xffc0) === 0xfec0 ||
     (first & 0xff00) === 0xff00
   ) return "blocked";
   return "public";
+}
+
+function isTrustedLocalPolicy(policy) {
+  return policy === "loopback" || policy === "private";
 }
 
 async function defaultResolveHost(hostname) {
@@ -177,8 +196,16 @@ async function resolveTarget(url, resolveHost, { allowBenchmarkNetwork = false }
   if (!host) throw discoveryError("provider_base_url_invalid");
   if (isIP(host)) {
     const policy = addressPolicy(host);
-    if (policy !== "public" && policy !== "loopback") throw discoveryError("provider_discovery_target_blocked");
-    return { address: host, family: isIP(host), loopback: policy === "loopback" };
+    // User-configured baseURL may target loopback or RFC1918 LAN model servers.
+    if (policy !== "public" && !isTrustedLocalPolicy(policy)) {
+      throw discoveryError("provider_discovery_target_blocked");
+    }
+    return {
+      address: host,
+      family: isIP(host),
+      loopback: policy === "loopback",
+      privateLan: policy === "private",
+    };
   }
 
   let addresses;
@@ -193,16 +220,32 @@ async function resolveTarget(url, resolveHost, { allowBenchmarkNetwork = false }
   if (localhost) {
     if (policies.some((policy) => policy !== "loopback")) throw discoveryError("provider_discovery_target_blocked");
   } else {
-    if (policies.some((policy) => policy !== "public" && policy !== "benchmark")) {
+    if (policies.some((policy) => policy === "blocked")) {
       throw discoveryError("provider_discovery_target_blocked");
     }
-    if (policies.includes("benchmark")) {
+    const hasPublic = policies.some((policy) => policy === "public");
+    const hasPrivate = policies.some((policy) => policy === "private");
+    const hasBenchmark = policies.includes("benchmark");
+    // Refuse mixed public+private DNS (SSRF pivot risk).
+    if (hasPublic && hasPrivate) throw discoveryError("provider_discovery_target_blocked");
+    if (hasPrivate && hasBenchmark) throw discoveryError("provider_discovery_target_blocked");
+    if (hasBenchmark) {
       if (!allowBenchmarkNetwork) throw discoveryError("provider_discovery_benchmark_opt_in_required");
       if (!isHttpsFqdn(url)) throw discoveryError("provider_discovery_target_blocked");
     }
+    // Pure private LAN hostname (e.g. nas.home → 192.168.x) or pure public/benchmark.
+    if (!hasPublic && !hasPrivate && !hasBenchmark) {
+      throw discoveryError("provider_discovery_target_blocked");
+    }
   }
   const selected = addresses[0];
-  return { address: selected.address, family: selected.family, loopback: localhost };
+  const selectedPolicy = addressPolicy(selected.address);
+  return {
+    address: selected.address,
+    family: selected.family,
+    loopback: localhost || selectedPolicy === "loopback",
+    privateLan: selectedPolicy === "private" || (!localhost && policies.every((p) => p === "private")),
+  };
 }
 
 function defaultRequest(url, { headers, signal, pinnedAddress }) {
@@ -388,7 +431,9 @@ async function performDiscovery(options, signal) {
   const pinnedAddress = await resolveTarget(endpoint, options.resolveHost ?? defaultResolveHost, {
     allowBenchmarkNetwork: options.allowBenchmarkNetwork === true,
   });
-  if (endpoint.protocol !== "https:" && !pinnedAddress.loopback) {
+  // HTTP is allowed only for trusted local targets (loopback or RFC1918 LAN).
+  // Public internet discovery still requires HTTPS.
+  if (endpoint.protocol !== "https:" && !pinnedAddress.loopback && !pinnedAddress.privateLan) {
     throw discoveryError("provider_discovery_target_blocked");
   }
   if (signal.aborted) throw new Error("aborted");

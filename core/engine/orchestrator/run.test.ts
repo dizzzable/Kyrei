@@ -11,6 +11,9 @@ const bridgeStreamMock = vi.fn();
 const buildToolsMock = vi.fn();
 const resolveModelMock = vi.fn();
 const buildGBrainToolsMock = vi.fn();
+const buildPlanningToolsMock = vi.fn(() => ({}));
+const buildOpenVikingToolsMock = vi.fn(() => ({}));
+const buildMemorySearchToolsMock = vi.fn(() => ({}));
 const buildSkillToolsMock = vi.fn();
 const buildModelMock = vi.fn();
 const buildProviderOptionsMock = vi.fn();
@@ -68,6 +71,18 @@ vi.mock("../tools/index.js", () => ({
 
 vi.mock("../tools/gbrain.js", () => ({
   buildGBrainTools: buildGBrainToolsMock,
+}));
+
+vi.mock("../tools/planning.js", () => ({
+  buildPlanningTools: buildPlanningToolsMock,
+}));
+
+vi.mock("../tools/openviking.js", () => ({
+  buildOpenVikingTools: buildOpenVikingToolsMock,
+}));
+
+vi.mock("../tools/memory-search.js", () => ({
+  buildMemorySearchTools: buildMemorySearchToolsMock,
 }));
 
 vi.mock("../tools/web.js", () => ({
@@ -142,7 +157,16 @@ function engineConfig(delegation: Partial<{
     delegation: { enabled: true, maxTasks: 3, maxParallel: 2, maxSteps: 8, timeoutMs: 90_000, ...delegation },
     memory: {
       gbrain: { mode: "off", command: "gbrain", timeoutMs: 180_000, maxOutputBytes: 200_000 },
+      ltm: { enabled: false },
+      openviking: { enabled: false },
+      index: { enabled: false, backend: "off" as const, embed: { mode: "lexical" as const } },
+      sessionMirror: { enabled: false, readSearch: false, enginePrimary: false },
     },
+    planning: { enabled: false },
+    review: { cleanContext: false },
+    executionMode: "autopilot" as const,
+    reliability: { goalVerify: false },
+    mcp: { enabled: false, servers: [], timeoutMs: 30_000, maxServers: 8, maxToolsPerServer: 64, maxResultChars: 24_000 },
   };
 }
 
@@ -153,6 +177,9 @@ describe("runKyreiChat project context wiring", () => {
     buildSystemPromptMock.mockReturnValue("system prompt");
     buildToolsMock.mockReturnValue({ read_file: { name: "read_file" } });
     buildGBrainToolsMock.mockReturnValue({});
+    buildPlanningToolsMock.mockReturnValue({});
+    buildOpenVikingToolsMock.mockReturnValue({});
+    buildMemorySearchToolsMock.mockReturnValue({});
     buildWebToolsMock.mockReturnValue({});
     buildSkillToolsMock.mockReturnValue({});
     buildModelMock.mockReturnValue({ model: "mock" });
@@ -191,12 +218,71 @@ describe("runKyreiChat project context wiring", () => {
         workspace: "/workspace",
         hasTools: true,
         projectContext: "PROJECT_CTX",
+        hasDecisionTools: false,
+        hasPlanningTools: false,
+        hasOpenVikingTools: false,
+        hasMemorySearch: false,
       }),
     );
     expect(streamTextMock).toHaveBeenCalledTimes(1);
     const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(streamOptions.instructions).toBe("system prompt");
     expect(streamOptions).not.toHaveProperty("system");
+  });
+
+  it("wires LTM decisions, plan-as-files, and OpenViking when each flag is on", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        memory: {
+          gbrain: { mode: "off", command: "gbrain", timeoutMs: 180_000, maxOutputBytes: 200_000 },
+          ltm: { enabled: true },
+          openviking: { enabled: true, baseURL: "http://127.0.0.1:1933" },
+          index: { enabled: false, backend: "off" as const, embed: { mode: "lexical" as const } },
+          sessionMirror: { enabled: false },
+        },
+        planning: { enabled: true },
+      },
+      warnings: [],
+    });
+    buildPlanningToolsMock.mockReturnValueOnce({ plan_read: { name: "plan_read" } });
+    buildOpenVikingToolsMock.mockReturnValueOnce({ openviking_find: { name: "openviking_find" } });
+    buildMemorySearchToolsMock.mockReturnValueOnce({ memory_search: { name: "memory_search" } });
+
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "hi" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      sessionId: "sess-1",
+    });
+
+    expect(assembleSystemContextMock).toHaveBeenCalledWith({
+      workspace: "/workspace",
+      ltmDir: expect.stringMatching(/ltm$/),
+      includePlan: true,
+    });
+    expect(buildPlanningToolsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ workspace: "/workspace" }),
+    );
+    expect(buildOpenVikingToolsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ enabled: true, baseURL: "http://127.0.0.1:1933" }),
+      expect.objectContaining({ sessionId: "sess-1" }),
+    );
+    expect(buildMemorySearchToolsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ workspace: "/workspace", ltmEnabled: true }),
+    );
+    expect(buildSystemPromptMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hasDecisionTools: true,
+        hasPlanningTools: true,
+        hasOpenVikingTools: true,
+        hasMemorySearch: true,
+      }),
+    );
   });
 
   it("carries a validated receipt into guarded execution when policy changes from ask to allow", async () => {
@@ -320,8 +406,8 @@ describe("runKyreiChat project context wiring", () => {
       modelParams: { contextWindowOverride: 96_000, maxOutputOverride: 12_000 },
     });
 
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), "mock-model", 96_000, expect.anything());
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), "fallback-model", 128_000, expect.anything());
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ model: "mock-model", window: 96_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ model: "fallback-model", window: 128_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
     expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 12_000 });
     expect(streamTextMock.mock.calls[1]?.[0]).toMatchObject({ maxOutputTokens: 8_192 });
   });
@@ -360,8 +446,8 @@ describe("runKyreiChat project context wiring", () => {
       }],
     });
 
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), "primary-model", 90_000, expect.anything());
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), "fallback-model", 40_000, expect.anything());
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ model: "primary-model", window: 90_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ model: "fallback-model", window: 40_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
     expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 9_000 });
     expect(streamTextMock.mock.calls[1]?.[0]).toMatchObject({ maxOutputTokens: 4_000 });
   });
@@ -403,7 +489,7 @@ describe("runKyreiChat project context wiring", () => {
       },
     });
 
-    expect(makePrepareStepMock).toHaveBeenCalledWith(expect.anything(), "mock-model", 128_000, expect.anything());
+    expect(makePrepareStepMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ model: "mock-model", window: 128_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
     expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 8_192 });
   });
 

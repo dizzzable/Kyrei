@@ -4,8 +4,9 @@
 Single-file, stdlib-only recall and maintenance tool.
 Reads/writes JSONL ledgers under ltm/store/ and runtime artifacts under ltm/runtime/.
 """
-import argparse, datetime, fnmatch, hashlib, json, os, re, subprocess, sys, tempfile, unittest
+import argparse, datetime, fnmatch, hashlib, json, os, re, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+from contextlib import contextmanager
 
 VERSION = "1.0.1"
 ROOT = Path("ltm")
@@ -20,6 +21,7 @@ EVENTS = STORE / "events.jsonl"
 CHECKPOINTS = STORE / "checkpoints.jsonl"
 SESSIONS = STORE / "sessions.jsonl"
 THREADS = STORE / "open_threads.jsonl"
+DECISIONS = STORE / "decisions.jsonl"
 ACTIVE_CTX = RUNTIME / "active-context.json"
 LAST_RECALL = RUNTIME / "last-recall.md"
 CUR_SESSION = RUNTIME / "current-session.json"
@@ -51,6 +53,60 @@ SECRET_PATTERNS = [
 ]
 SECRET_KEYS = {'password', 'secret', 'token', 'api_key', 'private_key', 'access_key'}
 
+# ── file lock (cross-process advisory lock, compatible with lock.ts) ─────────
+
+@contextmanager
+def _file_lock(target_path, timeout_ms=5000, stale_ms=30000):
+    """
+    Advisory file lock compatible with core/engine/memory/lock.ts.
+    Uses {target}.lock sentinel with PID and mtime-based staleness detection.
+    """
+    lock_path = Path(str(target_path) + ".lock")
+    deadline = time.time() + timeout_ms / 1000.0
+    stale_sec = stale_ms / 1000.0
+    
+    def is_stale():
+        if not lock_path.exists():
+            return True
+        try:
+            mtime = lock_path.stat().st_mtime
+            if time.time() - mtime > stale_sec:
+                return True
+            info = json.loads(lock_path.read_text())
+            pid = info.get("pid")
+            if pid and pid != os.getpid():
+                try:
+                    os.kill(pid, 0)  # check if process exists
+                    return False
+                except OSError:
+                    return True  # process gone
+            return False
+        except Exception:
+            return True
+    
+    # Acquire lock
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            lock_data = json.dumps({"pid": os.getpid(), "at": int(time.time() * 1000)})
+            os.write(fd, lock_data.encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            if is_stale():
+                lock_path.unlink(missing_ok=True)
+                continue
+            if time.time() > deadline:
+                raise TimeoutError(f"lock timeout: {target_path}")
+            time.sleep(0.05 + 0.05 * os.urandom(1)[0] / 255.0)
+        except Exception:
+            raise
+    
+    try:
+        yield
+    finally:
+        lock_path.unlink(missing_ok=True)
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _now():
@@ -79,8 +135,9 @@ def _read_jsonl(path, skip_bad=True):
 
 def _append_jsonl(path, record):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
-        f.write(json.dumps(record, separators=(",", ":")) + "\n")
+    with _file_lock(path):
+        with open(path, "a") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 def _write_jsonl(path, records):
     """Atomic rewrite: write to temp file, then os.replace."""
@@ -719,6 +776,64 @@ def cmd_checkpoint(args):
                 _append_jsonl(THREADS, {"thread_id": tid, "ts_opened": _now(), "summary": "", "status": "open", "linked_files": [], "last_touched": _now()})
     _out({"checkpoint_id": record["id"]})
 
+def cmd_decision(args):
+    """
+    Record or invalidate an architectural decision (bi-temporal log).
+    - ADD: creates new decision with valid_from=now, valid_to=null (active)
+    - INVALIDATE: finds active decision by id, sets valid_to=now
+    Physical DELETE is never used — history is preserved for "what was true then".
+    """
+    action = args.action.upper()
+    config = _load_config()
+    
+    if action == "ADD":
+        if not args.decision:
+            _err("decision text required for ADD")
+            sys.exit(EXIT_USAGE)
+        decision_text, _ = _redact_text(args.decision)
+        rationale_text = ""
+        if args.rationale:
+            rationale_text, _ = _redact_text(args.rationale)
+        
+        try:
+            session = json.loads(CUR_SESSION.read_text())
+        except Exception:
+            session = {"session_id": "unknown"}
+        
+        record = {
+            "id": _next_id(DECISIONS, "dec_"),
+            "decision": decision_text,
+            "rationale": rationale_text,
+            "valid_from": _now(),
+            "valid_to": None,  # active (not invalidated)
+            "tags": args.tags.split(",") if args.tags else [],
+            "session_id": session.get("session_id", "unknown"),
+        }
+        _append_jsonl(DECISIONS, record)
+        _out({"action": "ADD", "decision_id": record["id"]})
+    
+    elif action == "INVALIDATE":
+        if not args.id:
+            _err("decision id required for INVALIDATE")
+            sys.exit(EXIT_USAGE)
+        decisions = _read_jsonl(DECISIONS)
+        found = None
+        for d in decisions:
+            if d.get("id") == args.id and d.get("valid_to") is None:
+                found = d
+                break
+        if not found:
+            _err(f"active decision not found: {args.id}")
+            sys.exit(EXIT_INVALID)
+        
+        found["valid_to"] = _now()
+        _write_jsonl(DECISIONS, decisions)
+        _out({"action": "INVALIDATE", "decision_id": args.id, "invalidated_at": found["valid_to"]})
+    
+    else:
+        _err(f"unknown action: {action} (expected ADD or INVALIDATE)")
+        sys.exit(EXIT_USAGE)
+
 # ── purge / teardown ─────────────────────────────────────────────────────────
 
 def cmd_purge_last(args):
@@ -996,6 +1111,13 @@ def main():
     ckp.add_argument("--summary", default=None)
     ckp.add_argument("--files", default=None)
     ckp.add_argument("--from-json", default=None)
+    # decision
+    dec = sub.add_parser("decision")
+    dec.add_argument("action", choices=["add", "invalidate", "ADD", "INVALIDATE"])
+    dec.add_argument("--decision", default=None, help="Decision text (required for ADD)")
+    dec.add_argument("--rationale", default=None, help="Rationale (optional for ADD)")
+    dec.add_argument("--tags", default=None, help="Comma-separated tags")
+    dec.add_argument("--id", default=None, help="Decision ID (required for INVALIDATE)")
     # purge-last
     plp = sub.add_parser("purge-last")
     plp.add_argument("--confirm", action="store_true")
@@ -1021,8 +1143,9 @@ def main():
         "search": cmd_search, "checkpoints": cmd_checkpoints, "threads": cmd_threads,
         "show": cmd_show, "decisions": cmd_decisions, "health": cmd_health,
         "validate": cmd_validate, "repair": cmd_repair, "regenerate": cmd_regenerate,
-        "compact": cmd_compact, "checkpoint": cmd_checkpoint, "purge-last": cmd_purge_last,
-        "purge-all": cmd_purge_all, "teardown": cmd_teardown, "selftest": cmd_selftest,
+        "compact": cmd_compact, "checkpoint": cmd_checkpoint, "decision": cmd_decision,
+        "purge-last": cmd_purge_last, "purge-all": cmd_purge_all, "teardown": cmd_teardown,
+        "selftest": cmd_selftest,
     }
     try:
         cmds[args.command](args)

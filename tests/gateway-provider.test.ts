@@ -14,8 +14,20 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await server.close();
-  await rm(dataDir, { recursive: true, force: true });
+  try {
+    await server.close();
+  } catch {
+    /* ignore */
+  }
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (attempt === 7) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
 });
 
 async function restartGateway(options: Record<string, unknown> = {}) {

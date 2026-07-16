@@ -3,9 +3,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
-import { isOverflow, estimateMessages, heuristicCount } from "./tokens.js";
+import { isOverflow, estimateMessages, heuristicCount, providerUsageFromSteps } from "./tokens.js";
 import { createCcrStore, ccrHash } from "./ccr.js";
-import { pruneToolOutputs, firedCheckpointMark } from "./compaction.js";
+import {
+  pruneToolOutputs,
+  firedCheckpointMark,
+  selectProtectWindows,
+  buildHeuristicSummary,
+  reassembleWithSummary,
+  summarizeMiddleTurns,
+  SUMMARY_END_MARKER,
+} from "./compaction.js";
 
 describe("tokens", () => {
   it("isOverflow dual-trigger soft/hard", () => {
@@ -14,6 +22,22 @@ describe("tokens", () => {
     expect(isOverflow(800, null, budget).soft).toBe(true);
     expect(isOverflow(800, null, budget).hard).toBe(false);
     expect(isOverflow(500, 950, budget).hard).toBe(true); // provider usage dominates
+  });
+  it("providerUsageFromSteps prefers last-step input (not sticky max)", () => {
+    expect(providerUsageFromSteps([])).toBe(null);
+    expect(providerUsageFromSteps([{ usage: { outputTokens: 10 } }])).toBe(null);
+    // After compaction, later step has lower input — use last, not historical max.
+    expect(providerUsageFromSteps([
+      { usage: { inputTokens: 900, outputTokens: 20, totalTokens: 920 } },
+      { usage: { inputTokens: 200, outputTokens: 5, totalTokens: 205 } },
+    ])).toBe(200);
+    expect(providerUsageFromSteps([
+      { usage: { inputTokens: 800 } },
+    ])).toBe(800);
+    // Fall back to total when input missing.
+    expect(providerUsageFromSteps([
+      { usage: { totalTokens: 500 } },
+    ])).toBe(500);
   });
   it("estimateMessages > 0 (heuristic path)", async () => {
     const msgs = [{ role: "user", content: "hello world this is a test" }] as ModelMessage[];
@@ -76,5 +100,68 @@ describe("CCR (Property 6: reversible compression)", () => {
     const hash = out.match(/sha256:[0-9a-f]{64}/)?.[0];
     expect(hash).toBeTruthy();
     expect(await store.get(hash!)).toBe(big); // original recoverable
+  });
+});
+
+describe("stage B middle summary", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "kyrei-sum-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("selectProtectWindows keeps head/tail and requires savings", () => {
+    const msgs = Array.from({ length: 16 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `turn ${i} `.repeat(5),
+    })) as ModelMessage[];
+    const win = selectProtectWindows(msgs, {
+      protectFirstN: 2,
+      protectLastN: 4,
+      summaryMinMessages: 12,
+    });
+    expect(win.canSummarize).toBe(true);
+    expect(win.head.length).toBeGreaterThan(0);
+    expect(win.tail.length).toBeGreaterThan(0);
+    expect(win.middle.length).toBeGreaterThan(0);
+    expect(win.head.length + win.middle.length + win.tail.length).toBe(msgs.length);
+  });
+
+  it("buildHeuristicSummary is reference-only with end marker", () => {
+    const middle = [
+      { role: "user", content: "Please implement dark mode" },
+      { role: "assistant", content: "Decided: use CSS variables.\nNext: wire Settings toggle." },
+    ] as ModelMessage[];
+    const text = buildHeuristicSummary(middle);
+    expect(text).toMatch(/reference only/i);
+    expect(text).toContain(SUMMARY_END_MARKER);
+    expect(text.toLowerCase()).toMatch(/task|done|open|dark mode|css/i);
+  });
+
+  it("reassembleWithSummary inserts one summary message", () => {
+    const head = [{ role: "user", content: "start" }] as ModelMessage[];
+    const tail = [{ role: "user", content: "latest" }] as ModelMessage[];
+    const out = reassembleWithSummary(head, "## Context summary (reference only)\nok\n--- END OF CONTEXT SUMMARY ---", tail);
+    expect(out).toHaveLength(3);
+    expect(String((out[1] as { content: string }).content)).toContain("reference only");
+  });
+
+  it("summarizeMiddleTurns stores middle in CCR", async () => {
+    const store = createCcrStore(dir);
+    const msgs = Array.from({ length: 14 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `message body ${i} with enough text for distill path`,
+    })) as ModelMessage[];
+    const result = await summarizeMiddleTurns(msgs, {
+      ccr: store,
+      protect: { protectFirstN: 1, protectLastN: 3, summaryMinMessages: 10 },
+    });
+    expect(result.summarized).toBe(true);
+    expect(result.via).toBe("heuristic");
+    expect(result.middleCcrHash).toMatch(/^sha256:/);
+    expect(await store.get(result.middleCcrHash!)).toBeTruthy();
+    expect(result.messages.length).toBeLessThan(msgs.length);
   });
 });

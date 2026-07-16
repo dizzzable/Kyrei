@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
+  Archive,
   Bell,
   Blocks,
   Box,
@@ -16,7 +17,14 @@ import {
 } from "lucide-react";
 import { gateway } from "@/lib/gateway";
 import { rebaseImportedPipelines } from "@/lib/pipeline-import";
-import type { AppConfig, GBrainRuntimeStatus } from "@/lib/types";
+import type {
+  AppConfig,
+  GBrainRuntimeStatus,
+  MemoryIndexRuntimeStatus,
+  SessionMirrorRuntimeStatus,
+  SessionMirrorParityResult,
+  MessagingRuntimeStatus,
+} from "@/lib/types";
 import { Button } from "@/components/ui";
 import { BoolField, EnumField, Field, NumberField, TextField } from "@/components/settings/ConfigField";
 import { ThemeGrid } from "@/components/settings/ThemeGrid";
@@ -24,6 +32,7 @@ import { KeybindPanel } from "@/components/settings/KeybindPanel";
 import { ModelSettings } from "@/components/settings/models/ModelSettings";
 import { ProvidersSettings } from "@/components/settings/providers/ProvidersSettings";
 import { SkillsSettings } from "@/components/settings/SkillsSettings";
+import { SessionsSettings } from "@/components/settings/SessionsSettings";
 import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
 import { KyreiMark } from "@/components/brand/KyreiMark";
 import {
@@ -62,6 +71,7 @@ const SECTION_ICONS: Record<VisibleSettingsSectionId, ReactNode> = {
   skills: <Blocks className="size-4" />,
   chat: <MessageSquare className="size-4" />,
   memory: <BrainCircuit className="size-4" />,
+  sessions: <Archive className="size-4" />,
   appearance: <Palette className="size-4" />,
   notifications: <Bell className="size-4" />,
   keybinds: <Keyboard className="size-4" />,
@@ -116,6 +126,20 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [gbrainStatus, setGbrainStatus] = useState<GBrainRuntimeStatus | null>(null);
   const [gbrainBusy, setGbrainBusy] = useState(false);
   const [gbrainCheckFailed, setGbrainCheckFailed] = useState(false);
+  const [memoryIndexStatus, setMemoryIndexStatus] = useState<MemoryIndexRuntimeStatus | null>(null);
+  const [memoryIndexBusy, setMemoryIndexBusy] = useState(false);
+  const [memoryIndexCheckFailed, setMemoryIndexCheckFailed] = useState(false);
+  const [memoryReindexNote, setMemoryReindexNote] = useState<string | null>(null);
+  const [sessionMirrorStatus, setSessionMirrorStatus] = useState<SessionMirrorRuntimeStatus | null>(null);
+  const [sessionMirrorParity, setSessionMirrorParity] = useState<SessionMirrorParityResult | null>(null);
+  const [sessionMirrorBusy, setSessionMirrorBusy] = useState(false);
+  const [sessionMirrorNote, setSessionMirrorNote] = useState<string | null>(null);
+  const [ltmConsolidateBusy, setLtmConsolidateBusy] = useState(false);
+  const [ltmConsolidateNote, setLtmConsolidateNote] = useState<string | null>(null);
+  const [messagingStatus, setMessagingStatus] = useState<MessagingRuntimeStatus | null>(null);
+  const [messagingBusy, setMessagingBusy] = useState(false);
+  const [messagingTokenOnce, setMessagingTokenOnce] = useState<string | null>(null);
+  const [messagingNote, setMessagingNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -313,9 +337,146 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
   }, [flushEngineSave]);
 
+  const checkMemoryIndex = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setMemoryIndexBusy(true);
+    setMemoryIndexCheckFailed(false);
+    try {
+      setMemoryIndexStatus(await gateway.getMemoryIndexStatus());
+    } catch {
+      setMemoryIndexCheckFailed(true);
+    } finally {
+      setMemoryIndexBusy(false);
+    }
+  }, [flushEngineSave]);
+
+  const reindexMemoryIndex = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setMemoryIndexBusy(true);
+    setMemoryIndexCheckFailed(false);
+    setMemoryReindexNote(null);
+    try {
+      const result = await gateway.reindexMemoryIndex();
+      setMemoryIndexStatus(result.status);
+      setMemoryReindexNote(
+        result.ok
+          ? t("settings.projectMemory.reindexOk", {
+              upserted: result.upserted,
+              sources: result.sources.join(", ") || "—",
+            })
+          : t("settings.projectMemory.reindexFailed"),
+      );
+    } catch {
+      setMemoryIndexCheckFailed(true);
+      setMemoryReindexNote(t("settings.projectMemory.reindexFailed"));
+    } finally {
+      setMemoryIndexBusy(false);
+    }
+  }, [flushEngineSave, t]);
+
+  const checkSessionMirror = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setSessionMirrorBusy(true);
+    try {
+      const [status, parity] = await Promise.all([
+        gateway.getSessionMirrorStatus(),
+        gateway.getSessionMirrorParity().catch(() => null),
+      ]);
+      setSessionMirrorStatus(status);
+      setSessionMirrorParity(parity);
+    } catch {
+      setSessionMirrorStatus({
+        enabled: Boolean(getEngineField("memory.sessionMirror.enabled", true)),
+        readSearch: Boolean(getEngineField("memory.sessionMirror.readSearch", true)),
+        enginePrimary: Boolean(getEngineField("memory.sessionMirror.enginePrimary", true)),
+        state: "error",
+        sessionCount: 0,
+        message: "check_failed",
+      });
+      setSessionMirrorParity(null);
+    } finally {
+      setSessionMirrorBusy(false);
+    }
+  }, [flushEngineSave, getEngineField]);
+
+  const syncSessionMirror = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setSessionMirrorBusy(true);
+    setSessionMirrorNote(null);
+    try {
+      const result = await gateway.syncSessionMirror();
+      setSessionMirrorNote(
+        t("settings.projectMemory.sessionMirror.syncOk", {
+          sessions: result.sessions,
+          messages: result.messages,
+        }),
+      );
+      setSessionMirrorStatus(await gateway.getSessionMirrorStatus());
+    } catch {
+      setSessionMirrorNote(t("settings.projectMemory.sessionMirror.syncFailed"));
+    } finally {
+      setSessionMirrorBusy(false);
+    }
+  }, [flushEngineSave, t]);
+
+  const consolidateLtm = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setLtmConsolidateBusy(true);
+    setLtmConsolidateNote(null);
+    try {
+      const result = await gateway.consolidateLtm();
+      setLtmConsolidateNote(
+        result.ok
+          ? t("settings.projectMemory.ltm.consolidateOk", { via: result.via ?? "typescript" })
+          : t("settings.projectMemory.ltm.consolidateFailed", {
+              error: result.error ?? "unknown",
+            }),
+      );
+    } catch {
+      setLtmConsolidateNote(t("settings.projectMemory.ltm.consolidateFailed", { error: "request_failed" }));
+    } finally {
+      setLtmConsolidateBusy(false);
+    }
+  }, [flushEngineSave, t]);
+
+  const checkMessaging = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setMessagingBusy(true);
+    try {
+      setMessagingStatus(await gateway.getMessagingStatus());
+    } catch {
+      setMessagingStatus(null);
+    } finally {
+      setMessagingBusy(false);
+    }
+  }, [flushEngineSave]);
+
+  const rotateMessagingToken = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setMessagingBusy(true);
+    setMessagingNote(null);
+    try {
+      const result = await gateway.rotateMessagingToken();
+      setMessagingStatus(result.status);
+      setMessagingTokenOnce(result.token);
+      setMessagingNote(t("settings.messaging.tokenOk"));
+    } catch {
+      setMessagingNote(t("settings.messaging.tokenFailed"));
+    } finally {
+      setMessagingBusy(false);
+    }
+  }, [flushEngineSave, t]);
+
   useEffect(() => {
-    if (visibleSection === "memory") void checkGBrain();
-  }, [checkGBrain, visibleSection]);
+    if (visibleSection === "memory") {
+      void checkGBrain();
+      void checkMemoryIndex();
+      void checkSessionMirror();
+    }
+    if (visibleSection === "notifications") {
+      void checkMessaging();
+    }
+  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMessaging, visibleSection]);
 
   const initializeGBrain = useCallback(async () => {
     // Persist a just-edited command before invoking it; otherwise a delayed
@@ -603,6 +764,34 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                         onChange={(value) => setEngineField("permissions.terminal", value)}
                       />
                       <EnumField
+                        label={t("settings.executionMode.label")}
+                        hint={t("settings.executionMode.hint")}
+                        value={String(getEngineField("executionMode", "autopilot")) as "autopilot" | "supervised"}
+                        options={[
+                          { value: "autopilot", label: t("settings.executionMode.autopilot") },
+                          { value: "supervised", label: t("settings.executionMode.supervised") },
+                        ]}
+                        onChange={(value) => setEngineField("executionMode", value)}
+                      />
+                      <Field label={t("settings.protectedPaths.label")} hint={t("settings.protectedPaths.hint")} stacked>
+                        <textarea
+                          className="min-h-[72px] w-full rounded-md border border-border-soft bg-elevated/40 px-2.5 py-2 font-mono text-[12px] text-foreground"
+                          value={(Array.isArray(getEngineField("permissions.protectedPaths", []))
+                            ? (getEngineField("permissions.protectedPaths", []) as string[])
+                            : []
+                          ).join("\n")}
+                          onChange={(event) => {
+                            const lines = event.target.value
+                              .split("\n")
+                              .map((line) => line.trim())
+                              .filter(Boolean)
+                              .slice(0, 64);
+                            setEngineField("permissions.protectedPaths", lines);
+                          }}
+                          spellCheck={false}
+                        />
+                      </Field>
+                      <EnumField
                         label={t("settings.permissions.review.label")}
                         hint={t("settings.permissions.review.hint")}
                         disabled={permissionRules.issues.length > 0}
@@ -670,7 +859,22 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                 </div>
               )}
 
-              {visibleSection === "skills" && <SkillsSettings workspace={workspace} />}
+              {visibleSection === "skills" && (
+                <SkillsSettings
+                  workspace={workspace}
+                  getEngineField={getEngineField}
+                  setEngineField={setEngineField}
+                />
+              )}
+
+              {visibleSection === "sessions" && (
+                <SessionsSettings
+                  onRestored={async () => {
+                    // Sidebar list is owned by App; fire a soft refresh if listeners exist.
+                    window.dispatchEvent(new CustomEvent("kyrei:sessions-refresh"));
+                  }}
+                />
+              )}
 
               {visibleSection === "chat" && (
                 <div className="space-y-6">
@@ -678,18 +882,126 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                     <GroupTitle>{t("settings.groups.chat")}</GroupTitle>
                     <div className="divide-y divide-border-soft">
                       <Field label={t("settings.personality.label")} hint={t("settings.personality.hint")} stacked>
-                        <textarea
-                          value={String(getEngineField("personality", ""))}
-                          onChange={(event) => setEngineField("personality", event.target.value)}
-                          spellCheck={false}
-                          rows={3}
-                          placeholder={t("settings.personality.placeholder")}
-                          className="w-full resize-y rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-foreground outline-none focus:border-primary"
-                        />
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap gap-1.5">
+                            {([
+                              "none",
+                              "helpful",
+                              "concise",
+                              "technical",
+                              "teacher",
+                              "reviewer",
+                              "implementer",
+                              "custom",
+                            ] as const).map((id) => {
+                              const active = String(getEngineField("personalityPresetId", "none") || "none") === id
+                                || (id === "custom"
+                                  && !["none", "helpful", "concise", "technical", "teacher", "reviewer", "implementer"]
+                                    .includes(String(getEngineField("personalityPresetId", "none"))));
+                              return (
+                                <button
+                                  key={id}
+                                  type="button"
+                                  className={cn(
+                                    "rounded-md border px-2 py-1 text-[11px] transition-colors",
+                                    active
+                                      ? "border-primary/50 bg-primary/10 text-primary"
+                                      : "border-border-soft bg-elevated/40 text-secondary hover:bg-(--ui-row-hover)",
+                                  )}
+                                  onClick={() => {
+                                    if (id === "none") {
+                                      setEngineField("personalityPresetId", "none");
+                                      setEngineField("personality", "");
+                                      return;
+                                    }
+                                    if (id === "custom") {
+                                      setEngineField("personalityPresetId", "custom");
+                                      return;
+                                    }
+                                    const bodies: Record<string, string> = {
+                                      helpful: "You are a helpful, friendly AI assistant. Be clear, accurate, and collaborative.",
+                                      concise: "You are a concise assistant. Keep responses brief and to the point; prefer bullets and short patches.",
+                                      technical: "You are a technical expert. Provide detailed, accurate technical information with precise identifiers and trade-offs.",
+                                      teacher: "You are a patient teacher. Explain concepts clearly with examples, then give the concrete next step.",
+                                      reviewer: "You are a careful code reviewer. Prioritize correctness, security, and maintainability; call out risks explicitly.",
+                                      implementer: "You are a pragmatic implementer. Prefer small, verifiable changes, run checks when possible, and avoid drive-by refactors.",
+                                    };
+                                    setEngineField("personalityPresetId", id);
+                                    setEngineField("personality", bodies[id] ?? "");
+                                  }}
+                                >
+                                  {t(`settings.personality.preset.${id}` as const)}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {(String(getEngineField("personalityPresetId", "none")) === "custom"
+                            || String(getEngineField("personalityPresetId", "none")) === "none"
+                            || Boolean(String(getEngineField("personality", "")).trim())) && (
+                            <textarea
+                              value={String(getEngineField("personality", ""))}
+                              onChange={(event) => {
+                                setEngineField("personality", event.target.value);
+                                const id = String(getEngineField("personalityPresetId", "none"));
+                                if (id !== "custom" && id !== "none") {
+                                  setEngineField("personalityPresetId", "custom");
+                                } else if (!event.target.value.trim() && id === "custom") {
+                                  setEngineField("personalityPresetId", "none");
+                                } else if (event.target.value.trim() && id === "none") {
+                                  setEngineField("personalityPresetId", "custom");
+                                }
+                              }}
+                              spellCheck={false}
+                              rows={3}
+                              placeholder={t("settings.personality.placeholder")}
+                              className="w-full resize-y rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-foreground outline-none focus:border-primary"
+                            />
+                          )}
+                        </div>
                       </Field>
                       <BoolField label={t("settings.sendOnEnter.label")} hint={t("settings.sendOnEnter.hint")} value={ui.sendOnEnter} onChange={(value) => setUiSetting("sendOnEnter", value)} />
                       <BoolField label={t("settings.richRendering.label")} hint={t("settings.richRendering.hint")} value={ui.richRendering} onChange={(value) => setUiSetting("richRendering", value)} />
                       <BoolField label={t("settings.showReasoning.label")} hint={t("settings.showReasoning.hint")} value={ui.showReasoning} onChange={(value) => setUiSetting("showReasoning", value)} />
+                      <TextField
+                        label={t("settings.timezone.label")}
+                        hint={t("settings.timezone.hint")}
+                        value={String(getEngineField("timezone", ""))}
+                        placeholder={t("settings.timezone.placeholder")}
+                        onChange={(value) => setEngineField("timezone", value)}
+                      />
+                      <EnumField
+                        label={t("settings.defaultReasoning.label")}
+                        hint={t("settings.defaultReasoning.hint")}
+                        value={((): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "off" => {
+                          const raw = String(getEngineField("defaultReasoningEffort", "") || "");
+                          if (raw === "minimal" || raw === "low" || raw === "medium" || raw === "high" || raw === "xhigh" || raw === "off") return raw;
+                          return "none";
+                        })()}
+                        options={[
+                          { value: "none", label: t("settings.options.reasoningNone") },
+                          { value: "minimal", label: t("settings.options.reasoningMinimal") },
+                          { value: "low", label: t("settings.options.reasoningLow") },
+                          { value: "medium", label: t("settings.options.reasoningMedium") },
+                          { value: "high", label: t("settings.options.reasoningHigh") },
+                          { value: "xhigh", label: t("settings.options.reasoningXhigh") },
+                          { value: "off", label: t("settings.options.reasoningOff") },
+                        ]}
+                        onChange={(value) => setEngineField("defaultReasoningEffort", value === "none" ? "" : value)}
+                      />
+                      <EnumField
+                        label={t("settings.imageInputMode.label")}
+                        hint={t("settings.imageInputMode.hint")}
+                        value={((): "auto" | "native" | "text" => {
+                          const raw = String(getEngineField("imageInputMode", "auto") || "auto");
+                          return raw === "native" || raw === "text" ? raw : "auto";
+                        })()}
+                        options={[
+                          { value: "auto", label: t("settings.options.imageAuto") },
+                          { value: "native", label: t("settings.options.imageNative") },
+                          { value: "text", label: t("settings.options.imageText") },
+                        ]}
+                        onChange={(value) => setEngineField("imageInputMode", value)}
+                      />
                       <EnumField
                         label={t("settings.toolView.label")}
                         hint={t("settings.toolView.hint")}
@@ -705,7 +1017,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                   <section>
                     <GroupTitle>{t("settings.groups.toolsContext")}</GroupTitle>
                     <div className="divide-y divide-border-soft">
-                      <NumberField label={t("settings.maxSteps.label")} hint={t("settings.maxSteps.hint")} value={Number(getEngineField("maxSteps", 12))} min={1} max={60} step={1} onChange={(value) => setEngineField("maxSteps", value)} />
+                      <NumberField label={t("settings.maxSteps.label")} hint={t("settings.maxSteps.hint")} value={Number(getEngineField("maxSteps", 12))} min={1} max={200} step={1} onChange={(value) => setEngineField("maxSteps", value)} />
                       <BoolField
                         label={t("settings.delegation.enabled.label")}
                         hint={t("settings.delegation.enabled.hint")}
@@ -722,6 +1034,83 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       )}
                       <NumberField label={t("settings.contextSoft.label")} hint={t("settings.contextSoft.hint")} value={Number(getEngineField("contextBudget.softPct", 0.75))} min={0.3} max={0.95} step={0.05} format={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setEngineField("contextBudget.softPct", value)} />
                       <NumberField label={t("settings.contextHard.label")} hint={t("settings.contextHard.hint")} value={Number(getEngineField("contextBudget.hardPct", 0.9))} min={0.5} max={0.99} step={0.05} format={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setEngineField("contextBudget.hardPct", value)} />
+                      <BoolField
+                        label={t("settings.compression.enabled.label")}
+                        hint={t("settings.compression.enabled.hint")}
+                        value={Boolean(getEngineField("compression.enabled", true))}
+                        onChange={(value) => setEngineField("compression.enabled", value)}
+                      />
+                      {Boolean(getEngineField("compression.enabled", true)) && (
+                        <>
+                          <NumberField
+                            label={t("settings.compression.protectLastN.label")}
+                            hint={t("settings.compression.protectLastN.hint")}
+                            value={Number(getEngineField("compression.protectLastN", 6))}
+                            min={1}
+                            max={100}
+                            step={1}
+                            onChange={(value) => setEngineField("compression.protectLastN", value)}
+                          />
+                          <NumberField
+                            label={t("settings.compression.pruneToChars.label")}
+                            hint={t("settings.compression.pruneToChars.hint")}
+                            value={Number(getEngineField("compression.pruneToChars", 500))}
+                            min={100}
+                            max={20_000}
+                            step={100}
+                            onChange={(value) => setEngineField("compression.pruneToChars", value)}
+                          />
+                        </>
+                      )}
+                      <BoolField
+                        label={t("settings.compression.summaryEnabled.label")}
+                        hint={t("settings.compression.summaryEnabled.hint")}
+                        value={Boolean(getEngineField("compression.summaryEnabled", true))}
+                        onChange={(value) => setEngineField("compression.summaryEnabled", value)}
+                      />
+                      {Boolean(getEngineField("compression.summaryEnabled", true)) && (
+                        <>
+                          <BoolField
+                            label={t("settings.compression.summaryUseLlm.label")}
+                            hint={t("settings.compression.summaryUseLlm.hint")}
+                            value={Boolean(getEngineField("compression.summaryUseLlm", false))}
+                            onChange={(value) => setEngineField("compression.summaryUseLlm", value)}
+                          />
+                          <NumberField
+                            label={t("settings.compression.protectFirstN.label")}
+                            hint={t("settings.compression.protectFirstN.hint")}
+                            value={Number(getEngineField("compression.protectFirstN", 2))}
+                            min={0}
+                            max={50}
+                            step={1}
+                            onChange={(value) => setEngineField("compression.protectFirstN", value)}
+                          />
+                        </>
+                      )}
+                      <BoolField
+                        label={t("settings.toolLoop.hardStop.label")}
+                        hint={t("settings.toolLoop.hardStop.hint")}
+                        value={Boolean(getEngineField("reliability.toolLoop.hardStopEnabled", true))}
+                        onChange={(value) => setEngineField("reliability.toolLoop.hardStopEnabled", value)}
+                      />
+                      <NumberField
+                        label={t("settings.toolLoop.repeated.label")}
+                        hint={t("settings.toolLoop.repeated.hint")}
+                        value={Number(getEngineField("reliability.toolLoop.repeatedCallThreshold", 3))}
+                        min={2}
+                        max={20}
+                        step={1}
+                        onChange={(value) => setEngineField("reliability.toolLoop.repeatedCallThreshold", value)}
+                      />
+                      <NumberField
+                        label={t("settings.toolLoop.healAfter.label")}
+                        hint={t("settings.toolLoop.healAfter.hint")}
+                        value={Number(getEngineField("reliability.toolLoop.healAfterFailures", 3))}
+                        min={1}
+                        max={20}
+                        step={1}
+                        onChange={(value) => setEngineField("reliability.toolLoop.healAfterFailures", value)}
+                      />
                     </div>
                   </section>
                 </div>
@@ -767,6 +1156,74 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                     </div>
                   </section>
                   <section>
+                    <GroupTitle>{t("settings.groups.messaging")}</GroupTitle>
+                    <div className="divide-y divide-border-soft">
+                      <BoolField
+                        label={t("settings.messaging.enabled.label")}
+                        hint={t("settings.messaging.enabled.hint")}
+                        value={Boolean(getEngineField("messaging.enabled", false))}
+                        onChange={(value) => setEngineField("messaging.enabled", value)}
+                      />
+                      {Boolean(getEngineField("messaging.enabled", false)) && (
+                        <>
+                          <BoolField
+                            label={t("settings.messaging.autoRun.label")}
+                            hint={t("settings.messaging.autoRun.hint")}
+                            value={Boolean(getEngineField("messaging.autoRun", false))}
+                            onChange={(value) => setEngineField("messaging.autoRun", value)}
+                          />
+                          <Field label={t("settings.messaging.token.label")} hint={t("settings.messaging.token.hint")} stacked>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={messagingBusy}
+                                onClick={() => void rotateMessagingToken()}
+                              >
+                                {messagingBusy
+                                  ? t("settings.messaging.tokenBusy")
+                                  : t("settings.messaging.tokenRotate")}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={messagingBusy}
+                                onClick={() => void checkMessaging()}
+                              >
+                                {t("settings.messaging.refresh")}
+                              </Button>
+                              <span className="text-[12px] text-muted">
+                                {messagingStatus?.hasToken
+                                  ? t("settings.messaging.tokenPresent")
+                                  : t("settings.messaging.tokenMissing")}
+                              </span>
+                            </div>
+                            {messagingTokenOnce && (
+                              <p className="mt-2 break-all rounded-md border border-border-soft bg-elevated/50 px-2 py-1.5 font-mono text-[11px] text-foreground">
+                                {messagingTokenOnce}
+                              </p>
+                            )}
+                            {messagingNote && (
+                              <p className="mt-1 text-[12px] text-muted">{messagingNote}</p>
+                            )}
+                            {messagingStatus?.note && (
+                              <p className="mt-1 text-[11px] text-muted">{messagingStatus.note}</p>
+                            )}
+                            {messagingStatus && messagingStatus.recent.length > 0 && (
+                              <ul className="mt-2 space-y-1 text-[11px] text-muted">
+                                {messagingStatus.recent.slice(0, 5).map((entry) => (
+                                  <li key={entry.id}>
+                                    {entry.at.slice(11, 19)} · {entry.channel} · {entry.sessionId.slice(0, 12)}… · {entry.preview}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </Field>
+                        </>
+                      )}
+                    </div>
+                  </section>
+                  <section>
                     <GroupTitle>{t("settings.groups.voice")}</GroupTitle>
                     <div className="divide-y divide-border-soft">
                       {!sttSupported && !ttsSupported && <p className="py-2 text-[12px] text-warning">{t("settings.voice.unavailable")}</p>}
@@ -786,6 +1243,382 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
 
               {visibleSection === "memory" && (
                 <div className="space-y-6">
+                  <section>
+                    <GroupTitle>{t("settings.groups.mcp")}</GroupTitle>
+                    <div className="divide-y divide-border-soft">
+                      <BoolField
+                        label={t("settings.mcp.enabled.label")}
+                        hint={t("settings.mcp.enabled.hint")}
+                        value={Boolean(getEngineField("mcp.enabled", false))}
+                        onChange={(value) => setEngineField("mcp.enabled", value)}
+                      />
+                      {Boolean(getEngineField("mcp.enabled", false)) && (
+                        <>
+                          <Field label={t("settings.mcp.servers.label")} hint={t("settings.mcp.servers.hint")} stacked>
+                            <textarea
+                              value={(() => {
+                                try {
+                                  return JSON.stringify(getEngineField("mcp.servers", []) ?? [], null, 2);
+                                } catch {
+                                  return "[]";
+                                }
+                              })()}
+                              onChange={(event) => {
+                                try {
+                                  const parsed = JSON.parse(event.target.value || "[]");
+                                  if (!Array.isArray(parsed)) throw new Error("array");
+                                  setEngineField("mcp.servers", parsed);
+                                } catch {
+                                  // keep typing; do not save invalid mid-edit — user can fix via Apply JSON
+                                }
+                              }}
+                              onBlur={(event) => {
+                                try {
+                                  const parsed = JSON.parse(event.target.value || "[]");
+                                  if (!Array.isArray(parsed)) throw new Error("array");
+                                  setEngineField("mcp.servers", parsed, true);
+                                } catch {
+                                  /* invalid left as-is until corrected */
+                                }
+                              }}
+                              spellCheck={false}
+                              rows={6}
+                              aria-label={t("settings.mcp.servers.label")}
+                              className="w-full resize-y rounded-md border border-border bg-bg px-3 py-2 font-mono text-[12px] text-foreground outline-none focus:border-primary"
+                            />
+                          </Field>
+                          <NumberField
+                            label={t("settings.mcp.timeout.label")}
+                            hint={t("settings.mcp.timeout.hint")}
+                            value={Number(getEngineField("mcp.timeoutMs", 30_000))}
+                            min={1_000}
+                            max={300_000}
+                            step={1_000}
+                            format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })}
+                            onChange={(value) => setEngineField("mcp.timeoutMs", value)}
+                          />
+                        </>
+                      )}
+                    </div>
+                  </section>
+                  <section>
+                    <GroupTitle>{t("settings.groups.projectMemory")}</GroupTitle>
+                    <div className="divide-y divide-border-soft">
+                      <Field label={t("settings.projectMemory.intro.label")} hint={t("settings.projectMemory.intro.hint")} stacked>
+                        <div className="rounded-lg border border-border-soft bg-elevated/45 px-3 py-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2.5">
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-medium text-foreground" role="status">
+                                {memoryIndexCheckFailed
+                                  ? t("settings.projectMemory.status.error")
+                                  : !memoryIndexStatus
+                                    ? t("settings.projectMemory.status.checking")
+                                    : memoryIndexStatus.state === "ready"
+                                      ? t("settings.projectMemory.status.ready")
+                                      : memoryIndexStatus.state === "disabled"
+                                        ? t("settings.projectMemory.status.disabled")
+                                        : memoryIndexStatus.state === "no_workspace"
+                                          ? t("settings.projectMemory.status.noWorkspace")
+                                          : t("settings.projectMemory.status.error")}
+                              </p>
+                              {memoryIndexStatus?.state === "ready" && (
+                                <p className="mt-0.5 text-[12px] leading-snug text-muted">
+                                  {t("settings.projectMemory.status.docs", {
+                                    count: memoryIndexStatus.docCount,
+                                    backend: memoryIndexStatus.backend,
+                                    vectors: memoryIndexStatus.vectorSearch,
+                                  })}
+                                </p>
+                              )}
+                              {memoryIndexStatus && (
+                                <p className="mt-0.5 text-[12px] leading-snug text-muted">
+                                  {t("settings.projectMemory.status.tierA", {
+                                    memory: memoryIndexStatus.tierA.memoryMd ? t("settings.projectMemory.yes") : t("settings.projectMemory.no"),
+                                    notes: memoryIndexStatus.tierA.notesMd ? t("settings.projectMemory.yes") : t("settings.projectMemory.no"),
+                                    plan: memoryIndexStatus.tierA.plan ? t("settings.projectMemory.yes") : t("settings.projectMemory.no"),
+                                    handoffs: memoryIndexStatus.tierA.handoffs,
+                                    decisions: memoryIndexStatus.tierA.ltmDecisions ? t("settings.projectMemory.yes") : t("settings.projectMemory.no"),
+                                    graph: memoryIndexStatus.tierA.projectIndex ? t("settings.projectMemory.yes") : t("settings.projectMemory.no"),
+                                  })}
+                                </p>
+                              )}
+                              {memoryReindexNote && <p className="mt-1 text-[12px] text-muted">{memoryReindexNote}</p>}
+                            </div>
+                            <div className="flex shrink-0 flex-wrap items-center gap-2">
+                              <Button variant="outline" size="sm" onClick={() => void checkMemoryIndex()} disabled={memoryIndexBusy}>
+                                {memoryIndexBusy ? t("settings.projectMemory.status.checking") : t("settings.projectMemory.check")}
+                              </Button>
+                              <Button size="sm" onClick={() => void reindexMemoryIndex()} disabled={memoryIndexBusy}>
+                                {memoryIndexBusy ? t("settings.projectMemory.reindexing") : t("settings.projectMemory.reindex")}
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      </Field>
+                      <BoolField
+                        label={t("settings.projectMemory.ltm.label")}
+                        hint={t("settings.projectMemory.ltm.hint")}
+                        value={Boolean(getEngineField("memory.ltm.enabled", true))}
+                        onChange={(value) => setEngineField("memory.ltm.enabled", value)}
+                      />
+                      {Boolean(getEngineField("memory.ltm.enabled", true)) && (
+                        <Field label={t("settings.projectMemory.ltm.consolidate.label")} hint={t("settings.projectMemory.ltm.consolidate.hint")} stacked>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void consolidateLtm()}
+                              disabled={ltmConsolidateBusy}
+                            >
+                              {ltmConsolidateBusy
+                                ? t("settings.projectMemory.ltm.consolidating")
+                                : t("settings.projectMemory.ltm.consolidate")}
+                            </Button>
+                            {ltmConsolidateNote && (
+                              <p className="text-[12px] text-muted">{ltmConsolidateNote}</p>
+                            )}
+                          </div>
+                        </Field>
+                      )}
+                      <GroupTitle>{t("settings.groups.memoryCurator")}</GroupTitle>
+                      <div className="divide-y divide-border-soft">
+                        <BoolField
+                          label={t("settings.memoryCurator.enabled.label")}
+                          hint={t("settings.memoryCurator.enabled.hint")}
+                          value={Boolean(getEngineField("memory.curator.enabled", true))}
+                          onChange={(value) => setEngineField("memory.curator.enabled", value)}
+                        />
+                        {Boolean(getEngineField("memory.curator.enabled", true)) && (
+                          <>
+                            <BoolField
+                              label={t("settings.memoryCurator.autoOnArchive.label")}
+                              hint={t("settings.memoryCurator.autoOnArchive.hint")}
+                              value={Boolean(getEngineField("memory.curator.autoOnArchive", true))}
+                              onChange={(value) => setEngineField("memory.curator.autoOnArchive", value)}
+                            />
+                            <EnumField
+                              label={t("settings.memoryCurator.applyMode.label")}
+                              hint={t("settings.memoryCurator.applyMode.hint")}
+                              value={((): "propose" | "apply_safe" | "apply_all" => {
+                                const raw = String(getEngineField("memory.curator.applyMode", "apply_safe"));
+                                return raw === "propose" || raw === "apply_all" ? raw : "apply_safe";
+                              })()}
+                              options={[
+                                { value: "propose", label: t("settings.options.curatorPropose") },
+                                { value: "apply_safe", label: t("settings.options.curatorSafe") },
+                                { value: "apply_all", label: t("settings.options.curatorAll") },
+                              ]}
+                              onChange={(value) => setEngineField("memory.curator.applyMode", value)}
+                            />
+                            <BoolField
+                              label={t("settings.memoryCurator.useLlm.label")}
+                              hint={t("settings.memoryCurator.useLlm.hint")}
+                              value={Boolean(getEngineField("memory.curator.useLlm", true))}
+                              onChange={(value) => setEngineField("memory.curator.useLlm", value)}
+                            />
+                            {Boolean(getEngineField("memory.curator.useLlm", true)) && (
+                              <EnumField
+                                label={t("settings.memoryCurator.modelSource.label")}
+                                hint={t("settings.memoryCurator.modelSource.hint")}
+                                value={((): "worker" | "session" | "default" => {
+                                  const raw = String(getEngineField("memory.curator.modelSource", "worker"));
+                                  return raw === "session" || raw === "default" ? raw : "worker";
+                                })()}
+                                options={[
+                                  { value: "worker", label: t("settings.options.curatorModelWorker") },
+                                  { value: "session", label: t("settings.options.curatorModelSession") },
+                                  { value: "default", label: t("settings.options.curatorModelDefault") },
+                                ]}
+                                onChange={(value) => setEngineField("memory.curator.modelSource", value)}
+                              />
+                            )}
+                          </>
+                        )}
+                      </div>
+                      <BoolField
+                        label={t("settings.projectMemory.planning.label")}
+                        hint={t("settings.projectMemory.planning.hint")}
+                        value={Boolean(getEngineField("planning.enabled", true))}
+                        onChange={(value) => setEngineField("planning.enabled", value)}
+                      />
+                      <BoolField
+                        label={t("settings.reliability.goalVerify.label")}
+                        hint={t("settings.reliability.goalVerify.hint")}
+                        value={Boolean(getEngineField("reliability.goalVerify", true))}
+                        onChange={(value) => setEngineField("reliability.goalVerify", value)}
+                      />
+                      <BoolField
+                        label={t("settings.reliability.healHandoff.label")}
+                        hint={t("settings.reliability.healHandoff.hint")}
+                        value={Boolean(getEngineField("reliability.healHandoff", true))}
+                        onChange={(value) => setEngineField("reliability.healHandoff", value)}
+                      />
+                      <BoolField
+                        label={t("settings.projectMemory.indexEnabled.label")}
+                        hint={t("settings.projectMemory.indexEnabled.hint")}
+                        value={Boolean(getEngineField("memory.index.enabled", true))}
+                        onChange={(value) => setEngineField("memory.index.enabled", value)}
+                      />
+                      {Boolean(getEngineField("memory.index.enabled", true)) && (
+                        <>
+                          <EnumField
+                            label={t("settings.projectMemory.indexBackend.label")}
+                            hint={t("settings.projectMemory.indexBackend.hint")}
+                            value={String(getEngineField("memory.index.backend", "sqlite")) as "sqlite" | "postgres" | "off"}
+                            options={[
+                              { value: "sqlite", label: t("settings.projectMemory.indexBackend.sqlite") },
+                              { value: "postgres", label: t("settings.projectMemory.indexBackend.postgres") },
+                              { value: "off", label: t("settings.projectMemory.indexBackend.off") },
+                            ]}
+                            onChange={(value) => setEngineField("memory.index.backend", value)}
+                          />
+                          {String(getEngineField("memory.index.backend", "sqlite")) === "postgres" && (
+                            <TextField
+                              label={t("settings.projectMemory.connectionString.label")}
+                              hint={t("settings.projectMemory.connectionString.hint")}
+                              value={String(getEngineField("memory.index.connectionString", ""))}
+                              placeholder="postgres://user@localhost:5432/kyrei"
+                              onChange={(value) => setEngineField("memory.index.connectionString", value)}
+                            />
+                          )}
+                        </>
+                      )}
+                      <BoolField
+                        label={t("settings.projectMemory.sessionMirror.label")}
+                        hint={t("settings.projectMemory.sessionMirror.hint")}
+                        value={Boolean(getEngineField("memory.sessionMirror.enabled", true))}
+                        onChange={(value) => setEngineField("memory.sessionMirror.enabled", value)}
+                      />
+                      {Boolean(getEngineField("memory.sessionMirror.enabled", true)) && (
+                        <>
+                          <BoolField
+                            label={t("settings.projectMemory.sessionMirrorRead.label")}
+                            hint={t("settings.projectMemory.sessionMirrorRead.hint")}
+                            value={Boolean(getEngineField("memory.sessionMirror.readSearch", true))}
+                            onChange={(value) => setEngineField("memory.sessionMirror.readSearch", value)}
+                          />
+                          <BoolField
+                            label={t("settings.projectMemory.sessionMirrorPrimary.label")}
+                            hint={t("settings.projectMemory.sessionMirrorPrimary.hint")}
+                            value={Boolean(getEngineField("memory.sessionMirror.enginePrimary", true))}
+                            onChange={(value) => setEngineField("memory.sessionMirror.enginePrimary", value)}
+                          />
+                          <Field label={t("settings.projectMemory.sessionMirror.status.label")} stacked>
+                            <div className="rounded-lg border border-border-soft bg-elevated/45 px-3 py-2.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                                <div className="min-w-0">
+                                  <p className="text-[13px] font-medium text-foreground" role="status">
+                                    {sessionMirrorBusy && !sessionMirrorStatus
+                                      ? t("settings.projectMemory.sessionMirror.status.checking")
+                                      : !sessionMirrorStatus
+                                        ? t("settings.projectMemory.sessionMirror.status.checking")
+                                        : sessionMirrorStatus.state === "ready"
+                                          ? t("settings.projectMemory.sessionMirror.status.ready", {
+                                              count: sessionMirrorStatus.sessionCount,
+                                            })
+                                          : sessionMirrorStatus.state === "disabled"
+                                            ? t("settings.projectMemory.sessionMirror.status.disabled")
+                                            : t("settings.projectMemory.sessionMirror.status.error")}
+                                  </p>
+                                  {sessionMirrorNote && (
+                                    <p className="mt-1 text-[12px] text-muted">{sessionMirrorNote}</p>
+                                  )}
+                                  {sessionMirrorParity && (
+                                    <p className="mt-1 text-[12px] text-muted">
+                                      {t("settings.projectMemory.sessionMirror.parity", {
+                                        jsonSessions: sessionMirrorParity.json.sessions,
+                                        mirrorSessions: sessionMirrorParity.mirror.sessions,
+                                        missing: sessionMirrorParity.missingInMirror.length,
+                                      })}
+                                      {" · "}
+                                      {sessionMirrorParity.schemaReady
+                                        ? t("settings.projectMemory.sessionMirror.schemaReady")
+                                        : null}
+                                      {sessionMirrorParity.schemaReady ? " · " : null}
+                                      {sessionMirrorParity.cutoverReady
+                                        ? t("settings.projectMemory.sessionMirror.cutoverReady")
+                                        : t("settings.projectMemory.sessionMirror.cutoverBlocked")}
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => void checkSessionMirror()}
+                                    disabled={sessionMirrorBusy}
+                                  >
+                                    {sessionMirrorBusy
+                                      ? t("settings.projectMemory.sessionMirror.status.checking")
+                                      : t("settings.projectMemory.check")}
+                                  </Button>
+                                  <Button size="sm" onClick={() => void syncSessionMirror()} disabled={sessionMirrorBusy}>
+                                    {sessionMirrorBusy
+                                      ? t("settings.projectMemory.sessionMirror.syncing")
+                                      : t("settings.projectMemory.sessionMirror.sync")}
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          </Field>
+                        </>
+                      )}
+                      {Boolean(getEngineField("memory.index.enabled", true)) && (
+                        <>
+                          <EnumField
+                            label={t("settings.projectMemory.embedMode.label")}
+                            hint={t("settings.projectMemory.embedMode.hint")}
+                            value={String(getEngineField("memory.index.embed.mode", "lexical")) as "lexical" | "http"}
+                            options={[
+                              { value: "lexical", label: t("settings.projectMemory.embedMode.lexical") },
+                              { value: "http", label: t("settings.projectMemory.embedMode.http") },
+                            ]}
+                            onChange={(value) => setEngineField("memory.index.embed.mode", value)}
+                          />
+                          {String(getEngineField("memory.index.embed.mode", "lexical")) === "http" && (
+                            <>
+                              <TextField
+                                label={t("settings.projectMemory.embedBase.label")}
+                                hint={t("settings.projectMemory.embedBase.hint")}
+                                value={String(getEngineField("memory.index.embed.baseURL", "http://127.0.0.1:11434/v1"))}
+                                placeholder="http://127.0.0.1:11434/v1"
+                                onChange={(value) => setEngineField("memory.index.embed.baseURL", value)}
+                              />
+                              <TextField
+                                label={t("settings.projectMemory.embedModel.label")}
+                                hint={t("settings.projectMemory.embedModel.hint")}
+                                value={String(getEngineField("memory.index.embed.model", "nomic-embed-text"))}
+                                placeholder="nomic-embed-text"
+                                onChange={(value) => setEngineField("memory.index.embed.model", value)}
+                              />
+                              <TextField
+                                label={t("settings.projectMemory.embedKey.label")}
+                                hint={t("settings.projectMemory.embedKey.hint")}
+                                value={String(getEngineField("memory.index.embed.apiKey", ""))}
+                                placeholder=""
+                                onChange={(value) => setEngineField("memory.index.embed.apiKey", value)}
+                              />
+                            </>
+                          )}
+                        </>
+                      )}
+                      <BoolField
+                        label={t("settings.projectMemory.openviking.label")}
+                        hint={t("settings.projectMemory.openviking.hint")}
+                        value={Boolean(getEngineField("memory.openviking.enabled", false))}
+                        onChange={(value) => setEngineField("memory.openviking.enabled", value)}
+                      />
+                      {Boolean(getEngineField("memory.openviking.enabled", false)) && (
+                        <TextField
+                          label={t("settings.projectMemory.openvikingBase.label")}
+                          hint={t("settings.projectMemory.openvikingBase.hint")}
+                          value={String(getEngineField("memory.openviking.baseURL", "http://127.0.0.1:1933"))}
+                          placeholder="http://127.0.0.1:1933"
+                          onChange={(value) => setEngineField("memory.openviking.baseURL", value)}
+                        />
+                      )}
+                    </div>
+                  </section>
                   <section>
                     <GroupTitle>{t("settings.groups.gbrain")}</GroupTitle>
                     <div className="divide-y divide-border-soft">

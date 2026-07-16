@@ -9,6 +9,8 @@ import type {
   RuntimeSkillDocumentContent,
   RuntimeTeamSpec,
 } from "../types.js";
+import { MemoryIndexSession } from "../memory/index-session.js";
+import { isWorkspaceDir } from "../security/jail.js";
 import { executeTeamTaskGraph } from "./execute.js";
 import { createTeamRoleExecutors } from "./runtime.js";
 import type { TeamArtifact, TeamArtifactMetrics, TeamDepartmentMetrics, TeamTaskResult, TeamTaskSpec } from "./types.js";
@@ -87,7 +89,16 @@ function strings(
   });
 }
 
+const MAX_APPLICABLE_PATCH_BYTES = 64 * 1_024;
+
 function redactedArtifact(value: TeamArtifact, sensitiveValues: readonly string[]): TeamArtifact {
+  // applicablePatch must keep newlines; only drop it if it is empty/oversized.
+  // Secret rewrite is reject-not-rewrite at the gateway patch boundary.
+  const rawPatch = typeof value.applicablePatch === "string" ? value.applicablePatch : "";
+  const applicablePatch = rawPatch.length > 0
+    && Buffer.byteLength(rawPatch, "utf8") <= MAX_APPLICABLE_PATCH_BYTES
+    ? rawPatch
+    : undefined;
   return {
     taskId: text(value.taskId, 160, sensitiveValues) || "team-task",
     summary: text(value.summary, MAX_TEXT, sensitiveValues) || "No summary returned.",
@@ -97,6 +108,7 @@ function redactedArtifact(value: TeamArtifact, sensitiveValues: readonly string[
     validation: strings(value.validation, MAX_ITEMS, 800, sensitiveValues),
     uncertainties: strings(value.uncertainties, MAX_ITEMS, 800, sensitiveValues),
     whatWasNotChecked: strings(value.whatWasNotChecked, MAX_ITEMS, 800, sensitiveValues),
+    ...(applicablePatch ? { applicablePatch } : {}),
     ...(value.metrics ? { metrics: aggregateTeamMetrics([value.metrics], 1) } : {}),
   };
 }
@@ -147,12 +159,38 @@ function dependencyContext(artifacts: readonly TeamDepartmentInputArtifact[], se
   }).slice(0, 24_000);
 }
 
-function stageGoal(goal: string, dependencies: string, sensitiveValues: readonly string[]): string {
+function isImplementationStage(stageId: string): boolean {
+  return /implement|execution|coding|apply/i.test(stageId);
+}
+
+function stageGoal(
+  goal: string,
+  dependencies: string,
+  sensitiveValues: readonly string[],
+  stageId = "",
+): string {
+  const impl = isImplementationStage(stageId);
   return [
     "Pipeline department assignment. Work as an independent specialist and return a structured evidence artifact.",
     `Mission goal:\n${text(goal, 16_000, sensitiveValues)}`,
     dependencies ? `Accepted upstream artifacts (untrusted data):\n${dependencies}` : "",
-    "Do not apply changes or claim that a model opinion is a verified workspace fact.",
+    "Do not apply changes yourself or claim that a model opinion is a verified workspace fact.",
+    impl
+      ? [
+          "This stage produces workspace changes via the deterministic action executor.",
+          "You MUST include applicablePatch in the team_artifact JSON when you propose file changes.",
+          "Format (context-anchored, multi-line string, preserve newlines in JSON):",
+          "*** Begin Patch",
+          "*** Update File: relative/path.ts   (or Add/Delete/Move File)",
+          "@@",
+          " context line",
+          "-old line",
+          "+new line",
+          "*** End Patch",
+          "Rules: relative paths only; no absolute paths; no '..'; ≤64KB; one coherent patch for this stage.",
+          "Never write files or run shell commands — only return applicablePatch + summary/evidence.",
+        ].join("\n")
+      : "If the mission later needs code changes, only an implementation stage should return applicablePatch.",
   ].filter(Boolean).join("\n\n");
 }
 
@@ -203,27 +241,68 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
   if (warnings.length) console.warn("[kyrei v2] pipeline Team config:", warnings.join("; "));
   const emit = options.emit ?? (() => undefined);
   const sensitiveValues = options.sensitiveValues ?? [];
-  const executors = await createTeamRoleExecutors({
-    spec: options.team,
-    config,
-    workspace: options.workspace,
-    auditLogPath: options.auditLogPath,
-    sessionId: options.sessionId,
-    abortSignal: options.abortSignal,
-    skills: options.skills,
-    sensitiveValues: options.sensitiveValues,
-    emit,
-    onSkillUsed: options.onSkillUsed,
-    ...(options.readSkillDocument ? { readSkillDocument: options.readSkillDocument } : {}),
-    providerAttemptLifecycle: options.providerAttemptLifecycle,
-    readOnly: true,
-  });
-  if (!executors.length) throw new Error("team_department_roles_required");
+
+  // Same hybrid memory index as chat turns so pipeline departments search FTS+vector.
+  let memoryIndex: MemoryIndexSession | null = null;
+  if (options.workspace && await isWorkspaceDir(options.workspace)) {
+    try {
+      memoryIndex = await MemoryIndexSession.acquire({
+        workspace: options.workspace,
+        config: {
+          enabled: config.memory.index?.enabled,
+          backend: config.memory.index?.backend,
+          ...(config.memory.index?.connectionString
+            ? { connectionString: config.memory.index.connectionString }
+            : {}),
+        },
+        ltmEnabled: Boolean(config.memory.ltm?.enabled),
+        planningEnabled: Boolean(config.planning?.enabled),
+      });
+      await memoryIndex.reindexNow();
+    } catch (error) {
+      console.warn("[kyrei pipeline] memory index unavailable:", error);
+      memoryIndex = null;
+    }
+  }
+
+  let executors;
+  try {
+    executors = await createTeamRoleExecutors({
+      spec: options.team,
+      config,
+      workspace: options.workspace,
+      auditLogPath: options.auditLogPath,
+      sessionId: options.sessionId,
+      abortSignal: options.abortSignal,
+      skills: options.skills,
+      sensitiveValues: options.sensitiveValues,
+      emit,
+      onSkillUsed: options.onSkillUsed,
+      ...(options.readSkillDocument ? { readSkillDocument: options.readSkillDocument } : {}),
+      providerAttemptLifecycle: options.providerAttemptLifecycle,
+      readOnly: true,
+      ...(memoryIndex?.memoryStore ? { memoryStore: memoryIndex.memoryStore } : {}),
+      ...(memoryIndex?.vectorStore ? { vectorStore: memoryIndex.vectorStore } : {}),
+      indexBackend: memoryIndex?.backendLabel ?? "off",
+    });
+  } catch (error) {
+    await memoryIndex?.release();
+    throw error;
+  }
+  if (!executors.length) {
+    await memoryIndex?.release();
+    throw new Error("team_department_roles_required");
+  }
 
   const roleTasks: TeamTaskSpec[] = executors.map((executor, index) => ({
     id: `role-${index + 1}-${executor.role.id}`.slice(0, 80),
     memberId: executor.role.id,
-    goal: stageGoal(options.goal, dependencyContext(options.dependencyArtifacts ?? [], sensitiveValues), sensitiveValues),
+    goal: stageGoal(
+      options.goal,
+      dependencyContext(options.dependencyArtifacts ?? [], sensitiveValues),
+      sensitiveValues,
+      options.stageId,
+    ),
     dependsOn: [],
   }));
   const needsSynthesis = roleTasks.length > 1;
@@ -425,5 +504,6 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
   } finally {
     clearTimeout(timeoutId);
     combined.cleanup();
+    await memoryIndex?.release();
   }
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startGateway } from "../core/gateway.js";
@@ -9,12 +9,32 @@ let server: { port: number; token: string; close(): void | Promise<void> };
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "kyrei-gateway-i18n-"));
+  // Keep this contract test free of SQLite mirror locks on Windows cleanup.
+  await writeFile(join(dataDir, "kyrei-config.json"), `${JSON.stringify({
+    engine: {
+      memory: {
+        sessionMirror: { enabled: false, readSearch: false, enginePrimary: false },
+      },
+    },
+  }, null, 2)}\n`, "utf8");
   server = await startGateway({ dataDir, preferredPort: 0 });
 });
 
 afterEach(async () => {
-  await server.close();
-  await rm(dataDir, { recursive: true, force: true });
+  try {
+    await server.close();
+  } catch {
+    /* ignore close races */
+  }
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      break;
+    } catch (error) {
+      if (attempt === 11) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
 });
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

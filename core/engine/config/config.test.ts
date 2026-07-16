@@ -174,6 +174,7 @@ describe("resolveEngineConfig (task 2.6)", () => {
         { pattern: "run_command:rm", action: "deny" },
         { pattern: "write_file:secrets", action: "deny" },
       ],
+      protectedPaths: DEFAULT_ENGINE_CONFIG.permissions.protectedPaths,
     });
     expect(warnings.some((warning) => warning.includes("permissions.review"))).toBe(true);
     expect(warnings.some((warning) => warning.includes("rules.1.action"))).toBe(true);
@@ -236,6 +237,37 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(warnings.some((w) => w.includes("agent.max_turns"))).toBe(true);
     expect(warnings.some((w) => w.includes("agent.api_max_retries"))).toBe(true);
     expect(warnings.some((w) => w.includes("file_read_max_chars"))).toBe(true);
+  });
+
+  it("migrates Hermes tool_output, terminal timeout, compression, tool_loop, reasoning", () => {
+    const { config, warnings } = resolveEngineConfig({
+      agent: { reasoning_effort: "xhigh", image_input_mode: "native" },
+      tool_output: { max_bytes: 50_000 },
+      terminal: { timeout: 180 },
+      compression: { enabled: true, threshold: 0.25, protect_last_n: 20 },
+      tool_loop_guardrails: {
+        hard_stop_enabled: false,
+        hard_stop_after: { exact_failure: 5, idempotent_no_progress: 4 },
+      },
+      timezone: "Europe/Moscow",
+    });
+    expect(config.defaultReasoningEffort).toBe("xhigh");
+    expect(config.imageInputMode).toBe("native");
+    expect(config.maxToolOutput).toBe(50_000);
+    expect(config.commandTimeoutMs).toBe(180_000);
+    expect(config.compression.protectLastN).toBe(20);
+    expect(config.compression.enabled).toBe(true);
+    expect(config.contextBudget.softPct).toBeCloseTo(0.75, 5);
+    expect(config.reliability.toolLoop.hardStopEnabled).toBe(false);
+    expect(config.reliability.toolLoop.repeatedCallThreshold).toBe(4);
+    expect(config.reliability.toolLoop.healAfterFailures).toBe(5);
+    expect(config.timezone).toBe("Europe/Moscow");
+    expect(warnings.some((w) => w.includes("tool_output"))).toBe(true);
+    expect(warnings.some((w) => w.includes("terminal.timeout"))).toBe(true);
+    expect(warnings.some((w) => w.includes("compression"))).toBe(true);
+    expect(warnings.some((w) => w.includes("tool_loop_guardrails"))).toBe(true);
+    expect(warnings.some((w) => w.includes("reasoning_effort"))).toBe(true);
+    expect(warnings.some((w) => w.includes("image_input_mode"))).toBe(true);
   });
 
   it("preserves current field precedence over Hermes aliases", () => {

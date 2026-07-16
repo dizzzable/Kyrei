@@ -45,6 +45,12 @@ describe("read-only child runner", () => {
         "web_fetch",
         "brain_search",
         "brain_capture",
+        "query_decisions",
+        "record_decision",
+        "plan_read",
+        "plan_write_roadmap",
+        "openviking_find",
+        "openviking_add_message",
         "search_skills",
         "read_skill",
         "read_skill_document",
@@ -56,7 +62,10 @@ describe("read-only child runner", () => {
     expect(Object.keys(selected).sort()).toEqual([
       "brain_search",
       "list_dir",
+      "openviking_find",
+      "plan_read",
       "project_map",
+      "query_decisions",
       "read_file",
       "read_skill",
       "read_skill_document",
@@ -68,6 +77,9 @@ describe("read-only child runner", () => {
     expect(selected).not.toHaveProperty("write_file");
     expect(selected).not.toHaveProperty("project_index");
     expect(selected).not.toHaveProperty("brain_capture");
+    expect(selected).not.toHaveProperty("record_decision");
+    expect(selected).not.toHaveProperty("plan_write_roadmap");
+    expect(selected).not.toHaveProperty("openviking_add_message");
     expect(selected).not.toHaveProperty("delegate_read");
   });
 

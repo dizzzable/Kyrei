@@ -11,11 +11,24 @@ const CAPABILITY_TO_TOOLS: Readonly<Record<AgentCapability, readonly string[]>> 
     "retrieve",
     "project_map",
     "project_impact",
+    "plan_read",
   ],
   "workspace.write": [],
   terminal: [],
   web: ["web_search", "web_fetch"],
-  "memory.read": ["brain_search", "brain_get", "brain_think", "brain_status"],
+  // Local durable memory (decisions/plan/search) + optional external brains.
+  // Mutations stay denied under memory.write (empty) and Team Light.
+  "memory.read": [
+    "memory_search",
+    "query_decisions",
+    "plan_read",
+    "openviking_health",
+    "openviking_find",
+    "brain_search",
+    "brain_get",
+    "brain_think",
+    "brain_status",
+  ],
   "memory.write": [],
   // A skill is self-contained when it has only SKILL.md. Linked documents are
   // optional, but when a selected skill exposes them the same read capability

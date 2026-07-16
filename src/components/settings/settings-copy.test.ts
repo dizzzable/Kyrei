@@ -98,6 +98,30 @@ describe("settings localized rendering", () => {
     expect(russian).toContain("Проверить статус");
   });
 
+  it("exposes built-in project memory controls (LTM, index, OpenViking)", async () => {
+    const english = await renderSettings("en", "memory");
+    const russian = await renderSettings("ru", "memory");
+
+    expect(english).toContain("Project memory");
+    expect(english).toContain("Built-in durable memory");
+    expect(english).toContain("Long-term memory (LTM)");
+    expect(english).toContain("Hybrid search index");
+    expect(english).toContain("Rebuild index");
+    expect(english).toContain("Chat session mirror");
+    expect(english).toContain("Vector embeddings");
+    expect(english).toContain("MCP servers");
+    expect(english).toContain("Enable MCP client");
+    expect(russian).toContain("Память проекта");
+    expect(russian).toContain("Встроенная долговременная память");
+    expect(russian).toContain("Долговременная память (LTM)");
+    expect(russian).toContain("Гибридный поисковый индекс");
+    expect(russian).toContain("Пересобрать индекс");
+    expect(russian).toContain("Зеркало чат-сессий");
+    expect(russian).toContain("Векторные эмбеддинги");
+    expect(russian).toContain("MCP-серверы");
+    expect(russian).toContain("Включить MCP-клиент");
+  });
+
   it("explains that standalone Skills work and can be selected for one task", async () => {
     const english = await renderSettings("en", "skills");
     const russian = await renderSettings("ru", "skills");

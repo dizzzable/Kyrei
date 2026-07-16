@@ -2,6 +2,7 @@
  * Data-layer factory. Default backend: SQLite (better-sqlite3 + FTS5, sqlite-vec
  * when loadable). If the native module fails to load (e.g. missing prebuilt),
  * degrades gracefully to a file-based session store + in-memory memory/vector.
+ * Postgres backend available via async factory (Requirements §10.4).
  * Requirements §10.3.
  */
 
@@ -14,12 +15,12 @@ import { createSqliteMemoryStore } from "./sqlite/memory-store.js";
 import { createSqliteVectorStore } from "./sqlite/vector-store.js";
 
 export interface Stores {
-  backend: "sqlite" | "file";
-  vectorSearch: "sqlite-vec" | "bruteforce";
+  backend: "sqlite" | "postgres" | "file";
+  vectorSearch: "sqlite-vec" | "pgvector" | "bruteforce";
   sessions: SessionStore;
   memory: MemoryStore;
   vectors: VectorStore;
-  close(): void;
+  close(): void | Promise<void>;
 }
 
 export function createStores(baseDir: string): Stores {
@@ -32,7 +33,7 @@ export function createStores(baseDir: string): Stores {
       sessions: createSqliteSessionStore(db),
       memory: createSqliteMemoryStore(db),
       vectors: createSqliteVectorStore(db),
-      close: () => db.close(),
+      close: () => { db.close(); },
     };
   } catch (err) {
     console.warn("[kyrei data] SQLite unavailable, using file backend:", (err as Error).message);
@@ -107,4 +108,52 @@ export function createFileStores(baseDir: string): Stores {
     },
   };
   return { backend: "file", vectorSearch: "bruteforce", sessions, memory, vectors, close: () => {} };
+}
+
+/** Postgres backend (async, requires DATABASE_URL or explicit connection string). */
+export async function createPostgresStores(connectionString: string): Promise<Stores> {
+  const { openPool } = await import("./postgres/pool.js");
+  const { createPostgresSessionStore } = await import("./postgres/session-store.js");
+  const { createPostgresMemoryStore } = await import("./postgres/memory-store.js");
+  const { createPostgresVectorStore } = await import("./postgres/vector-store.js");
+
+  const { pool, vecOk } = await openPool(connectionString);
+  return {
+    backend: "postgres",
+    vectorSearch: vecOk ? "pgvector" : "bruteforce",
+    sessions: createPostgresSessionStore(pool),
+    memory: createPostgresMemoryStore(pool),
+    vectors: createPostgresVectorStore(pool, vecOk),
+    close: async () => pool.end(),
+  };
+}
+
+/**
+ * Async factory with backend selection. Chooses SQLite (default), Postgres (if
+ * connectionString provided), or degrades to file backend on SQLite failure.
+ */
+export async function createStoresAsync(opts: {
+  baseDir: string;
+  backend?: "sqlite" | "postgres";
+  connectionString?: string;
+}): Promise<Stores> {
+  if (opts.backend === "postgres") {
+    if (!opts.connectionString) throw new Error("Postgres backend requires connectionString");
+    return createPostgresStores(opts.connectionString);
+  }
+  // Default: try SQLite, fallback to file
+  try {
+    const { db, vecOk } = openDb(join(opts.baseDir, "index.db"));
+    return {
+      backend: "sqlite",
+      vectorSearch: vecOk ? "sqlite-vec" : "bruteforce",
+      sessions: createSqliteSessionStore(db),
+      memory: createSqliteMemoryStore(db),
+      vectors: createSqliteVectorStore(db),
+      close: () => { db.close(); },
+    };
+  } catch (err) {
+    console.warn("[kyrei data] SQLite unavailable, using file backend:", (err as Error).message);
+    return createFileStores(opts.baseDir);
+  }
 }

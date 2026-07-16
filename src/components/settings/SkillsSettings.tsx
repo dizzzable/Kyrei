@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, FileText, FolderOpen, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ExternalLink, FileText, FolderOpen, Plus, RefreshCw, Search, Sparkles, Trash2 } from "lucide-react";
 
 import {
   Button,
@@ -18,7 +18,36 @@ import { gateway } from "@/lib/gateway";
 import type { SkillInfo, SkillProvenance, SkillRoot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-export function SkillsSettings({ workspace }: { workspace: string }) {
+type SkillsCuratorPreview = {
+  fileName: string;
+  status?: string;
+  at?: string;
+  via?: string;
+  proposalCount?: number;
+  preview?: Array<{
+    id?: string;
+    skillId?: string;
+    skillName?: string;
+    action?: string;
+    kind?: string;
+    reason?: string;
+    detail?: string;
+    owned?: boolean;
+    patchSummary?: string;
+    suggestedDescription?: string;
+    hasContentPatch?: boolean;
+  }>;
+};
+
+export function SkillsSettings({
+  workspace,
+  getEngineField,
+  setEngineField,
+}: {
+  workspace: string;
+  getEngineField?: (path: string, fallback: unknown) => unknown;
+  setEngineField?: (path: string, value: unknown, persistImmediately?: boolean) => void;
+}) {
   const { t } = useI18n();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [roots, setRoots] = useState<SkillRoot[]>([]);
@@ -30,6 +59,20 @@ export function SkillsSettings({ workspace }: { workspace: string }) {
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [curatorBusy, setCuratorBusy] = useState(false);
+  const [curatorMsg, setCuratorMsg] = useState<string | null>(null);
+  const [curatorProposals, setCuratorProposals] = useState<SkillsCuratorPreview[]>([]);
+
+  const curatorEnabled = Boolean(getEngineField?.("skills.curator.enabled", false));
+  const curatorApplyMode = String(getEngineField?.("skills.curator.applyMode", "propose") || "propose") === "apply_safe"
+    ? "apply_safe"
+    : "propose";
+  const staleDays = Number(getEngineField?.("skills.curator.staleDays", 90) ?? 90);
+  const curatorUseLlm = Boolean(getEngineField?.("skills.curator.useLlm", false));
+  const curatorModelSourceRaw = String(getEngineField?.("skills.curator.modelSource", "worker") || "worker");
+  const curatorModelSource = curatorModelSourceRaw === "session" || curatorModelSourceRaw === "default"
+    ? curatorModelSourceRaw
+    : "worker";
 
   const refresh = useCallback(async (preferredId?: string) => {
     setLoading(true);
@@ -51,7 +94,20 @@ export function SkillsSettings({ workspace }: { workspace: string }) {
     }
   }, [selectedId, t]);
 
+  const refreshCuratorProposals = useCallback(async () => {
+    try {
+      const next = await gateway.listSkillsCuratorProposals();
+      setCuratorProposals(next.proposals ?? []);
+    } catch {
+      setCuratorProposals([]);
+    }
+  }, []);
+
   useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (curatorEnabled) void refreshCuratorProposals();
+  }, [curatorEnabled, refreshCuratorProposals]);
 
   useEffect(() => {
     setConfirmDelete(false);
@@ -65,6 +121,77 @@ export function SkillsSettings({ workspace }: { workspace: string }) {
       .catch(() => { if (alive) setDetail(null); });
     return () => { alive = false; };
   }, [selectedId]);
+
+  const runCuratorScan = async () => {
+    setCuratorBusy(true);
+    setCuratorMsg(null);
+    setError(null);
+    try {
+      const result = await gateway.scanSkillsCurator({ applyMode: curatorApplyMode });
+      if (!result.ok) {
+        setError(result.error === "curator_disabled"
+          ? t("settings.skills.curator.disabledError")
+          : (result.error || t("settings.skills.operationFailed")));
+      } else {
+        setCuratorMsg(result.summary || t("settings.skills.curator.scanOk", {
+          count: Array.isArray(result.proposals) ? result.proposals.length : 0,
+        }));
+        await refresh();
+        await refreshCuratorProposals();
+      }
+    } catch {
+      setError(t("settings.skills.operationFailed"));
+    } finally {
+      setCuratorBusy(false);
+    }
+  };
+
+  const applyCuratorFile = async (fileName: string) => {
+    setCuratorBusy(true);
+    setError(null);
+    try {
+      const result = await gateway.applySkillsCuratorProposal(fileName);
+      setCuratorMsg(result.summary || t("settings.skills.curator.applyOk", {
+        count: result.applied?.length ?? 0,
+      }));
+      await refresh();
+      await refreshCuratorProposals();
+    } catch {
+      setError(t("settings.skills.operationFailed"));
+    } finally {
+      setCuratorBusy(false);
+    }
+  };
+
+  const applyOne = async (
+    skillId: string,
+    action: "enable" | "disable" | "apply_patch" | "suggest_patch",
+    opts?: { fileName?: string; proposalId?: string },
+  ) => {
+    if (action === "apply_patch") {
+      if (!window.confirm(t("settings.skills.curator.applyPatchConfirm"))) return;
+    }
+    setBusyId(skillId);
+    setError(null);
+    try {
+      const result = await gateway.applySkillsCuratorOne(skillId, action, opts);
+      if (!result.ok) {
+        setError(result.error || t("settings.skills.operationFailed"));
+      } else {
+        setCuratorMsg(
+          result.patched
+            ? t("settings.skills.curator.patchApplied")
+            : t("settings.skills.curator.applyOk", { count: 1 }),
+        );
+      }
+      await refresh();
+      await refreshCuratorProposals();
+    } catch {
+      setError(t("settings.skills.operationFailed"));
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -161,6 +288,206 @@ export function SkillsSettings({ workspace }: { workspace: string }) {
           ))}
         </ol>
       </section>
+
+      {getEngineField && setEngineField && (
+        <section aria-labelledby="skills-curator-title" className="rounded-lg border border-border-soft bg-elevated/35 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-2.5">
+              <span className="grid size-7 shrink-0 place-items-center rounded-md border border-border-soft bg-bg/60 text-primary">
+                <Sparkles className="size-3.5" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <h4 id="skills-curator-title" className="text-[11px] font-semibold text-secondary">
+                  {t("settings.skills.curator.title")}
+                </h4>
+                <p className="mt-0.5 text-[10px] leading-4 text-muted">{t("settings.skills.curator.hint")}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted">{t("settings.skills.curator.enabled")}</span>
+              <Switch
+                checked={curatorEnabled}
+                size="xs"
+                aria-label={t("settings.skills.curator.enabled")}
+                onCheckedChange={(value) => setEngineField("skills.curator.enabled", value, true)}
+              />
+            </div>
+          </div>
+
+          {curatorEnabled && (
+            <div className="mt-3 space-y-3 border-t border-border-soft pt-3">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="grid gap-1 text-[10px] text-secondary">
+                  <span>{t("settings.skills.curator.applyMode")}</span>
+                  <select
+                    className="h-8 rounded-md border border-border-soft bg-bg px-2 text-[11px] text-secondary"
+                    value={curatorApplyMode}
+                    onChange={(event) => setEngineField(
+                      "skills.curator.applyMode",
+                      event.target.value === "apply_safe" ? "apply_safe" : "propose",
+                      true,
+                    )}
+                  >
+                    <option value="propose">{t("settings.skills.curator.applyPropose")}</option>
+                    <option value="apply_safe">{t("settings.skills.curator.applySafe")}</option>
+                  </select>
+                  <span className="text-[9.5px] text-faint">{t("settings.skills.curator.applyModeHint")}</span>
+                </label>
+                <label className="grid gap-1 text-[10px] text-secondary">
+                  <span>{t("settings.skills.curator.staleDays")}</span>
+                  <Input
+                    type="number"
+                    min={7}
+                    max={3650}
+                    value={Number.isFinite(staleDays) ? staleDays : 90}
+                    onChange={(event) => {
+                      const next = Math.max(7, Math.min(3650, Number(event.target.value) || 90));
+                      setEngineField("skills.curator.staleDays", next);
+                    }}
+                  />
+                  <span className="text-[9.5px] text-faint">{t("settings.skills.curator.staleDaysHint")}</span>
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border-soft bg-bg/40 px-2.5 py-2">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-medium text-secondary">{t("settings.skills.curator.useLlm")}</div>
+                  <p className="mt-0.5 text-[9.5px] leading-4 text-faint">{t("settings.skills.curator.useLlmHint")}</p>
+                </div>
+                <Switch
+                  checked={curatorUseLlm}
+                  size="xs"
+                  aria-label={t("settings.skills.curator.useLlm")}
+                  onCheckedChange={(value) => setEngineField("skills.curator.useLlm", value, true)}
+                />
+              </div>
+              {curatorUseLlm && (
+                <label className="grid gap-1 text-[10px] text-secondary">
+                  <span>{t("settings.skills.curator.modelSource")}</span>
+                  <select
+                    className="h-8 rounded-md border border-border-soft bg-bg px-2 text-[11px] text-secondary"
+                    value={curatorModelSource}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setEngineField(
+                        "skills.curator.modelSource",
+                        value === "session" || value === "default" ? value : "worker",
+                        true,
+                      );
+                    }}
+                  >
+                    <option value="worker">{t("settings.options.curatorModelWorker")}</option>
+                    <option value="session">{t("settings.options.curatorModelSession")}</option>
+                    <option value="default">{t("settings.options.curatorModelDefault")}</option>
+                  </select>
+                  <span className="text-[9.5px] text-faint">{t("settings.skills.curator.modelSourceHint")}</span>
+                </label>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={() => void runCuratorScan()} disabled={curatorBusy}>
+                  <RefreshCw className={cn("size-3.5", curatorBusy && "animate-spin")} />
+                  {t("settings.skills.curator.scan")}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void refreshCuratorProposals()} disabled={curatorBusy}>
+                  {t("settings.skills.curator.refreshProposals")}
+                </Button>
+              </div>
+
+              {curatorMsg && (
+                <div className="rounded-md border border-success/25 bg-success/8 px-3 py-2 text-[10px] text-secondary">
+                  {curatorMsg}
+                </div>
+              )}
+
+              <div>
+                <div className="mb-1 text-[10px] font-medium text-muted">{t("settings.skills.curator.proposalsTitle")}</div>
+                <p className="mb-2 text-[9.5px] leading-4 text-faint">{t("settings.skills.curator.proposalsHint")}</p>
+                {curatorProposals.length === 0 ? (
+                  <p className="text-[10px] text-faint">{t("settings.skills.curator.noProposals")}</p>
+                ) : (
+                  <ul className="max-h-56 space-y-2 overflow-y-auto">
+                    {curatorProposals.slice(0, 12).map((row) => (
+                      <li key={row.fileName} className="rounded-md border border-border-soft bg-bg/50 px-2.5 py-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate font-mono text-[9px] text-secondary">{row.fileName}</div>
+                            <div className="mt-0.5 text-[9px] text-muted">
+                              {row.status ?? "pending"}
+                              {row.via ? ` · ${row.via}` : ""}
+                              {" · "}
+                              {row.proposalCount ?? 0}
+                              {" · "}
+                              {row.at ? new Date(row.at).toLocaleString() : "—"}
+                            </div>
+                          </div>
+                          {row.status !== "applied" && (
+                            <Button size="sm" variant="outline" disabled={curatorBusy} onClick={() => void applyCuratorFile(row.fileName)}>
+                              {t("settings.skills.curator.applySafeBtn")}
+                            </Button>
+                          )}
+                        </div>
+                        {row.preview?.length ? (
+                          <ul className="mt-2 space-y-1 border-t border-border-soft pt-2">
+                            {row.preview.slice(0, 5).map((item, index) => (
+                              <li key={item.id ?? `${row.fileName}-${index}`} className="flex min-w-0 items-start justify-between gap-2 text-[9.5px]">
+                                <div className="min-w-0">
+                                  <span className="font-medium text-secondary">{item.skillName || item.skillId}</span>
+                                  <span className="text-muted"> · {item.action} · {item.kind}</span>
+                                  <div className="truncate text-faint">{item.reason}{item.detail ? ` — ${item.detail}` : ""}</div>
+                                  {item.suggestedDescription && (
+                                    <div className="mt-0.5 line-clamp-2 text-secondary">
+                                      {t("settings.skills.curator.suggestedDesc")}: {item.suggestedDescription}
+                                    </div>
+                                  )}
+                                  {item.hasContentPatch && (
+                                    <div className="mt-0.5 text-faint">{t("settings.skills.curator.hasContentPatch")}</div>
+                                  )}
+                                </div>
+                                <div className="flex shrink-0 flex-col gap-1">
+                                  {(item.action === "disable" || item.action === "enable") && item.skillId && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className="h-6 px-2 text-[9px]"
+                                      disabled={busyId === item.skillId}
+                                      onClick={() => void applyOne(item.skillId!, item.action as "enable" | "disable")}
+                                    >
+                                      {item.action === "disable"
+                                        ? t("settings.skills.curator.disableOne")
+                                        : t("settings.skills.curator.enableOne")}
+                                    </Button>
+                                  )}
+                                  {(item.action === "suggest_patch" || item.kind === "llm_patch")
+                                    && item.skillId
+                                    && item.owned === true && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className="h-6 px-2 text-[9px]"
+                                      disabled={busyId === item.skillId}
+                                      onClick={() => void applyOne(item.skillId!, "apply_patch", {
+                                        fileName: row.fileName,
+                                        proposalId: item.id,
+                                      })}
+                                    >
+                                      {t("settings.skills.curator.applyPatch")}
+                                    </Button>
+                                  )}
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <section>
         <div className="mb-2 flex flex-wrap items-end justify-between gap-2">

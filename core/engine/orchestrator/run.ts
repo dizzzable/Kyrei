@@ -4,10 +4,10 @@
  * via openStream), bridges the normalized stream to our events, returns
  * { text, parts, status, attempts }.
  *
- * Deferred: prepareStep compaction (Phase 4).
+ * prepareStep: two-stage context compaction (tool CCR prune + optional summary).
  */
 
-import { streamText, type ToolSet } from "ai";
+import { streamText, type ModelMessage, type ToolSet } from "ai";
 import { join } from "node:path";
 import type {
   RunKyreiChatOpts,
@@ -31,7 +31,13 @@ import {
 import { buildTools, type ToolMeta } from "../tools/index.js";
 import { buildWebTools } from "../tools/web.js";
 import { buildGBrainTools } from "../tools/gbrain.js";
+import { buildPlanningTools } from "../tools/planning.js";
+import { buildOpenVikingTools } from "../tools/openviking.js";
+import { buildMemorySearchTools } from "../tools/memory-search.js";
+import { buildMemoryWriteTools } from "../tools/memory-write.js";
+import { buildMcpTools } from "../tools/mcp.js";
 import { buildSkillTools } from "../tools/skills.js";
+import { createMcpManager, normalizeMcpConfig } from "../mcp/manager.js";
 import { buildDelegateTool } from "../orchestration/delegate.js";
 import { createReadOnlyChildRunner, selectReadOnlyChildTools } from "../orchestration/read-child.js";
 import {
@@ -41,8 +47,20 @@ import {
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { assembleSystemContext } from "../memory/layers.js";
+import { MemoryIndexSession } from "../memory/index-session.js";
+import { snippetsFromModelMessages } from "../memory/session-project.js";
+import { configureEmbedAdapterFromConfig } from "../memory/embed-adapter.js";
+import { createStores, type Stores } from "../data/index.js";
+import {
+  createModelGoalJudge,
+  maybeVerifyTurnGoal,
+  prepareMessagesForModel,
+} from "../reliability/runtime.js";
+import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/file-review.js";
+import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { buildStopWhen } from "./stop-conditions.js";
+import { resolvePersonalityText } from "../personality-catalog.js";
+import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
 import { makePrepareStep } from "./prepare-step.js";
 import { emitNoKeyGuidance } from "./no-key-guidance.js";
 import { bridgeStream } from "../stream-bridge/bridge.js";
@@ -161,6 +179,96 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   };
   const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
   const audit = opts.auditLogPath ? createAuditLog(opts.auditLogPath) : undefined;
+
+  // Configure process embedder (lexical default; optional HTTP neural endpoint).
+  try {
+    configureEmbedAdapterFromConfig(cfg.memory.index?.embed);
+  } catch {
+    /* keep lexical */
+  }
+
+  // Optional dual-write chat mirror (read FTS). JSON UI SoT stays in gateway.
+  let sessionMirrorStores: Stores | null = null;
+  if (
+    opts.sessionMirrorDir
+    && cfg.memory.sessionMirror?.enabled !== false
+    && cfg.memory.sessionMirror?.readSearch !== false
+  ) {
+    try {
+      sessionMirrorStores = createStores(opts.sessionMirrorDir);
+    } catch (error) {
+      console.warn("[kyrei session-mirror] read path unavailable:", error);
+      sessionMirrorStores = null;
+    }
+  }
+
+  // Rebuildable FTS+vector projection (process pool; never replaces Tier A SoT).
+  let memoryIndex: MemoryIndexSession | null = null;
+  if (workspaceReady) {
+    try {
+      memoryIndex = await MemoryIndexSession.acquire({
+        workspace: opts.workspace!,
+        config: {
+          enabled: cfg.memory.index?.enabled,
+          backend: cfg.memory.index?.backend,
+          ...(cfg.memory.index?.connectionString
+            ? { connectionString: cfg.memory.index.connectionString }
+            : {}),
+        },
+        ltmEnabled: Boolean(cfg.memory.ltm?.enabled),
+        planningEnabled: Boolean(cfg.planning?.enabled),
+      });
+      await memoryIndex.reindexNow();
+    } catch (indexErr) {
+      console.warn("[kyrei memory-index] unavailable:", indexErr);
+      memoryIndex = null;
+    }
+  }
+  const onMemoryMutated = (): void => {
+    memoryIndex?.notifyMutated();
+  };
+  // Throttle LTM runtime snapshot refresh after file events (not every keystroke-level write).
+  let lastLtmSnapshotAt = 0;
+  const onLtmEvent = (): void => {
+    if (!cfg.memory.ltm?.enabled || !opts.workspace) return;
+    const now = Date.now();
+    if (now - lastLtmSnapshotAt < 5_000) return;
+    lastLtmSnapshotAt = now;
+    const ltmDir = join(opts.workspace, "ltm");
+    void import("../memory/ltm-bridge.js")
+      .then(({ createLtmBridge }) => createLtmBridge(ltmDir).refreshRuntimeSnapshot())
+      .then(() => onMemoryMutated())
+      .catch(() => undefined);
+  };
+  const releaseMemoryIndex = async (): Promise<void> => {
+    if (memoryIndex) {
+      await memoryIndex.release();
+      memoryIndex = null;
+    }
+    if (sessionMirrorStores) {
+      try {
+        await sessionMirrorStores.close();
+      } catch {
+        /* ignore */
+      }
+      sessionMirrorStores = null;
+    }
+  };
+
+  // Clean-context reviewer (Requirements §11.3) reuses the primary provider's
+  // credentials/endpoint — no separate account is provisioned for it. It is
+  // an isolated *call* (fresh messages, no tools, no history), not a
+  // separate identity, so it never needs its own credential surface.
+  const reviewModel = cfg.review?.cleanContext
+    ? buildModel({
+        protocol: opts.providerProtocol,
+        baseURL: opts.providerBase,
+        apiKey: opts.apiKey,
+        credentials: providerCredentials,
+        model: opts.model,
+        headers: opts.providerHeaders,
+      })
+    : undefined;
   const workspaceTools = workspaceReady
     ? buildTools(opts.workspace!, cfg, toolMeta, {
         abortSignal: opts.abortSignal,
@@ -171,6 +279,10 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         sensitiveValues,
         approvedToolCalls,
         onApprovalConsumed: consumeApprovedCall,
+        onMemoryMutated,
+        onLtmEvent,
+        ...(cfg.memory.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm") } : {}),
+        ...(reviewModel ? { reviewModel } : {}),
       })
     : undefined;
   const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};
@@ -184,6 +296,60 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     signal: opts.abortSignal,
     maxModelOutputChars: cfg.maxToolOutput,
   });
+  const planningTools =
+    workspaceReady && cfg.planning?.enabled
+      ? buildPlanningTools({
+          workspace: opts.workspace!,
+          maxModelOutputChars: cfg.maxToolOutput,
+          onMemoryMutated,
+        })
+      : {};
+  const openvikingTools = buildOpenVikingTools(
+    {
+      enabled: Boolean(cfg.memory.openviking?.enabled),
+      ...(cfg.memory.openviking?.baseURL ? { baseURL: cfg.memory.openviking.baseURL } : {}),
+    },
+    {
+      sessionId: opts.sessionId,
+      maxModelOutputChars: cfg.maxToolOutput,
+    },
+  );
+  const sessionSnippets = snippetsFromModelMessages(opts.messages ?? [], {
+    sensitiveValues,
+  });
+  const memorySearchTools = workspaceReady
+    ? buildMemorySearchTools({
+        workspace: opts.workspace!,
+        ...(cfg.memory.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm"), ltmEnabled: true } : { ltmEnabled: false }),
+        planningEnabled: Boolean(cfg.planning?.enabled),
+        maxModelOutputChars: cfg.maxToolOutput,
+        indexBackend: memoryIndex?.backendLabel ?? "off",
+        ...(memoryIndex?.memoryStore ? { memoryStore: memoryIndex.memoryStore } : {}),
+        ...(memoryIndex?.vectorStore ? { vectorStore: memoryIndex.vectorStore } : {}),
+        ...(sessionMirrorStores ? { sessionStore: sessionMirrorStores.sessions } : {}),
+        ...(sessionSnippets.length ? { sessionSnippets } : {}),
+      })
+    : {};
+  const memoryWriteTools = workspaceReady
+    ? buildMemoryWriteTools({
+        workspace: opts.workspace!,
+        maxModelOutputChars: cfg.maxToolOutput,
+        onMemoryMutated,
+        ...(opts.globalMemoryDir ? { globalDir: opts.globalMemoryDir } : {}),
+      })
+    : {};
+  const mcpConfig = normalizeMcpConfig(cfg.mcp);
+  const mcpManager =
+    mcpConfig.enabled && mcpConfig.servers.length
+      ? createMcpManager({ config: mcpConfig, sensitiveValues })
+      : null;
+  const mcpTools = mcpManager
+    ? buildMcpTools(mcpConfig, {
+        manager: mcpManager,
+        sensitiveValues,
+        maxModelOutputChars: cfg.maxToolOutput,
+      })
+    : {};
   const skillTools = buildSkillTools(opts.skills ?? [], {
     maxOutputChars: cfg.maxToolOutput,
     onUsed: opts.onSkillUsed,
@@ -200,14 +366,23 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     ...retrieveTools,
     ...webTools,
     ...brainTools,
+    ...planningTools,
+    ...openvikingTools,
+    ...memorySearchTools,
+    ...memoryWriteTools,
+    ...mcpTools,
     ...skillTools,
   };
   const tools = Object.keys(baseToolSet).length ? baseToolSet : undefined;
+  // MCP is intentionally not available to read-only children (external process surface).
   const childTools = selectReadOnlyChildTools(
     workspaceTools,
     retrieveTools,
     webTools,
     brainTools,
+    planningTools,
+    openvikingTools,
+    memorySearchTools,
     childSkillTools,
   );
   const delegationEnabled = cfg.delegation.enabled;
@@ -217,7 +392,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   let projectContext: string | undefined;
   if (workspaceReady) {
     try {
-      const assembled = await assembleSystemContext({ workspace: opts.workspace! });
+      const assembled = await assembleSystemContext({
+        workspace: opts.workspace!,
+        ...(cfg.memory?.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm") } : {}),
+        ...(cfg.planning?.enabled ? { includePlan: true } : {}),
+        ...(opts.globalMemoryDir ? { globalDir: opts.globalMemoryDir } : {}),
+      });
       projectContext = assembled.trim() ? assembled : undefined;
     } catch (error) {
       console.warn("[kyrei v2] project context disabled:", error);
@@ -239,6 +419,10 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         onSkillUsed: opts.onSkillUsed,
         ...(opts.readSkillDocument ? { readSkillDocument: opts.readSkillDocument } : {}),
         providerAttemptLifecycle: opts.providerAttemptLifecycle,
+        ...(memoryIndex?.memoryStore ? { memoryStore: memoryIndex.memoryStore } : {}),
+        ...(memoryIndex?.vectorStore ? { vectorStore: memoryIndex.vectorStore } : {}),
+        indexBackend: memoryIndex?.backendLabel ?? "off",
+        ...(opts.globalMemoryDir ? { globalMemoryDir: opts.globalMemoryDir } : {}),
       })
     : [];
   const teamTools = opts.team
@@ -253,11 +437,23 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const instructions = buildSystemPrompt({
     workspace: opts.workspace,
     hasTools,
-    personality: cfg.personality,
+    personality: resolvePersonalityText({
+      personality: cfg.personality,
+      personalityPresetId: cfg.personalityPresetId,
+    }),
+    timezone: cfg.timezone,
     promptProfile: cfg.promptProfiles.find((profile) => profile.id === cfg.activePromptProfileId)?.systemPrompt,
     projectContext,
     hasBrainTools: Object.keys(brainTools).length > 0,
     hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
+    hasDecisionTools: Boolean(
+      cfg.memory.ltm?.enabled && opts.sessionId && workspaceReady,
+    ),
+    hasPlanningTools: Object.keys(planningTools).length > 0,
+    hasOpenVikingTools: Object.keys(openvikingTools).length > 0,
+    hasMemorySearch: Object.keys(memorySearchTools).length > 0,
+    hasMemoryWriteTools: Object.keys(memoryWriteTools).length > 0,
+    hasMcpTools: Object.keys(mcpTools).length > 0,
     hasDelegation: delegationEnabled,
     skills: opts.skills?.map(({ id, name, description }) => ({ id, name, description })),
     requiredSkillIds: opts.requiredSkillIds,
@@ -391,7 +587,15 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const start = (ci: number, useTools: boolean): StreamLike => {
     const candidate = candidates[ci] ?? candidates[0]!;
     const { entry, target, credentials } = candidate;
-    const providerOptions = buildProviderOptions(target.protocol, opts.modelParams);
+    // Hermes agent.reasoning_effort: fill default when the turn did not set effort.
+    const turnParams = (() => {
+      const base = opts.modelParams ?? {};
+      const hasEffort = typeof base.effort === "string" && base.effort.trim().length > 0;
+      const def = typeof cfg.defaultReasoningEffort === "string" ? cfg.defaultReasoningEffort.trim() : "";
+      if (hasEffort || !def || def === "off") return opts.modelParams;
+      return { ...base, effort: def };
+    })();
+    const providerOptions = buildProviderOptions(target.protocol, turnParams);
     // Manual limits are scoped to the selected primary model. A fallback can
     // have a different context/output contract and must use its own registry
     // metadata instead of inheriting an unrelated override.
@@ -403,9 +607,6 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       : target.limits?.maxOutput ?? entry.limits.maxOutput;
     // Unknown is a real state: without a verified context window Kyrei avoids
     // pretending that a generic 32k budget describes this endpoint.
-    const prepareStep = ccr && contextWindow !== undefined
-      ? makePrepareStep(cfg, entry.id, contextWindow, ccr)
-      : undefined;
     const model = buildModel({
       protocol: target.protocol,
       baseURL: target.baseURL,
@@ -425,6 +626,19 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           headers: explicitWorker.headers,
         })
       : model;
+    const prepareStep = ccr && contextWindow !== undefined
+      ? makePrepareStep(cfg, {
+          model: entry.id,
+          window: contextWindow,
+          ccr,
+          workspace: opts.workspace,
+          sessionId: opts.sessionId,
+          onMemoryMutated,
+          ...(cfg.memory?.ltm?.enabled && opts.workspace ? { ltmDir: join(opts.workspace, "ltm") } : {}),
+          // Stage-B LLM summary uses worker when configured; fail-open to heuristic.
+          ...(cfg.compression?.summaryUseLlm ? { summaryModel: workerModel } : {}),
+        })
+      : undefined;
     const delegateTools = buildDelegateTool({
       enabled: delegationEnabled,
       maxTasks: cfg.delegation.maxTasks,
@@ -463,11 +677,19 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     const callTools: ToolSet | undefined = useTools && Object.keys(mergedTools).length
       ? mergedTools
       : undefined;
+    let guardStopReason: GuardStopReason | undefined;
     const result = streamText({
       model,
       ...(instructions ? { instructions } : {}),
-      messages: opts.messages,
-      ...(callTools ? { tools: callTools, stopWhen: buildStopWhen(cfg) } : {}),
+      messages: prepareMessagesForModel((opts.messages ?? []) as ModelMessage[]),
+      ...(callTools
+        ? {
+            tools: callTools,
+            stopWhen: buildStopWhen(cfg, (reason) => {
+              guardStopReason ??= reason;
+            }),
+          }
+        : {}),
       ...(callTools && workspaceReady
         ? {
             toolApproval: async ({ toolCall, messages }: {
@@ -517,7 +739,11 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         console.error("[kyrei v2] stream error:", redact(message, sensitiveValues));
       },
     });
-    return { stream: result.stream, responseMessages: result.responseMessages };
+    return {
+      stream: result.stream,
+      responseMessages: result.responseMessages,
+      guardStopReason: () => guardStopReason,
+    };
   };
 
   let stream: StreamLike;
@@ -526,6 +752,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       ? await openStream(candidates.length, hasTools, start, { attemptLifecycle })
       : await openStream(candidates.length, hasTools, start);
   } catch (error) {
+    await releaseMemoryIndex();
+    if (mcpManager) await mcpManager.close().catch(() => undefined);
     return throwWithProviderAttempts(error, publicAttempts(streamAttemptsFromError(error)));
   }
   const selected = candidates[stream.candidateIndex ?? 0] ?? candidates[0]!;
@@ -537,9 +765,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       provider: selected.target.providerId,
       model: selected.entry.id,
       maxSteps: cfg.maxSteps,
+      guardStopReason: stream.guardStopReason,
       approvalMeta,
     });
   } catch (error) {
+    await releaseMemoryIndex();
+    if (mcpManager) await mcpManager.close().catch(() => undefined);
     return throwWithProviderAttempts(error, publicAttempts(stream.attempts));
   }
 
@@ -552,10 +783,155 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     parts = bridged.parts;
   }
 
+  let status = bridged.status;
+  let goalVerify: { satisfied: boolean; gap?: string } | undefined;
+  let healHandoffPath: string | undefined;
+  let fileReview: import("../types.js").FileReviewState | undefined;
+
+  // Self-heal FSM exhausted consecutive hard tool failures → distilled handoff
+  // for human / clean-window resume (JSON chat remains SoT).
+  if (
+    status === "heal_handoff"
+    && cfg.reliability?.healHandoff !== false
+    && workspaceReady
+    && opts.sessionId
+    && !opts.abortSignal?.aborted
+  ) {
+    try {
+      const history = [
+        ...((opts.messages ?? []) as ModelMessage[]),
+        ...(responseMessages ?? []),
+      ];
+      const artifact = extractHeuristicHandoff(history, opts.sessionId, "heal_handoff");
+      artifact.openQuestions = [
+        ...artifact.openQuestions,
+        "Self-heal FSM reached handoff after consecutive hard tool failures.",
+      ];
+      artifact.nextActions = artifact.nextActions.length
+        ? artifact.nextActions
+        : ["Review the last tool errors", "Fix environment or inputs", "Resume from this handoff"];
+      healHandoffPath = await writeHandoff(opts.workspace!, artifact);
+      console.info(`[kyrei reliability] heal handoff → ${healHandoffPath}`);
+      if (cfg.memory?.ltm?.enabled) {
+        try {
+          const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+          const ltm = createLtmBridge(join(opts.workspace!, "ltm"));
+          await ltm.appendCheckpoint({
+            summary: `Heal handoff after consecutive tool failures: ${artifact.intent}`,
+            changedFiles: artifact.keyFiles.map((f) => f.path),
+            decisions: [],
+            openThreads: artifact.openQuestions,
+            nextActions: artifact.nextActions,
+            sessionId: opts.sessionId,
+          });
+        } catch (ltmErr) {
+          console.warn("[kyrei reliability] LTM checkpoint for heal handoff skipped:", ltmErr);
+        }
+      }
+      opts.emit({
+        type: "message.delta",
+        payload: {
+          text: `\n\n[heal-handoff] consecutive tool failures — handoff written: ${healHandoffPath}`,
+        },
+      });
+    } catch (error) {
+      console.warn("[kyrei reliability] heal handoff write failed:", error);
+    }
+  }
+
+  // Post-turn goal verifier: only when an explicit goal was provided and the
+  // turn otherwise looks successful (or hit step budget).
+  if (
+    cfg.reliability?.goalVerify !== false
+    && opts.goal?.trim()
+    && (status === "complete" || status === "max_steps")
+    && !opts.abortSignal?.aborted
+  ) {
+    try {
+      const judgeCredentials = {
+        ...(selected.target.credentials ?? {}),
+        ...(!selected.target.credentials?.apiKey && selected.target.apiKey
+          ? { apiKey: selected.target.apiKey }
+          : {}),
+      };
+      const judge = createModelGoalJudge(
+        buildModel({
+          protocol: selected.target.protocol,
+          baseURL: selected.target.baseURL,
+          apiKey: selected.target.apiKey,
+          credentials: judgeCredentials,
+          model: selected.entry.id,
+          headers: selected.target.headers,
+        }),
+        {
+          abortSignal: opts.abortSignal,
+          maxOutputTokens: 200,
+        },
+      );
+      const transcript = [
+        ...snippetsFromModelMessages((opts.messages ?? []) as ModelMessage[], { maxMessages: 12 }),
+        { role: "assistant", text: bridged.text },
+      ]
+        .map((s) => `${s.role}: ${s.text}`)
+        .join("\n\n");
+      const verdict = await maybeVerifyTurnGoal({
+        enabled: true,
+        goal: opts.goal,
+        transcript,
+        judge,
+      });
+      if (verdict) {
+        goalVerify = {
+          satisfied: verdict.satisfied,
+          ...(verdict.gap ? { gap: verdict.gap } : {}),
+        };
+        if (!verdict.satisfied && status === "complete") {
+          status = "goal_unsatisfied";
+          opts.emit({
+            type: "message.delta",
+            payload: {
+              text: `\n\n[goal-verify] цель не подтверждена: ${verdict.gap ?? "gap unknown"}`,
+            },
+          });
+        }
+      }
+    } catch (error) {
+      console.warn("[kyrei reliability] goal verify skipped:", error);
+    }
+  }
+
+  // Supervised mode (Kiro analogue): after file-modifying tools, pause for
+  // accept/reject. Reject restores pre-turn snapshots. Autopilot skips this gate.
+  if (
+    cfg.executionMode === "supervised"
+    && canEnterFileReview(status)
+    && !opts.abortSignal?.aborted
+  ) {
+    const review = collectFileReviewFromParts(parts);
+    if (review) {
+      fileReview = review;
+      status = "awaiting_file_review";
+      opts.emit({
+        type: "message.delta",
+        payload: {
+          text: `\n\n[supervised] ${review.files.length} file change(s) pending review — accept or reject before continuing.`,
+        },
+      });
+    }
+  }
+
+  await releaseMemoryIndex();
+  if (mcpManager) {
+    try {
+      await mcpManager.close();
+    } catch {
+      /* ignore */
+    }
+  }
   return {
     text: bridged.text,
     parts,
-    status: bridged.status,
+    status,
     ...(responseMessages?.length ? { responseMessages } : {}),
     attempts: publicAttempts(stream.attempts),
     route: {
@@ -563,5 +939,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       modelId: selected.entry.id,
       ...(selected.target.accountId ? { accountId: selected.target.accountId } : {}),
     },
+    ...(goalVerify ? { goalVerify } : {}),
+    ...(healHandoffPath ? { healHandoffPath } : {}),
+    ...(fileReview ? { fileReview } : {}),
   };
 }

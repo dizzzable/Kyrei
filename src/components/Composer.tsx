@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowUp, Square, Layers3, X, Maximize2, Minimize2, Mic, Plus, FileText, Folder, Image as ImageIcon, Clipboard, MessageSquareText, Volume2, VolumeX, Puzzle, Check } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
+import { ArrowUp, Square, Layers3, X, Maximize2, Minimize2, Mic, Plus, FileText, Folder, Image as ImageIcon, Clipboard, MessageSquareText, Volume2, VolumeX, Puzzle, Check, Bot, ShieldCheck, History } from "lucide-react";
 import { getSlashCommands, parseSlash, resolveSlashCommand } from "@/lib/slash-commands";
 import { gateway } from "@/lib/gateway";
 import {
@@ -11,7 +11,11 @@ import {
 import { useAtom } from "@/store/atom";
 import { setUiSetting, useUiSettings } from "@/store/settings";
 import { addSnippet, useSnippets } from "@/store/snippets";
-import { stashSessionDraft, takeSessionDraft } from "@/store/composer-draft";
+import {
+  stashSessionDraft,
+  takeSessionDraft,
+  type ComposerAttachment,
+} from "@/store/composer-draft";
 import { createRecognizer, isSpeechRecognitionSupported, isSpeechSynthesisSupported, type Recognizer } from "@/lib/speech";
 import { ModelPill } from "./composer/ModelPill";
 import {
@@ -41,9 +45,18 @@ interface ComposerProps {
   provider: string;
   providers?: readonly ProviderProfile[];
   hasWorkspace?: boolean;
-  onSend: (text: string, skillIds?: string[]) => void;
+  onSend: (
+    text: string,
+    skillIds?: string[],
+    images?: Array<{ name: string; mediaType: string; data: string }>,
+  ) => void;
   /** Team role skills are configured in Team settings to keep assignments explicit. */
   skillsSelectable?: boolean;
+  /** Kiro-style execution mode: autopilot vs supervised file review. */
+  executionMode?: "autopilot" | "supervised";
+  onExecutionModeChange?: (mode: "autopilot" | "supervised") => void;
+  /** View all agent file changes and optional revert-all. */
+  onViewChanges?: () => void;
   onStop: () => void;
   onCommand: (name: string, arg?: string) => void;
   onModelChange: (providerId: string, modelId: string) => void;
@@ -70,8 +83,13 @@ export function Composer({
   onCommand,
   onModelChange,
   skillsSelectable = true,
+  executionMode = "autopilot",
+  onExecutionModeChange,
+  onViewChanges,
 }: ComposerProps) {
-  const [value, setValue] = useState(() => takeSessionDraft(sessionId).text);
+  const initialDraft = takeSessionDraft(sessionId);
+  const [value, setValue] = useState(() => initialDraft.text);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>(() => initialDraft.attachments);
   const [sel, setSel] = useState(0);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -98,11 +116,63 @@ export function Composer({
     [skills],
   );
 
-  const updateDraft = useCallback((text: string) => {
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+
+  const updateDraft = useCallback((text: string, nextAttachments?: ComposerAttachment[]) => {
     valueRef.current = text;
     setValue(text);
-    stashSessionDraft(activeDraftScope.current, text, []);
+    if (nextAttachments) {
+      attachmentsRef.current = nextAttachments;
+      setAttachments(nextAttachments);
+    }
+    stashSessionDraft(activeDraftScope.current, text, attachmentsRef.current);
   }, []);
+
+  const revokePreview = (item: ComposerAttachment) => {
+    if (item.previewUrl?.startsWith("blob:")) {
+      try { URL.revokeObjectURL(item.previewUrl); } catch { /* ignore */ }
+    }
+  };
+
+  const addImageFiles = useCallback(async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (!images.length) return;
+    const remaining = Math.max(0, 6 - attachmentsRef.current.filter((a) => a.kind === "image").length);
+    const slice = images.slice(0, remaining);
+    const next: ComposerAttachment[] = [...attachmentsRef.current];
+    for (const file of slice) {
+      if (file.size > 4 * 1024 * 1024) continue;
+      const dataBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result ?? "");
+          const comma = result.indexOf(",");
+          resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error ?? new Error("read_failed"));
+        reader.readAsDataURL(file);
+      }).catch(() => "");
+      if (!dataBase64) continue;
+      const mediaType = file.type === "image/jpg" ? "image/jpeg" : (file.type || "image/png");
+      next.push({
+        id: `img-${globalThis.crypto.randomUUID()}`,
+        kind: "image",
+        label: file.name || "image",
+        mediaType,
+        dataBase64,
+        previewUrl: URL.createObjectURL(file),
+        detail: `${Math.round(file.size / 1024)} KB`,
+      });
+    }
+    updateDraft(valueRef.current, next);
+  }, [updateDraft]);
+
+  const removeAttachment = useCallback((id: string) => {
+    const prev = attachmentsRef.current.find((a) => a.id === id);
+    if (prev) revokePreview(prev);
+    updateDraft(valueRef.current, attachmentsRef.current.filter((a) => a.id !== id));
+  }, [updateDraft]);
 
   const queues = useAtom($queuedPromptsBySession);
   const queued = sessionId ? queues[sessionId] ?? [] : [];
@@ -128,17 +198,19 @@ export function Composer({
   }, []);
   useEffect(() => {
     if (activeDraftScope.current === sessionId) return;
-    stashSessionDraft(activeDraftScope.current, valueRef.current, []);
-    const restored = takeSessionDraft(sessionId).text;
+    stashSessionDraft(activeDraftScope.current, valueRef.current, attachmentsRef.current);
+    const restored = takeSessionDraft(sessionId);
     activeDraftScope.current = sessionId;
-    valueRef.current = restored;
-    setValue(restored);
-    setExpanded(restored.includes("\n"));
+    valueRef.current = restored.text;
+    setValue(restored.text);
+    attachmentsRef.current = restored.attachments;
+    setAttachments(restored.attachments);
+    setExpanded(restored.text.includes("\n"));
     setSelectedSkillIds([]);
     browse.current = null;
   }, [sessionId]);
   useEffect(() => () => {
-    stashSessionDraft(activeDraftScope.current, valueRef.current, []);
+    stashSessionDraft(activeDraftScope.current, valueRef.current, attachmentsRef.current);
   }, []);
   useEffect(() => {
     const restoreDraft = (event: Event) => {
@@ -172,33 +244,53 @@ export function Composer({
     draining.current = true;
     const head = dequeueQueuedPrompt(sessionId);
     draining.current = false;
-    if (head) onSend(head.text, head.skillIds);
+    if (head) {
+      const images = head.attachments
+        ?.filter((a) => a.kind === "image" && a.dataBase64 && a.mediaType)
+        .map((a) => ({ name: a.label, mediaType: a.mediaType!, data: a.dataBase64! }));
+      onSend(head.text, head.skillIds, images?.length ? images : undefined);
+    }
   }, [busy, sessionId, queued.length, onSend]);
 
   const submit = () => {
     const text = value.trim();
-    if (!text) return;
-    // Slash commands dispatch locally.
-    if (text.startsWith("/")) {
+    const imagePayload = attachmentsRef.current
+      .filter((a) => a.kind === "image" && a.dataBase64 && a.mediaType)
+      .map((a) => ({
+        name: a.label,
+        mediaType: a.mediaType!,
+        data: a.dataBase64!,
+      }));
+    if (!text && !imagePayload.length) return;
+    // Slash commands dispatch locally (text only).
+    if (text.startsWith("/") && !imagePayload.length) {
       const { name, arg } = parseSlash(text);
       const command = resolveSlashCommand(name);
       if (command) {
         onCommand(command.id, arg || undefined);
-        updateDraft("");
+        updateDraft("", []);
         return;
       }
     }
     if (busy) {
       // Busy → queue for the next turn instead of dropping the message.
-      if (sessionId) enqueueQueuedPrompt(sessionId, { text, attachments: [], skillIds: selectedSkillIds });
-      updateDraft("");
+      if (sessionId) {
+        enqueueQueuedPrompt(sessionId, {
+          text,
+          attachments: attachmentsRef.current,
+          skillIds: selectedSkillIds,
+        });
+      }
+      for (const a of attachmentsRef.current) revokePreview(a);
+      updateDraft("", []);
       setSelectedSkillIds([]);
       return;
     }
-    if (history.current[history.current.length - 1] !== text) history.current.push(text);
+    if (text && history.current[history.current.length - 1] !== text) history.current.push(text);
     browse.current = null;
-    onSend(text, selectedSkillIds);
-    updateDraft("");
+    onSend(text, selectedSkillIds, imagePayload.length ? imagePayload : undefined);
+    for (const a of attachmentsRef.current) revokePreview(a);
+    updateDraft("", []);
     setSelectedSkillIds([]);
   };
   const toggleSkill = (id: string) => {
@@ -251,8 +343,8 @@ export function Composer({
     });
   };
 
-  // Native OS file/folder/image picker → insert resolved absolute paths.
-  const openPicker = (opts: { accept?: string; dir?: boolean } = {}) => {
+  // Native OS file/folder/image picker → paths for files/folders; real image chips for images.
+  const openPicker = (opts: { accept?: string; dir?: boolean; images?: boolean } = {}) => {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
@@ -260,6 +352,11 @@ export function Composer({
     if (opts.dir) (input as unknown as { webkitdirectory: boolean }).webkitdirectory = true;
     input.onchange = () => {
       const files = Array.from(input.files ?? []);
+      if (!files.length) return;
+      if (opts.images || opts.accept?.includes("image")) {
+        void addImageFiles(files);
+        return;
+      }
       const paths = files.map((f) => window.kyrei?.getPathForFile?.(f) || f.name).filter(Boolean);
       if (!paths.length) return;
       if (opts.dir) insertText(paths[0].replace(/[\\/][^\\/]*$/, "") || paths[0]);
@@ -275,8 +372,38 @@ export function Composer({
     } catch { /* denied */ }
     try {
       const items = await navigator.clipboard.read();
-      if (items.some((it) => it.types.some((type) => type.startsWith("image/")))) insertText(t("chat.composer.pastedImage"));
+      const imageFiles: File[] = [];
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (!type) continue;
+        const blob = await item.getType(type);
+        imageFiles.push(new File([blob], `clipboard.${type.split("/")[1] || "png"}`, { type }));
+      }
+      if (imageFiles.length) void addImageFiles(imageFiles);
     } catch { /* denied */ }
+  };
+
+  // Inline paste: keep text paste native; attach image files as chips.
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const hasText = items.some((item) => item.kind === "string");
+    const imageFiles = items
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => Boolean(f));
+    if (imageFiles.length && !hasText) {
+      event.preventDefault();
+      void addImageFiles(imageFiles);
+    }
+  };
+
+  // Inline drop: attach images as chips; never navigate the window.
+  const onDrop = (event: DragEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (images.length === 0) return;
+    event.preventDefault();
+    void addImageFiles(images);
   };
 
   const saveSnippet = () => {
@@ -428,8 +555,33 @@ export function Composer({
 
         <div className={cn(
           "composer-card rounded-[10px] border border-border-soft px-2.5 py-2 transition-all focus-within:border-(--ui-composer-focus)",
-          (expanded || value.includes("\n")) && "is-stacked",
+          (expanded || value.includes("\n") || attachments.length > 0) && "is-stacked",
         )}>
+          {attachments.length > 0 && (
+            <ul className="mb-1.5 flex flex-wrap gap-1.5">
+              {attachments.map((item) => (
+                <li
+                  key={item.id}
+                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border-soft bg-elevated/50 py-0.5 pl-1 pr-1"
+                >
+                  {item.kind === "image" && item.previewUrl ? (
+                    <img src={item.previewUrl} alt="" className="size-7 rounded object-cover" />
+                  ) : (
+                    <ImageIcon className="size-3.5 text-muted" />
+                  )}
+                  <span className="min-w-0 max-w-[10rem] truncate text-[11px] text-secondary">{item.label}</span>
+                  <button
+                    type="button"
+                    className="grid size-5 place-items-center rounded text-muted hover:bg-(--ui-row-hover) hover:text-foreground"
+                    onClick={() => removeAttachment(item.id)}
+                    aria-label={t("chat.composer.removeAttachment")}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           <textarea
             ref={ref}
             rows={1}
@@ -442,6 +594,8 @@ export function Composer({
               refreshMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            onDrop={onDrop}
             onBlur={() => window.setTimeout(() => setMention(null), 120)}
             placeholder={disabled ? t("chat.composer.connecting") : t("chat.composer.placeholder")}
             className={cn(
@@ -468,7 +622,7 @@ export function Composer({
                 <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ dir: true }); }}>
                   <Folder size={15} /> {t("chat.composer.attachFolder")}
                 </DropdownMenuItem>
-                <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ accept: "image/*" }); }}>
+                <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ accept: "image/*", images: true }); }}>
                   <ImageIcon size={15} /> {t("chat.composer.attachImages")}
                 </DropdownMenuItem>
                 <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); void pasteFromClipboard(); }}>
@@ -563,6 +717,43 @@ export function Composer({
               </button>
             )}
             <ModelPill disabled={disabled} model={model} provider={provider} providers={providers} onModelChange={onModelChange} />
+            {onExecutionModeChange && (
+              <button
+                type="button"
+                onClick={() => onExecutionModeChange(executionMode === "autopilot" ? "supervised" : "autopilot")}
+                className={cn(
+                  "grid size-7 place-items-center rounded-md transition-colors",
+                  executionMode === "autopilot"
+                    ? "bg-primary/15 text-primary"
+                    : "bg-(--ui-row-active) text-foreground",
+                )}
+                title={
+                  executionMode === "autopilot"
+                    ? t("chat.composer.autopilotOn")
+                    : t("chat.composer.supervisedOn")
+                }
+                aria-label={
+                  executionMode === "autopilot"
+                    ? t("chat.composer.autopilotOn")
+                    : t("chat.composer.supervisedOn")
+                }
+                aria-pressed={executionMode === "autopilot"}
+              >
+                {executionMode === "autopilot" ? <Bot size={14} /> : <ShieldCheck size={14} />}
+              </button>
+            )}
+            {onViewChanges && (
+              <button
+                type="button"
+                onClick={onViewChanges}
+                disabled={disabled}
+                className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground disabled:opacity-40"
+                title={t("chat.composer.viewChanges")}
+                aria-label={t("chat.composer.viewChanges")}
+              >
+                <History size={14} />
+              </button>
+            )}
             <button
               onClick={() => setExpanded((v) => !v)}
               className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground"
@@ -606,7 +797,7 @@ export function Composer({
             <div className="ml-auto">
               {busy ? (
                 <div className="flex items-center gap-1">
-                  {value.trim() && (
+                  {(value.trim() || attachments.length > 0) && (
                     <button
                       onClick={submit}
                       className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px"
@@ -630,7 +821,7 @@ export function Composer({
               ) : (
                 <button
                   onClick={submit}
-                  disabled={!value.trim()}
+                  disabled={!value.trim() && attachments.length === 0}
                    className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px disabled:translate-y-0 disabled:opacity-30"
                   title={t("chat.composer.send")}
                   aria-label={t("chat.composer.send")}

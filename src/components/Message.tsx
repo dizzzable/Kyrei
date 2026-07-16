@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import { Check, Copy, RotateCcw } from "lucide-react";
+import { Check, Copy, GitFork, RotateCcw } from "lucide-react";
 import type { ChatMessage } from "@/lib/types";
 import { messageText } from "@/lib/chat-messages";
 import { IconButton } from "@/components/ui";
@@ -8,6 +8,7 @@ import { Markdown } from "./Markdown";
 import { ToolRow } from "./ToolRow";
 import { ThinkingDisclosure } from "./chat/ThinkingDisclosure";
 import { ApprovalCard } from "./chat/ApprovalCard";
+import { FileReviewCard } from "./chat/FileReviewCard";
 import { useI18n } from "@/i18n";
 
 function CopyAction({ getText }: { getText: () => string }) {
@@ -31,11 +32,24 @@ function CopyAction({ getText }: { getText: () => string }) {
 export const Message = memo(function Message({
   message,
   onRewind,
+  onFork,
   onApprovalDecision,
+  onFileReviewDecision,
+  onFileReviewFileDecision,
+  onFileReviewHunkDecision,
 }: {
   message: ChatMessage;
   onRewind?: (messageId: string) => void;
-  onApprovalDecision?: (approvalId: string, approved: boolean) => Promise<void> | void;
+  /** Fork chat from this user message (new session, parent untouched). */
+  onFork?: (messageId: string) => void;
+  onApprovalDecision?: (
+    approvalId: string,
+    approved: boolean,
+    options?: { always?: boolean },
+  ) => Promise<void> | void;
+  onFileReviewDecision?: (accept: boolean) => Promise<void> | void;
+  onFileReviewFileDecision?: (path: string, accept: boolean) => Promise<void> | void;
+  onFileReviewHunkDecision?: (path: string, hunkId: string, accept: boolean) => Promise<void> | void;
 }) {
   const { showReasoning } = useUiSettings();
   const { t } = useI18n();
@@ -53,6 +67,11 @@ export const Message = memo(function Message({
             {onRewind && (
               <IconButton tip={t("chat.message.rewind")} size="icon-xs" onClick={() => onRewind(message.id)}>
                 <RotateCcw className="size-3.5" />
+              </IconButton>
+            )}
+            {onFork && (
+              <IconButton tip={t("chat.message.forkHint")} size="icon-xs" onClick={() => onFork(message.id)}>
+                <GitFork className="size-3.5" />
               </IconButton>
             )}
           </div>
@@ -75,6 +94,26 @@ export const Message = memo(function Message({
         if (part.type === "reasoning") return null;
         return <Markdown key={i} text={part.text} />;
       })}
+      {message.fileReview && (
+        <FileReviewCard
+          review={message.fileReview}
+          onDecision={
+            message.fileReview.status === "pending" || message.fileReview.status === "partial"
+              ? onFileReviewDecision
+              : undefined
+          }
+          onFileDecision={
+            message.fileReview.status === "pending" || message.fileReview.status === "partial"
+              ? onFileReviewFileDecision
+              : undefined
+          }
+          onHunkDecision={
+            message.fileReview.status === "pending" || message.fileReview.status === "partial"
+              ? onFileReviewHunkDecision
+              : undefined
+          }
+        />
+      )}
       {message.pending && <span className="caret" />}
       {!message.pending && hasText && (
         <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
