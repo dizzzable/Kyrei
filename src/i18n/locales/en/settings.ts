@@ -1019,7 +1019,7 @@ export const enSettings = {
   "settings.providers.unavailable": "Unavailable",
   "settings.providers.useDefault": "Use as default",
   "settings.providers.useAsDefault": "Use as default",
-  "settings.providers.useAsDefaultHint": "New sessions will start with the first selected model from this provider.",
+  "settings.providers.useAsDefaultHint": "Makes this the app default (on by default when no ready provider exists) and updates empty chats still on the unready seed.",
   "settings.providers.editNamed": "Edit provider {name}",
   "settings.providers.accounts.manageNamed": "Manage account pool for {name}",
   "settings.providers.accounts.title": "Account pool · {name}",

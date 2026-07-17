@@ -6,7 +6,7 @@
  * transport value. Per-resource providers remain editable and require input.
  */
 
-export const PROVIDER_TEMPLATES_VERSION = 3;
+export const PROVIDER_TEMPLATES_VERSION = 4;
 
 /** Shared blurb for OpenAI-compatible catalogues (OmniRoute-class APIs). */
 const OPENAI_COMPAT_DESC = "settings.providers.templates.openaiCompatible.description";
@@ -40,6 +40,8 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     docsURL: "https://platform.openai.com/api-keys",
     protocol: "openai-responses",
     baseURL: "https://api.openai.com/v1",
+    // Seeded so first-run can Save after pasting a key without Discover.
+    models: [{ id: "gpt-4o-mini" }, { id: "gpt-4o" }],
   }),
   template({
     id: "anthropic",
@@ -48,6 +50,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     docsURL: "https://console.anthropic.com/settings/keys",
     protocol: "anthropic-messages",
     baseURL: "https://api.anthropic.com/v1",
+    models: [{ id: "claude-sonnet-4-20250514" }, { id: "claude-haiku-4-20250414" }],
   }),
   template({
     id: "gemini",
@@ -56,6 +59,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     docsURL: "https://aistudio.google.com/app/apikey",
     protocol: "google-generative-ai",
     baseURL: "https://generativelanguage.googleapis.com/v1beta",
+    models: [{ id: "gemini-2.5-flash" }, { id: "gemini-2.5-pro" }],
   }),
   template({
     id: "bedrock",
@@ -80,6 +84,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     docsURL: "https://openrouter.ai/keys",
     protocol: "openai-chat",
     baseURL: "https://openrouter.ai/api/v1",
+    models: [{ id: "openrouter/auto" }],
   }),
   template({
     id: "deepseek",
@@ -88,6 +93,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     docsURL: "https://platform.deepseek.com/api_keys",
     protocol: "openai-chat",
     baseURL: "https://api.deepseek.com/v1",
+    models: [{ id: "deepseek-chat" }, { id: "deepseek-reasoner" }],
   }),
   template({
     id: "alibaba",
@@ -324,6 +330,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     protocol: "openai-chat",
     baseURL: "http://127.0.0.1:11434/v1",
     requiresApiKey: false,
+    models: [{ id: "llama3.2" }],
   }),
   template({
     id: "lm-studio",
@@ -333,6 +340,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     protocol: "openai-chat",
     baseURL: "http://127.0.0.1:1234/v1",
     requiresApiKey: false,
+    models: [{ id: "local-model" }],
   }),
   // FIRST-CLASS escape hatch: any future / niche / contracted vendor.
   template({

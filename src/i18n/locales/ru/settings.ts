@@ -1020,7 +1020,7 @@ export const ruSettings = {
   "settings.providers.unavailable": "Недоступен",
   "settings.providers.useDefault": "По умолчанию",
   "settings.providers.useAsDefault": "Использовать по умолчанию",
-  "settings.providers.useAsDefaultHint": "Новые сессии будут начинаться с первой выбранной модели этого провайдера.",
+  "settings.providers.useAsDefaultHint": "Делает провайдера активным по умолчанию (включено, пока нет готового провайдера) и обновляет пустые чаты, всё ещё привязанные к незаполненному seed.",
   "settings.providers.editNamed": "Изменить провайдера {name}",
   "settings.providers.accounts.manageNamed": "Управлять пулом аккаунтов {name}",
   "settings.providers.accounts.title": "Пул аккаунтов · {name}",

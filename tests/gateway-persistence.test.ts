@@ -475,11 +475,10 @@ describe("gateway config persistence", () => {
     expect(await gatewayRequest<{ hasKey: boolean }>(server, "/api/config")).toMatchObject({ hasKey: false });
   });
 
-  it("reconciles an unready persisted default to a ready provider on startup", async () => {
+  it("auto-activates the first ready provider and keeps it after restart", async () => {
     const dataDir = await temporaryDirectory();
     let server = await startGateway({ dataDir, preferredPort: 0 });
     liveServers.push(server);
-    const initial = await gatewayRequest<{ activeProviderId: string }>(server, "/api/config");
     await gatewayRequest(server, "/api/providers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -494,8 +493,44 @@ describe("gateway config persistence", () => {
         },
       }),
     });
+    // First ready provider promotes immediately while the seed default is unready.
     expect((await gatewayRequest<{ activeProviderId: string }>(server, "/api/config")).activeProviderId)
-      .toBe(initial.activeProviderId);
+      .toBe("ready-local");
+
+    await server.close();
+    liveServers.splice(liveServers.indexOf(server), 1);
+    server = await startGateway({ dataDir, preferredPort: 0 });
+    liveServers.push(server);
+    expect((await gatewayRequest<{ activeProviderId: string }>(server, "/api/config")).activeProviderId)
+      .toBe("ready-local");
+  });
+
+  it("reconciles an unready persisted default to a ready provider on startup", async () => {
+    const dataDir = await temporaryDirectory();
+    let server = await startGateway({ dataDir, preferredPort: 0 });
+    liveServers.push(server);
+    const initial = await gatewayRequest<{ activeProviderId: string; activeModelId: string }>(server, "/api/config");
+    await gatewayRequest(server, "/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: {
+          id: "ready-local",
+          name: "Ready local",
+          protocol: "openai-chat",
+          baseURL: "http://127.0.0.1:11434/v1",
+          models: [{ id: "local-model" }],
+          requiresApiKey: false,
+        },
+        useAsDefault: true,
+      }),
+    });
+    // Point active back at the unready seed while a ready provider remains registered.
+    const configPath = join(dataDir, "kyrei-config.json");
+    const raw = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
+    raw.activeProviderId = initial.activeProviderId;
+    raw.activeModelId = initial.activeModelId;
+    await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
 
     await server.close();
     liveServers.splice(liveServers.indexOf(server), 1);

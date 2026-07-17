@@ -112,6 +112,18 @@ function copyModels(models: readonly ProviderModel[] | undefined): ProviderModel
   return (models ?? []).map((model) => ({ ...model }));
 }
 
+/** First-run: default "Use as default" when no credential-ready provider exists. */
+export function shouldDefaultUseAsDefault(
+  providers: readonly Pick<ProviderProfile, "enabled" | "requiresApiKey" | "hasKey" | "hasStoredCredentials">[],
+): boolean {
+  return !providers.some((provider) => (
+    provider.enabled !== false
+    && (provider.requiresApiKey === false
+      || provider.hasKey === true
+      || provider.hasStoredCredentials === true)
+  ));
+}
+
 export function createDraftFromProfile(profile: ProviderProfile, useAsDefault: boolean): ProviderDraft {
   const models = copyModels(profile.models);
   return {

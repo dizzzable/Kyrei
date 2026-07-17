@@ -6,6 +6,7 @@ import {
   consumeBenchmarkNetworkPermission,
   createDraftFromProfile,
   createDraftFromTemplate,
+  shouldDefaultUseAsDefault,
   draftDiscoveryInput,
   draftProviderInput,
   mergeDiscoveredModels,
@@ -131,6 +132,18 @@ describe("provider setup drafts", () => {
 
     expect(draft).toMatchObject({ id: "", name: "", baseURL: "", useAsDefault: false, idLocked: false });
     expect(providerDraftModels(draft)).toEqual([]);
+  });
+
+  it("defaults use-as-default only when no ready provider exists (first-run)", () => {
+    expect(shouldDefaultUseAsDefault([
+      { enabled: true, requiresApiKey: true, hasKey: false, hasStoredCredentials: false },
+    ])).toBe(true);
+    expect(shouldDefaultUseAsDefault([
+      { enabled: true, requiresApiKey: true, hasKey: true, hasStoredCredentials: true },
+    ])).toBe(false);
+    expect(shouldDefaultUseAsDefault([
+      { enabled: true, requiresApiKey: false, hasKey: false, hasStoredCredentials: false },
+    ])).toBe(false);
   });
 
   it("consumes benchmark-network permission after one discovery attempt", () => {

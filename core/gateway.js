@@ -581,16 +581,82 @@ function providerIsReady(provider, secretState, configState) {
   return Boolean(provider?.enabled && hasReadyProviderCredentials(provider, secretState, configState));
 }
 
-function requireReadyProviderModel(configState, secretState, providerId, modelId, options) {
-  const target = resolveProviderModel(configState, providerId, modelId, options);
-  if (!providerIsReady(target.provider, secretState, configState)) {
-    throw new ProviderConfigError("provider_credentials_required");
+/**
+ * Resolve a provider/model that is credential-ready.
+ * With fallbackToDefault: fall back to the active default only when the
+ * requested target is missing/disabled or has no credentials (first-run:
+ * session still bound to the unready default stub). Do NOT fall back on
+ * account-eligibility failures — those are intentional model bindings.
+ */
+function requireReadyProviderModel(configState, secretState, providerId, modelId, options = {}) {
+  const errorCode = (error) => (
+    typeof error?.code === "string" ? error.code
+      : typeof error?.message === "string" ? error.message
+        : ""
+  );
+  const mayFallbackToDefault = (error) => {
+    const code = errorCode(error);
+    return code === "provider_unavailable"
+      || code === "provider_model_unavailable"
+      || code === "provider_credentials_required";
+  };
+  const tryReady = (pid, mid, resolveOptions = {}) => {
+    const target = resolveProviderModel(configState, pid, mid, resolveOptions);
+    if (!providerIsReady(target.provider, secretState, configState)) {
+      throw new ProviderConfigError("provider_credentials_required");
+    }
+    const hasEligibleAccount = readyProviderAccounts(target.provider, secretState, configState).some((account) => (
+      !Object.hasOwn(account, "modelIds") || account.modelIds.includes(target.model.id)
+    ));
+    if (!hasEligibleAccount) throw new ProviderConfigError("provider_accounts_unavailable");
+    return target;
+  };
+
+  try {
+    return tryReady(providerId, modelId);
+  } catch (primaryError) {
+    if (!options.fallbackToDefault || !mayFallbackToDefault(primaryError)) throw primaryError;
+    try {
+      return tryReady(configState.activeProviderId, configState.activeModelId);
+    } catch {
+      // Active may itself be the same unready stub — last chance: resolve with
+      // identity fallback when the session ids are simply missing/disabled.
+      try {
+        return tryReady(providerId, modelId, { fallbackToDefault: true });
+      } catch {
+        throw primaryError;
+      }
+    }
   }
-  const hasEligibleAccount = readyProviderAccounts(target.provider, secretState, configState).some((account) => (
-    !Object.hasOwn(account, "modelIds") || account.modelIds.includes(target.model.id)
-  ));
-  if (!hasEligibleAccount) throw new ProviderConfigError("provider_accounts_unavailable");
-  return target;
+}
+
+function isActiveProviderReady(configState, secretState) {
+  try {
+    requireReadyProviderModel(
+      configState,
+      secretState,
+      configState.activeProviderId,
+      configState.activeModelId,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * First-run / heal path: activate this provider when the caller asked for it,
+ * or when the current active default is still unready and this candidate is ready.
+ */
+function shouldActivateProviderAsDefault(configState, secretState, providerId, modelId, body = {}) {
+  if (body.useAsDefault === true || body.activate === true) return true;
+  if (isActiveProviderReady(configState, secretState)) return false;
+  try {
+    requireReadyProviderModel(configState, secretState, providerId, modelId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function selectExistingProviderModel(configState, providerId, modelId) {
@@ -4912,6 +4978,43 @@ export async function startGateway({
     });
   }
 
+  /**
+   * OOB heal: after a ready default appears, re-point idle chats that still
+   * snapshotted the unready stub so the model picker and next prompt agree.
+   * Skips in-flight turns (controllers) so a live run is not mid-swapped.
+   */
+  function rebindUnreadyIdleSessions(configState, secretState) {
+    if (!isActiveProviderReady(configState, secretState)) return;
+    const activeProviderId = configState.activeProviderId;
+    const activeModelId = configState.activeModelId;
+    for (const session of store.sessions) {
+      if (!session?.id || session.archived === true) continue;
+      if (controllers.has(session.id)) continue;
+      if (session.providerId === activeProviderId && session.modelId === activeModelId) continue;
+      try {
+        requireReadyProviderModel(configState, secretState, session.providerId, session.modelId);
+        continue;
+      } catch {
+        /* rebind unready snapshot */
+      }
+      store.upsertSession({
+        id: session.id,
+        providerId: activeProviderId,
+        modelId: activeModelId,
+        providerAccountId: undefined,
+        updatedAt: new Date().toISOString(),
+      });
+      emitTo(session.id, {
+        type: "session.model",
+        payload: {
+          session_id: session.id,
+          provider_id: activeProviderId,
+          model_id: activeModelId,
+        },
+      });
+    }
+  }
+
   async function runPrompt(sessionId, text, modelParams, messageId, reservationToken, options = {}) {
     const token = reservationToken ?? Symbol("prompt");
     const existingReservation = sessionReservations.get(sessionId);
@@ -6309,6 +6412,7 @@ export async function startGateway({
             config = nextConfig;
             secrets = nextSecrets;
             invalidateAllProviderRuntimes();
+            if (selectionExplicit) rebindUnreadyIdleSessions(config, secrets);
             return publicGatewayConfig(config, secrets);
           });
           return sendJson(res, 200, snapshot);
@@ -7438,19 +7542,26 @@ export async function startGateway({
             let nextConfig = added.config;
             const nextSecrets = normalizeProviderSecrets(secrets);
             if (credentials) nextSecrets.providers[added.provider.id] = credentials;
-            if (body.useAsDefault === true || body.activate === true) {
-              nextConfig = selectExistingProviderModel(nextConfig, added.provider.id, body.modelId ?? input.model ?? added.provider.models[0]?.id);
-              requireReadyProviderModel(
-                nextConfig,
-                nextSecrets,
-                nextConfig.activeProviderId,
-                nextConfig.activeModelId,
-              );
+            const activateModelId = body.modelId ?? input.model ?? added.provider.models[0]?.id;
+            if (shouldActivateProviderAsDefault(nextConfig, nextSecrets, added.provider.id, activateModelId, body)) {
+              const candidate = selectExistingProviderModel(nextConfig, added.provider.id, activateModelId);
+              try {
+                requireReadyProviderModel(
+                  candidate,
+                  nextSecrets,
+                  candidate.activeProviderId,
+                  candidate.activeModelId,
+                );
+                nextConfig = candidate;
+              } catch (error) {
+                if (body.useAsDefault === true || body.activate === true) throw error;
+              }
             }
             nextConfig = reconcileReadyModelAssignments(nextConfig, nextSecrets);
             await saveConfig(nextConfig, nextSecrets);
             config = nextConfig;
             secrets = nextSecrets;
+            rebindUnreadyIdleSessions(config, secrets);
             return publicGatewayConfig(config, secrets);
           });
           return sendJson(res, 201, snapshot);
@@ -7686,9 +7797,28 @@ export async function startGateway({
               }
               const nextSecrets = normalizeProviderSecrets(secrets);
               nextSecrets.providers[providerId] = credentials;
-              await saveConfig(config, nextSecrets);
+              let nextConfig = config;
+              // Pasting a key on a non-default ready profile while the active
+              // stub still has no credentials should make that profile the default.
+              if (shouldActivateProviderAsDefault(nextConfig, nextSecrets, providerId, existing.models[0]?.id, {})) {
+                const candidate = selectExistingProviderModel(nextConfig, providerId, existing.models[0]?.id);
+                try {
+                  requireReadyProviderModel(
+                    candidate,
+                    nextSecrets,
+                    candidate.activeProviderId,
+                    candidate.activeModelId,
+                  );
+                  nextConfig = candidate;
+                } catch {
+                  /* keep previous active if candidate still not ready */
+                }
+              }
+              await saveConfig(nextConfig, nextSecrets);
+              config = nextConfig;
               secrets = nextSecrets;
               invalidateProviderRuntime(providerId);
+              rebindUnreadyIdleSessions(config, secrets);
               return publicGatewayConfig(config, secrets);
             });
             return sendJson(res, 200, snapshot);
@@ -7745,14 +7875,20 @@ export async function startGateway({
               delete nextSecrets.accounts[providerId];
             }
             if (credentials) nextSecrets.providers[providerId] = credentials;
-            if (body.useAsDefault === true || body.activate === true) {
-              nextConfig = selectExistingProviderModel(nextConfig, providerId, body.modelId ?? updated.provider.models[0]?.id);
-              requireReadyProviderModel(
-                nextConfig,
-                nextSecrets,
-                nextConfig.activeProviderId,
-                nextConfig.activeModelId,
-              );
+            const activateModelId = body.modelId ?? updated.provider.models[0]?.id;
+            if (shouldActivateProviderAsDefault(nextConfig, nextSecrets, providerId, activateModelId, body)) {
+              const candidate = selectExistingProviderModel(nextConfig, providerId, activateModelId);
+              try {
+                requireReadyProviderModel(
+                  candidate,
+                  nextSecrets,
+                  candidate.activeProviderId,
+                  candidate.activeModelId,
+                );
+                nextConfig = candidate;
+              } catch (error) {
+                if (body.useAsDefault === true || body.activate === true) throw error;
+              }
             }
             if (config.activeProviderId === providerId) {
               nextConfig = reconcileReadyDefault(nextConfig, nextSecrets);
@@ -7764,6 +7900,7 @@ export async function startGateway({
             config = nextConfig;
             secrets = prunedSecrets;
             invalidateProviderRuntime(providerId);
+            rebindUnreadyIdleSessions(config, secrets);
             return publicGatewayConfig(config, secrets);
           });
           return sendJson(res, 200, snapshot);

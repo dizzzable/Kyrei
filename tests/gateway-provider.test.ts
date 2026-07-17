@@ -188,7 +188,8 @@ describe("gateway provider registry", () => {
     });
     expect(created.providers).toHaveLength(2);
     const local = created.providers.find((provider) => provider.name === "Local two")!;
-    expect(created.activeProviderId).toBe(initial.activeProviderId);
+    // First ready provider (no key required) auto-promotes when the seed default is still unready.
+    expect(created.activeProviderId).toBe(local.id);
 
     const configured = await request<{ providers: unknown[] }>(`/api/providers/${encodeURIComponent(local.id)}/secret`, {
       method: "PUT",
@@ -711,6 +712,12 @@ describe("gateway provider registry", () => {
     await restartGateway({ engineLoader: async () => ({ runKyreiChat, listModels: () => [] }) });
     const initial = await request<{ activeProviderId: string; activeModelId: string }>("/api/config");
     const credential = ["session", "credential"].join("-");
+    // Make the seed default ready first so a secondary provider does not auto-promote.
+    await request(`/api/providers/${initial.activeProviderId}/secret`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "default-ready-credential" }),
+    });
 
     await request("/api/providers", {
       method: "POST",
@@ -1157,6 +1164,66 @@ describe("gateway provider registry", () => {
         },
       }));
       await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+    } finally {
+      stream.close();
+    }
+  });
+
+  it("OOB first-run: creating a ready provider without useAsDefault rebinds idle sessions and chats", async () => {
+    const runKyreiChat = vi.fn(async () => ({ text: "hello", parts: [] }));
+    await restartGateway({ engineLoader: async () => ({ runKyreiChat, listModels: () => [] }) });
+
+    const initial = await request<{ activeProviderId: string; activeModelId: string }>("/api/config");
+    // Fresh install session is snapshotted to the unready default stub.
+    const created = await request<{ id: string; providerId?: string; modelId?: string }>("/api/sessions", {
+      method: "POST",
+    });
+    expect(created.providerId ?? initial.activeProviderId).toBe(initial.activeProviderId);
+
+    // User connects a real provider and pastes a key — without ticking useAsDefault.
+    const activated = await request<{
+      activeProviderId: string;
+      activeModelId: string;
+      providers: Array<{ id: string; hasKey: boolean }>;
+    }>("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: {
+          id: "oob-openai",
+          name: "OpenAI",
+          protocol: "openai-chat",
+          baseURL: "https://api.openai.com/v1",
+          models: [{ id: "gpt-4o-mini" }],
+          requiresApiKey: true,
+        },
+        apiKey: "sk-oob-first-run",
+      }),
+    });
+    expect(activated.activeProviderId).toBe("oob-openai");
+    expect(activated.activeModelId).toBe("gpt-4o-mini");
+    expect(activated.providers.find((provider) => provider.id === "oob-openai")?.hasKey).toBe(true);
+
+    const sessions = await request<{ sessions: Array<{ id: string; providerId?: string; modelId?: string }> }>(
+      "/api/sessions",
+    );
+    const rebound = sessions.sessions.find((session) => session.id === created.id);
+    expect(rebound).toMatchObject({ providerId: "oob-openai", modelId: "gpt-4o-mini" });
+
+    const stream = await openEventStream(created.id);
+    try {
+      await vi.waitFor(() => expect(stream.events.some((event) => event.type === "gateway.ready")).toBe(true));
+      await request("/api/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: created.id, text: "Hi" }),
+      });
+      await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+      expect(runKyreiChat).toHaveBeenCalledWith(expect.objectContaining({
+        providerId: "oob-openai",
+        model: "gpt-4o-mini",
+        apiKey: "sk-oob-first-run",
+      }));
     } finally {
       stream.close();
     }

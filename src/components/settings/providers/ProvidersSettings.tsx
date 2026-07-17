@@ -25,6 +25,7 @@ import {
   providerDraftCredentials,
   providerDraftHasCredentialInput,
   providerDraftModels,
+  shouldDefaultUseAsDefault,
   type ProviderDraft,
 } from "./provider-draft";
 import { validateProviderCredentials } from "../provider-validation";
@@ -230,9 +231,15 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
           templates={templates}
           activeProviderId={config.activeProviderId}
           busy={saving}
-          onConfigure={(provider) => { setErrorKey(null); setDraft(createDraftFromProfile(provider, false)); }}
+          onConfigure={(provider) => {
+            setErrorKey(null);
+            setDraft(createDraftFromProfile(provider, shouldDefaultUseAsDefault(config.providers)));
+          }}
           onManageAccounts={(provider) => { setErrorKey(null); setAccountPoolProvider(provider); }}
-          onConfigureTemplate={(template) => { setErrorKey(null); setDraft(createDraftFromTemplate(template, false)); }}
+          onConfigureTemplate={(template) => {
+            setErrorKey(null);
+            setDraft(createDraftFromTemplate(template, shouldDefaultUseAsDefault(config.providers)));
+          }}
           onUseDefault={(provider) => void activate(provider)}
         />
       )}
@@ -255,7 +262,7 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
         onEditPrimary={(provider) => {
           setAccountPoolProvider(null);
           setErrorKey(null);
-          setDraft(createDraftFromProfile(provider, false));
+          setDraft(createDraftFromProfile(provider, shouldDefaultUseAsDefault(config.providers)));
         }}
         onConfigChanged={refreshConfig}
       />
