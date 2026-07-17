@@ -41,7 +41,11 @@ const ARTIFACT_ROOT_KEYS = new Set([
   "evidence",
   "checks",
   "contradictions",
+  "clarifications",
 ]);
+const REQUIRED_ARTIFACT_ROOT_KEYS = new Set(
+  [...ARTIFACT_ROOT_KEYS].filter((key) => key !== "clarifications"),
+);
 const ARTIFACT_PROVENANCE_KEYS = new Set(["providerId", "modelId", "policyDigest"]);
 const ARTIFACT_METRICS_KEYS = new Set([
   "inputTokens",
@@ -185,7 +189,12 @@ function validArtifactArray(value, validator = () => true) {
  * recovery.
  */
 function validPersistedArtifactEnvelope(artifact, runId, stageIds) {
-  if (!exactKeys(artifact, ARTIFACT_ROOT_KEYS)) return false;
+  if (
+    !plainRecord(artifact)
+    || !Object.keys(artifact).every((key) => ARTIFACT_ROOT_KEYS.has(key))
+    || Object.keys(artifact).length < REQUIRED_ARTIFACT_ROOT_KEYS.size
+    || ![...REQUIRED_ARTIFACT_ROOT_KEYS].every((key) => Object.hasOwn(artifact, key))
+  ) return false;
   let serialized;
   try {
     serialized = JSON.stringify(artifact);
@@ -218,10 +227,21 @@ function validPersistedArtifactEnvelope(artifact, runId, stageIds) {
     if (!Number.isSafeInteger(artifact.metrics[field]) || artifact.metrics[field] < 0) return false;
   }
   if (artifact.metrics.totalTokens !== artifact.metrics.inputTokens + artifact.metrics.outputTokens) return false;
+  const clarificationsValid = artifact.clarifications === undefined
+    || validArtifactArray(artifact.clarifications, (value) => (
+      plainRecord(value)
+      && artifactText(value.id, 512)
+      && artifactText(value.question, 2_000)
+      && artifactText(value.context, 4_000)
+      && (value.options === undefined || validArtifactArray(value.options, (option) => artifactText(option, 320)))
+      && (value.recommended === undefined || artifactText(value.recommended, 160))
+      && typeof value.blocking === "boolean"
+    ));
   return validArtifactArray(artifact.claims, plainRecord)
     && validArtifactArray(artifact.evidence, plainRecord)
     && validArtifactArray(artifact.checks, plainRecord)
-    && validArtifactArray(artifact.contradictions, plainRecord);
+    && validArtifactArray(artifact.contradictions, plainRecord)
+    && clarificationsValid;
 }
 
 async function canonicalArtifactEnvelope(artifact, { runId, stage, sensitiveValues }) {

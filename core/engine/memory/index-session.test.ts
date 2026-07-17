@@ -85,4 +85,38 @@ describe("MemoryIndexSession pool", () => {
     expect(second.length).toBe(first.length);
     await session.release();
   });
+
+  it("reindexes when the pooled vault projection config changes", async () => {
+    const vault = join(ws, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "note.md"), "pooled vault lifecycle fact", "utf8");
+    const enabledVault = {
+      enabled: true,
+      paths: [vault],
+      maxFiles: 50,
+      maxFileChars: 4_000,
+      maxDepth: 4,
+    };
+    const first = await MemoryIndexSession.acquire({
+      workspace: ws,
+      config: { enabled: true, backend: "sqlite" },
+      ltmEnabled: false,
+      planningEnabled: false,
+      vault: enabledVault,
+    });
+    await first.reindexNow();
+    expect((await first.memoryStore!.listDocs({ scope: "project" })).some((d) => d.sourceRef === "vault:markdown")).toBe(true);
+    await first.release();
+
+    const second = await MemoryIndexSession.acquire({
+      workspace: ws,
+      config: { enabled: true, backend: "sqlite" },
+      ltmEnabled: false,
+      planningEnabled: false,
+      vault: { ...enabledVault, enabled: false, paths: [] },
+    });
+    await second.reindexNow();
+    expect((await second.memoryStore!.listDocs({ scope: "project" })).some((d) => d.sourceRef === "vault:markdown")).toBe(false);
+    await second.release();
+  });
 });

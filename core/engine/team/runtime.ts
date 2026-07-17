@@ -224,7 +224,7 @@ export async function createTeamRoleExecutors(
               indexBackend: options.indexBackend ?? "off",
               ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
               ...(options.vectorStore ? { vectorStore: options.vectorStore } : {}),
-              ...(options.config.memory?.vault?.enabled ? { vault: options.config.memory.vault } : {}),
+              ...(options.config.memory?.vault ? { vault: options.config.memory.vault } : {}),
               ...(options.config.memory?.recall ? { recall: options.config.memory.recall } : {}),
               ...(options.config.memory?.citeOrRefuse
                 ? {

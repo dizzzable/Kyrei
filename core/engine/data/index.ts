@@ -20,6 +20,17 @@ function isTransientSqliteOpenError(error: unknown): boolean {
   return /SQLITE_BUSY|database is locked|EAGAIN|EBUSY/i.test(message);
 }
 
+let sqliteFallbackWarned = false;
+
+function warnSqliteFallback(error: unknown): void {
+  if (sqliteFallbackWarned) return;
+  sqliteFallbackWarned = true;
+  console.warn(
+    "[kyrei data] SQLite unavailable, using file backend:",
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
 function openSqliteStores(baseDir: string): Stores {
   const { db, vecOk } = openDb(join(baseDir, "index.db"));
   return {
@@ -66,7 +77,7 @@ export function createStores(baseDir: string): Stores {
     // better-sqlite3 is external and only executes native code here (openDb → new Database).
     return openSqliteStoresWithRetry(baseDir);
   } catch (err) {
-    console.warn("[kyrei data] SQLite unavailable, using file backend:", (err as Error).message);
+    warnSqliteFallback(err);
     return createFileStores(baseDir);
   }
 }
@@ -273,7 +284,7 @@ export async function createStoresAsync(opts: {
   try {
     return openSqliteStoresWithRetry(opts.baseDir);
   } catch (err) {
-    console.warn("[kyrei data] SQLite unavailable, using file backend:", (err as Error).message);
+    warnSqliteFallback(err);
     return createFileStores(opts.baseDir);
   }
 }

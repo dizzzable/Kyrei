@@ -92,6 +92,26 @@ describe("artifact envelopes", () => {
     expect(created.checks).not.toBe(source.checks);
   });
 
+  it("accepts and defensively copies durable human clarification requests", () => {
+    const source = {
+      ...validArtifact(),
+      clarifications: [{
+        id: "intent",
+        question: "Which outcome should the next stage optimize for?",
+        context: "The independent teams found two valid trade-offs.",
+        options: ["reliability", "speed"],
+        recommended: "reliability",
+        blocking: true,
+      }],
+    };
+
+    expect(validateArtifactEnvelope(source)).toEqual({ valid: true, issues: [] });
+    const created = createArtifactEnvelope(source);
+    expect(created.clarifications).toEqual(source.clarifications);
+    expect(created.clarifications).not.toBe(source.clarifications);
+    expect(created.clarifications?.[0]?.options).not.toBe(source.clarifications[0]?.options);
+  });
+
   it("projects the allowlisted schema instead of copying non-JSON extras", () => {
     const hiddenCredential = Symbol("apiKey");
     const artifact = validArtifact();

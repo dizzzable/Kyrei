@@ -222,6 +222,7 @@ function teamPolicy(team: NonNullable<SystemPromptInput["team"]>): string {
       ? "Submit each self-contained question once, without memberId or dependencies. Kyrei fans it out to every configured role; you compare the independent artifacts and produce the acting-model synthesis."
       : "Create small tasks with explicit dependencies. Ask independent roles for claims and evidence, then route contradictions or high-risk conclusions through a critic/verifier task.",
     "Do not treat majority agreement as proof. Check worker artifacts against files, URLs, diagnostics, or tests. Workers are advisers; you remain the acting agent and final integrator.",
+    "If the Team result contains comparison.decision=needs_human or clarificationRequests, stop implementation and ask the human one consolidated blocking question. Include the context, options, recommended default, and what changes based on the answer.",
     "Configured roles:",
     ...roster,
   ].join("\n");

@@ -893,8 +893,12 @@ export interface MemoryIndexReindexResult {
   ok: boolean;
   upserted: number;
   vectorsUpserted: number;
+  sessionUpserted?: number;
   sources: string[];
   status: MemoryIndexRuntimeStatus;
+  projectFiles?: number;
+  projectTruncated?: boolean;
+  projectPruned?: number;
   error?: string;
 }
 

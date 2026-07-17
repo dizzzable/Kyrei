@@ -122,4 +122,86 @@ describe("project memory indexer (Tier A → FTS projection)", () => {
       await stores.close();
     }
   });
+
+  it("prunes Tier-A documents and vectors whose source disappeared", async () => {
+    const memoryDir = join(ws, ".kyrei", "memory");
+    await mkdir(memoryDir, { recursive: true });
+    const memoryPath = join(memoryDir, "MEMORY.md");
+    await writeFile(memoryPath, "obsolete durable memory token", "utf8");
+
+    const stores = createStores(join(ws, ".kyrei", "index"));
+    try {
+      await reindexProjectMemory({
+        workspace: ws,
+        memory: stores.memory,
+        vectors: stores.vectors,
+        ltmEnabled: false,
+        planningEnabled: false,
+      });
+      expect(await stores.memory.getDoc("proj:memory:MEMORY.md")).not.toBeNull();
+
+      await rm(memoryPath);
+      const rebuilt = await reindexProjectMemory({
+        workspace: ws,
+        memory: stores.memory,
+        vectors: stores.vectors,
+        ltmEnabled: false,
+        planningEnabled: false,
+      });
+
+      expect(rebuilt.pruned).toBe(1);
+      expect(await stores.memory.getDoc("proj:memory:MEMORY.md")).toBeNull();
+      expect(await stores.memory.search("obsolete durable memory token")).toEqual([]);
+      const vectorHits = await stores.vectors.query(new Float32Array(256), {
+        k: 20,
+        ownerType: "memory_doc",
+      });
+      expect(vectorHits.some((hit) => hit.ownerId === "proj:memory:MEMORY.md")).toBe(false);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it("chunks long documents and replaces stale vectors on content changes", async () => {
+    const memoryDir = join(ws, ".kyrei", "memory");
+    await mkdir(memoryDir, { recursive: true });
+    const memoryPath = join(memoryDir, "MEMORY.md");
+    await writeFile(
+      memoryPath,
+      `${"durable architecture context ".repeat(240)}\nTAIL_VECTOR_TOKEN`,
+      "utf8",
+    );
+
+    const stores = createStores(join(ws, ".kyrei", "index"));
+    try {
+      await reindexProjectMemory({
+        workspace: ws,
+        memory: stores.memory,
+        vectors: stores.vectors,
+        ltmEnabled: false,
+        planningEnabled: false,
+      });
+      const first = await stores.vectors.query(new Float32Array(256), {
+        k: 100,
+        ownerType: "memory_doc",
+      });
+      expect(first.filter((hit) => hit.ownerId === "proj:memory:MEMORY.md").length).toBeGreaterThan(1);
+
+      await writeFile(memoryPath, "replacement vector body", "utf8");
+      await reindexProjectMemory({
+        workspace: ws,
+        memory: stores.memory,
+        vectors: stores.vectors,
+        ltmEnabled: false,
+        planningEnabled: false,
+      });
+      const second = await stores.vectors.query(new Float32Array(256), {
+        k: 100,
+        ownerType: "memory_doc",
+      });
+      expect(second.filter((hit) => hit.ownerId === "proj:memory:MEMORY.md")).toHaveLength(1);
+    } finally {
+      await stores.close();
+    }
+  });
 });

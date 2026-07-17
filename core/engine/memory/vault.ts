@@ -10,7 +10,8 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, stat, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep, extname, basename } from "node:path";
 import type { MemoryDoc, MemoryStore, VectorStore } from "../data/ports.js";
-import { embedText, getEmbedAdapter, isZeroVector } from "./embed-adapter.js";
+import { embedText, getEmbedAdapter, isZeroVector, splitTextForEmbedding } from "./embed-adapter.js";
+import { normalizeWorkspaceTag, sameWorkspaceTag } from "./workspace-id.js";
 
 export interface VaultConfig {
   enabled: boolean;
@@ -180,13 +181,15 @@ export async function indexVaultIntoMemory(opts: IndexVaultOptions): Promise<{
   upserted: number;
   vectorsUpserted: number;
   files: number;
+  pruned: number;
 }> {
   const cfg = normalizeVaultConfig(opts.vault);
-  if (!cfg.enabled) return { upserted: 0, vectorsUpserted: 0, files: 0 };
-  const files = await scanVaultFiles(cfg);
+  const files = cfg.enabled ? await scanVaultFiles(cfg) : [];
   let upserted = 0;
   let vectorsUpserted = 0;
-  const workspace = opts.workspaceTag || "vault";
+  let pruned = 0;
+  const workspace = opts.workspaceTag ? normalizeWorkspaceTag(opts.workspaceTag) : "vault";
+  const activeIds = new Set<string>();
   const pendingVectors: Array<{
     ownerType: string;
     ownerId: string;
@@ -198,6 +201,7 @@ export async function indexVaultIntoMemory(opts: IndexVaultOptions): Promise<{
 
   for (const f of files) {
     const id = `vault:${contentHash(f.root)}:${f.relativePath}`;
+    activeIds.add(id);
     const doc: MemoryDoc = {
       id,
       scope: "project",
@@ -215,16 +219,24 @@ export async function indexVaultIntoMemory(opts: IndexVaultOptions): Promise<{
     upserted += 1;
     if (opts.vectors) {
       try {
-        const embedding = await embedText(`${doc.title}\n${doc.body}`);
-        if (!isZeroVector(embedding)) {
-          pendingVectors.push({
-            ownerType: "memory_doc",
-            ownerId: doc.id,
-            chunkIndex: 0,
-            model: getEmbedAdapter().modelId,
-            embedding,
-            contentHash: doc.contentHash,
-          });
+        await opts.vectors.deleteByOwner("memory_doc", doc.id);
+      } catch {
+        /* fail-open */
+      }
+      try {
+        const chunks = splitTextForEmbedding(doc.body);
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+          const embedding = await embedText(`${doc.title}\n${chunks[chunkIndex]!}`.trim());
+          if (!isZeroVector(embedding)) {
+            pendingVectors.push({
+              ownerType: "memory_doc",
+              ownerId: doc.id,
+              chunkIndex,
+              model: getEmbedAdapter().modelId,
+              embedding,
+              contentHash: doc.contentHash,
+            });
+          }
         }
       } catch {
         /* fail-open */
@@ -239,7 +251,31 @@ export async function indexVaultIntoMemory(opts: IndexVaultOptions): Promise<{
       vectorsUpserted = 0;
     }
   }
-  return { upserted, vectorsUpserted, files: files.length };
+
+  // Vault files are external source-of-truth. Remove projections for files
+  // that disappeared, moved roots, or were disabled in settings.
+  if (opts.workspaceTag) {
+    try {
+      const existing = await opts.memory.listDocs({ scope: "project" });
+      for (const existingDoc of existing) {
+        if (!sameWorkspaceTag(existingDoc.workspace, workspace)) continue;
+        if (existingDoc.sourceRef !== "vault:markdown" || activeIds.has(existingDoc.id)) continue;
+        await opts.memory.removeDoc(existingDoc.id);
+        if (opts.vectors) {
+          try {
+            await opts.vectors.deleteByOwner("memory_doc", existingDoc.id);
+          } catch {
+            /* fail-open: the memory row is still removed */
+          }
+        }
+        pruned += 1;
+      }
+    } catch {
+      /* fail-open: external vaults must never block project memory rebuild */
+    }
+  }
+
+  return { upserted, vectorsUpserted, files: files.length, pruned };
 }
 
 /** Lightweight lexical search over vault files (no index required). */

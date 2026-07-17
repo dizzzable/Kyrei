@@ -254,7 +254,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         },
         ltmEnabled: Boolean(cfg.memory.ltm?.enabled),
         planningEnabled: Boolean(cfg.planning?.enabled),
-        ...(cfg.memory.vault?.enabled ? { vault: cfg.memory.vault } : {}),
+        ...(cfg.memory.vault ? { vault: cfg.memory.vault } : {}),
       });
       await memoryIndex.reindexNow();
     } catch (indexErr) {

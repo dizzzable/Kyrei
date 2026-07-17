@@ -15,6 +15,7 @@ import type {
   TeamTaskResult,
   TeamTaskSpec,
 } from "./types.js";
+import { compareTeamResults } from "./comparison.js";
 
 const MAX_ARTIFACT_TEXT = 2_400;
 const MAX_ARTIFACT_ITEMS = 16;
@@ -129,6 +130,9 @@ function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamAr
     validation: stringList(value?.validation),
     uncertainties: stringList(value?.uncertainties),
     whatWasNotChecked: stringList(value?.whatWasNotChecked),
+    ...(Array.isArray(value?.clarificationRequests) && value.clarificationRequests.length
+      ? { clarificationRequests: value.clarificationRequests.slice(0, 8) }
+      : {}),
     ...(applicablePatch ? { applicablePatch } : {}),
     ...(sources.length ? { sources } : {}),
     ...(value?.metrics
@@ -187,6 +191,7 @@ function taskResultForModel(result: TeamTaskResult, summaryChars = 600): Record<
         validation: result.artifact.validation.slice(0, 3).map((item) => compact(item, 300)),
         uncertainties: result.artifact.uncertainties.slice(0, 2).map((item) => compact(item, 300)),
         whatWasNotChecked: result.artifact.whatWasNotChecked.slice(0, 2).map((item) => compact(item, 300)),
+        clarificationRequests: (result.artifact.clarificationRequests ?? []).slice(0, 3),
       };
     case "failed":
       return { id: result.task.id, status: result.status, error: compact(errorMessage(result.error), 2_000) };
@@ -202,6 +207,7 @@ function serializeTeamResult(
   workflow: RuntimeTeamSpec["workflow"],
   results: readonly TeamTaskResult[],
   maxChars: number,
+  comparison?: ReturnType<typeof compareTeamResults>,
 ): string {
   const limit = Math.max(500, Math.min(200_000, Math.floor(maxChars) || DEFAULT_MODEL_RESULT_CHARS));
   const completedTasks = results.filter((result) => result.status === "succeeded").length;
@@ -210,6 +216,7 @@ function serializeTeamResult(
     workflow,
     completedTasks,
     failedTasks: results.length - completedTasks,
+    ...(comparison ? { comparison } : {}),
   };
   const tasks: Record<string, unknown>[] = [];
   for (const [index, result] of results.entries()) {
@@ -233,7 +240,25 @@ function serializeTeamResult(
   const omittedTaskCount = results.length - tasks.length;
   const serialized = JSON.stringify({ ...base, tasks, ...(omittedTaskCount ? { omittedTaskCount } : {}) });
   if (serialized.length <= limit) return serialized;
-  return JSON.stringify({ ...base, tasks: [], omittedTaskCount: results.length });
+  const boundedComparison = comparison
+    ? {
+        version: comparison.version,
+        decision: comparison.decision,
+        agreementScore: comparison.agreementScore,
+        claimCount: comparison.claims.length,
+        conflictCount: comparison.conflicts.length,
+        clarificationCount: comparison.clarificationRequests.length,
+      }
+    : undefined;
+  return JSON.stringify({
+    runId,
+    workflow,
+    completedTasks,
+    failedTasks: results.length - completedTasks,
+    ...(boundedComparison ? { comparison: boundedComparison } : {}),
+    tasks: [],
+    omittedTaskCount: results.length,
+  });
 }
 
 export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet {
@@ -479,6 +504,7 @@ export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet
             options.spec.workflow,
             results,
             options.maxResultChars ?? DEFAULT_MODEL_RESULT_CHARS,
+            compareTeamResults(results, options.spec.workflow),
           );
         } catch (error) {
           emitTerminal(combined.signal.aborted ? "interrupted" : "failed", 0, tasks.length);

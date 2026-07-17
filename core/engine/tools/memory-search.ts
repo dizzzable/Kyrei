@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { MemoryStore, SessionStore, VectorStore } from "../data/ports.js";
 import { createLtmBridge } from "../memory/ltm-bridge.js";
 import { createPlanStore } from "../orchestration/plan.js";
-import { embedText, isZeroVector } from "../memory/embed-adapter.js";
+import { embedText, isZeroVector, splitTextForEmbedding } from "../memory/embed-adapter.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 import { normalizeVaultConfig, searchVaultFiles, type VaultConfig } from "../memory/vault.js";
 import {
@@ -330,7 +330,10 @@ async function searchVectors(
   try {
     const embedding = await embedText(query);
     if (isZeroVector(embedding)) return;
-    const knn = await vectors.query(embedding, { k: Math.min(16, limit * 2), ownerType: "memory_doc" });
+    const knn = await vectors.query(embedding, {
+      k: Math.min(64, Math.max(16, limit * 4)),
+      ownerType: "memory_doc",
+    });
     for (const hit of knn) {
       // distance 0 = identical, 2 = opposite; convert to score.
       const sim = Math.max(0, 1 - hit.distance);
@@ -343,7 +346,8 @@ async function searchVectors(
         const doc = await memory.getDoc(hit.ownerId);
         if (doc) {
           title = doc.title ?? doc.id;
-          snippet = clip(doc.body, 280);
+          const chunk = splitTextForEmbedding(doc.body)[hit.chunkIndex];
+          snippet = clip(chunk ?? doc.body, 280);
           path = doc.path;
           source = kindToSource(doc.kind, doc.path);
         }

@@ -27,6 +27,7 @@ interface PoolEntry {
   backend: MemoryIndexBackend | "file";
   refs: number;
   lastUsed: number;
+  projectionSignature: string;
   idleTimer?: ReturnType<typeof setTimeout>;
   reindexInFlight: Promise<void> | null;
   dirty: boolean;
@@ -41,10 +42,18 @@ function poolKey(workspace: string, config: MemoryIndexConfig): string {
   return `${workspace.replace(/\\/g, "/")}::${backend}::${cs}`;
 }
 
-async function ensureEntry(workspace: string, config: MemoryIndexConfig): Promise<PoolEntry | null> {
+async function ensureEntry(
+  workspace: string,
+  config: MemoryIndexConfig,
+  projectionSignature: string,
+): Promise<PoolEntry | null> {
   const key = poolKey(workspace, config);
   const existing = pool.get(key);
   if (existing) {
+    if (existing.projectionSignature !== projectionSignature) {
+      existing.projectionSignature = projectionSignature;
+      existing.dirty = true;
+    }
     if (existing.idleTimer) {
       clearTimeout(existing.idleTimer);
       existing.idleTimer = undefined;
@@ -65,6 +74,7 @@ async function ensureEntry(workspace: string, config: MemoryIndexConfig): Promis
     backend: opened.backend,
     refs: 1,
     lastUsed: Date.now(),
+    projectionSignature,
     reindexInFlight: null,
     dirty: true,
   };
@@ -129,6 +139,14 @@ export interface MemoryIndexSessionOptions {
   vault?: import("./vault.js").VaultConfig;
 }
 
+function projectionSignature(options: MemoryIndexSessionOptions): string {
+  return JSON.stringify({
+    ltmEnabled: options.ltmEnabled !== false,
+    planningEnabled: options.planningEnabled !== false,
+    vault: options.vault ?? null,
+  });
+}
+
 /**
  * Acquired handle for one agent turn (or team fan-out under that turn).
  * Always call `release()` in a finally block.
@@ -152,7 +170,7 @@ export class MemoryIndexSession {
         options.vault,
       );
     }
-    const entry = await ensureEntry(options.workspace, options.config);
+    const entry = await ensureEntry(options.workspace, options.config, projectionSignature(options));
     return new MemoryIndexSession(
       entry,
       Boolean(options.ltmEnabled),

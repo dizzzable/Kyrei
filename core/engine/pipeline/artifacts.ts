@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parsePatch } from "../apply/parse-patch.js";
 import type {
   ArtifactCheck,
+  ArtifactClarification,
   ArtifactClaim,
   ArtifactContradiction,
   ArtifactEnvelope,
@@ -26,6 +27,7 @@ export type ArtifactValidationIssueCode =
   | "duplicate_evidence_id"
   | "duplicate_check_id"
   | "duplicate_contradiction_id"
+  | "duplicate_clarification_id"
   | "dangling_evidence_ref"
   | "dangling_claim_ref"
   | "invalid_contradiction";
@@ -90,10 +92,12 @@ const ROOT_KEYS = new Set([
   "evidence",
   "checks",
   "contradictions",
+  "clarifications",
 ]);
 const CLAIM_KEYS = new Set(["id", "statement", "evidenceIds"]);
 const CHECK_KEYS = new Set(["id", "status", "evidenceIds", "workspaceDigest", "testDigest"]);
 const CONTRADICTION_KEYS = new Set(["id", "claimIds", "summary", "resolved", "resolution"]);
+const CLARIFICATION_KEYS = new Set(["id", "question", "context", "options", "recommended", "blocking"]);
 const PROVENANCE_KEYS = new Set(["providerId", "modelId", "policyDigest"]);
 const METRIC_KEYS = new Set([
   "inputTokens",
@@ -336,7 +340,8 @@ function collectDuplicates(
     | "duplicate_claim_id"
     | "duplicate_evidence_id"
     | "duplicate_check_id"
-    | "duplicate_contradiction_id",
+    | "duplicate_contradiction_id"
+    | "duplicate_clarification_id",
   field: string,
   issues: ArtifactValidationIssue[],
 ): Set<string> {
@@ -465,6 +470,9 @@ export function validateArtifactEnvelope(artifact: unknown): ArtifactValidationR
   const evidence = readCollection(artifact, "evidence", issues);
   const checks = readCollection(artifact, "checks", issues);
   const contradictions = readCollection(artifact, "contradictions", issues);
+  const clarifications = artifact.clarifications === undefined
+    ? []
+    : readCollection(artifact, "clarifications", issues);
 
   const claimIds = collectDuplicates(claims, "duplicate_claim_id", "claims", issues);
   const evidenceIds = collectDuplicates(evidence, "duplicate_evidence_id", "evidence", issues);
@@ -473,6 +481,12 @@ export function validateArtifactEnvelope(artifact: unknown): ArtifactValidationR
     contradictions,
     "duplicate_contradiction_id",
     "contradictions",
+    issues,
+  );
+  collectDuplicates(
+    clarifications,
+    "duplicate_clarification_id",
+    "clarifications",
     issues,
   );
 
@@ -631,6 +645,22 @@ export function validateArtifactEnvelope(artifact: unknown): ArtifactValidationR
           referencedId: claimId,
         });
       }
+    }
+  }
+
+  for (const { index, value } of clarifications) {
+    const id = recordId(value);
+    rejectUnknownKeys(value, CLARIFICATION_KEYS, `clarifications[${index}]`, issues, id);
+    validateText(value.question, "clarifications.question", issues, id, 2_000);
+    validateText(value.context, "clarifications.context", issues, id, 4_000);
+    if (value.options !== undefined) {
+      readTextCollection(value.options, "clarifications.options", issues);
+    }
+    if (value.recommended !== undefined) {
+      validateText(value.recommended, "clarifications.recommended", issues, id, 160);
+    }
+    if (typeof value.blocking !== "boolean") {
+      issues.push({ code: "invalid_structure", field: "clarifications.blocking", ...(id ? { id } : {}) });
     }
   }
 
@@ -831,6 +861,18 @@ export function createArtifactEnvelope(artifact: unknown): ArtifactEnvelope {
     evidence: artifact.evidence.map(cloneEvidence),
     checks: artifact.checks.map(cloneCheck),
     contradictions: artifact.contradictions.map(cloneContradiction),
+    ...(artifact.clarifications
+      ? {
+          clarifications: artifact.clarifications.map((clarification) => ({
+            id: clarification.id,
+            question: clarification.question,
+            context: clarification.context,
+            ...(clarification.options ? { options: [...clarification.options] } : {}),
+            ...(clarification.recommended !== undefined ? { recommended: clarification.recommended } : {}),
+            blocking: clarification.blocking,
+          } satisfies ArtifactClarification)),
+        }
+      : {}),
   };
 }
 

@@ -2,7 +2,7 @@
  * OOB: open project folder → local DBs exist without manual Rebuild.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { access, mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startGateway } from "../core/gateway.js";
@@ -73,5 +73,54 @@ describe("gateway workspace bootstrap OOB", () => {
     expect(status.state).toBe("ready");
     expect(status.tierA.memoryMd).toBe(true);
     expect(status.docCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("explicit memory rebuild refreshes project intelligence before projection", async () => {
+    await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ workspace }),
+    });
+    await mkdir(join(workspace, "hermes"), { recursive: true });
+    await writeFile(join(workspace, "hermes", "reference.ts"), "export const stale = true;\n", "utf8");
+    await writeFile(
+      join(workspace, ".kyrei", "intel", "project-index.json"),
+      JSON.stringify({
+        version: 1,
+        generatedAt: "2020-01-01T00:00:00.000Z",
+        workspace,
+        fileCount: 10_000,
+        truncated: true,
+        languages: { TypeScript: 10_000 },
+        topLevel: ["hermes"],
+        entryCandidates: ["hermes/reference.ts"],
+        nodes: [{ path: "hermes/reference.ts", language: "TypeScript" }],
+        edges: [],
+      }),
+      "utf8",
+    );
+
+    const rebuilt = await request<{
+      ok: boolean;
+      sources: string[];
+      projectFiles?: number;
+      projectTruncated?: boolean;
+    }>("/api/memory/index/reindex", { method: "POST" });
+    const persisted = JSON.parse(
+      await readFile(join(workspace, ".kyrei", "intel", "project-index.json"), "utf8"),
+    ) as {
+      fileCount: number;
+      truncated: boolean;
+      nodes: Array<{ path: string }>;
+      entryCandidates: string[];
+    };
+
+    expect(rebuilt.ok).toBe(true);
+    expect(rebuilt.sources).toContain("project_index");
+    expect(rebuilt.projectFiles).toBe(1);
+    expect(rebuilt.projectTruncated).toBe(false);
+    expect(persisted.fileCount).toBe(1);
+    expect(persisted.truncated).toBe(false);
+    expect(persisted.nodes.map((node) => node.path)).toEqual(["src/main.ts"]);
+    expect(persisted.entryCandidates).toEqual(["src/main.ts"]);
   });
 });

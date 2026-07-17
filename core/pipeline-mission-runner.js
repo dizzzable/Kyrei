@@ -60,6 +60,30 @@ function dependencyArtifacts(run, stage) {
   const stageIds = (isWriteStage(stage) || stage.kind === "truth-gate")
     ? [...ancestorStageIds(run, stage)]
     : [...(stage.dependsOn ?? [])];
+  const selectedStageIds = new Set(stageIds);
+  for (const approval of run.approvals ?? []) {
+    if (approval?.status !== "approved" || !selectedStageIds.has(approval.stageId)) continue;
+    let decision = "";
+    try {
+      decision = JSON.stringify(approval.metadata ?? {});
+    } catch {
+      decision = "";
+    }
+    const values = byStage.get(approval.stageId) ?? [];
+    values.push({
+      id: `human:${approval.id}`,
+      stageId: approval.stageId,
+      summary: [
+        approval.reason || "Human decision approved.",
+        decision && decision !== "{}" ? `Human decision: ${decision.slice(0, 4_000)}` : "",
+      ].filter(Boolean).join("\n"),
+      provenance: { providerId: "human", modelId: "operator", policyDigest: "human-decision" },
+      uncertainties: [],
+      unchecked: [],
+      humanDecision: structuredClone(approval.metadata ?? {}),
+    });
+    byStage.set(approval.stageId, values);
+  }
   return Object.fromEntries(stageIds.map((stageId) => [stageId, byStage.get(stageId) ?? []]));
 }
 
@@ -374,11 +398,27 @@ export class PipelineMissionRunner {
 
   async _requestApproval(run, stage) {
     try {
+      const dependencies = dependencyArtifacts(run, stage);
+      const clarificationRequests = Object.values(dependencies)
+        .flatMap((artifacts) => (Array.isArray(artifacts) ? artifacts : []))
+        .flatMap((artifact) => (Array.isArray(artifact?.clarifications) ? artifact.clarifications : []))
+        .slice(0, 8);
+      const isClarification = clarificationRequests.length > 0;
       await this.runStore.recordApproval(run.runId, {
         stageId: stage.id,
         status: "requested",
+        kind: isClarification ? "clarification" : "stage",
         actor: "pipeline-runner",
-        reason: "human approval required before the next mission stage",
+        reason: isClarification
+          ? "human clarification required before the next mission stage"
+          : "human approval required before the next mission stage",
+        ...(isClarification
+          ? {
+              metadata: {
+                clarificationRequests: structuredClone(clarificationRequests),
+              },
+            }
+          : {}),
       });
     } catch (error) {
       if (errorCode(error) === "pipeline_approval_transition_invalid") return (await this.runStore.load(run.runId)) ?? run;

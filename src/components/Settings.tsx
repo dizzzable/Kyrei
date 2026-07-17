@@ -888,6 +888,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
               {visibleSection === "usage" && (
                 <UsageSettings
                   config={config}
+                  getCurrentEngine={() => engineRef.current}
                   onSaved={(next) => {
                     setProvider(next.provider);
                     setModel(next.model);

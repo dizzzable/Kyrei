@@ -50,10 +50,13 @@ describe("project intelligence index", () => {
   it("excludes the repository-local Hermes reference tree", async () => {
     await mkdir(join(workspace, "hermes"), { recursive: true });
     await writeFile(join(workspace, "hermes", "reference.py"), "print('reference')\n", "utf8");
+    await mkdir(join(workspace, "output", "playwright"), { recursive: true });
+    await writeFile(join(workspace, "output", "playwright", "fixture.ts"), "export const fixture = true;\n", "utf8");
 
     const index = await buildProjectIndex(workspace);
 
     expect(index.nodes.some((node) => node.path.startsWith("hermes/"))).toBe(false);
+    expect(index.nodes.some((node) => node.path.startsWith("output/"))).toBe(false);
   });
 
   it("incremental: only re-parses changed files on second build", async () => {

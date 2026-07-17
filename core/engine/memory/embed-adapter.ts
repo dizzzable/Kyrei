@@ -52,6 +52,47 @@ export async function embedText(text: string): Promise<Float32Array> {
 }
 
 /**
+ * Split long searchable bodies into stable overlapping embedding windows.
+ * The document itself remains a single FTS row; chunks only improve vector
+ * recall and are addressed by VectorStore.chunkIndex.
+ */
+export function splitTextForEmbedding(
+  text: string,
+  options: { maxChars?: number; overlap?: number; maxChunks?: number } = {},
+): string[] {
+  const value = text.trim();
+  if (!value) return [];
+  const maxChars = Math.max(256, Math.floor(options.maxChars ?? 1_800));
+  const overlap = Math.max(0, Math.min(maxChars - 1, Math.floor(options.overlap ?? 180)));
+  const maxChunks = Math.max(1, Math.floor(options.maxChunks ?? 16));
+  if (value.length <= maxChars) return [value];
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < value.length && chunks.length < maxChunks) {
+    let end = Math.min(value.length, start + maxChars);
+    if (end < value.length) {
+      const boundary = value.lastIndexOf("\n", end);
+      if (boundary > start + Math.floor(maxChars * 0.55)) end = boundary;
+    }
+    const chunk = value.slice(start, end).trim();
+    if (chunk) chunks.push(chunk);
+    if (end >= value.length) break;
+    const next = Math.max(start + 1, end - overlap);
+    if (next <= start) break;
+    start = next;
+  }
+
+  // Preserve the tail when a very large document hits the chunk cap. This
+  // keeps conclusions/appendices searchable without unbounded API calls.
+  if (chunks.length >= maxChunks && start < value.length - maxChars) {
+    const tail = value.slice(Math.max(0, value.length - maxChars)).trim();
+    if (tail && tail !== chunks[chunks.length - 1]) chunks[chunks.length - 1] = tail;
+  }
+  return chunks;
+}
+
+/**
  * Configure process-wide embedder from engine config. Fail-open to lexical
  * when HTTP config is incomplete or invalid.
  */

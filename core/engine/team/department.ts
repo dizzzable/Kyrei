@@ -16,6 +16,7 @@ import { executeTeamTaskGraph } from "./execute.js";
 import { createTeamRoleExecutors } from "./runtime.js";
 import type { TeamArtifact, TeamArtifactMetrics, TeamDepartmentMetrics, TeamTaskResult, TeamTaskSpec } from "./types.js";
 import { aggregateTeamMetrics } from "./usage.js";
+import { compareTeamResults } from "./comparison.js";
 
 const MAX_TEXT = 4_000;
 const MAX_ITEMS = 24;
@@ -30,6 +31,15 @@ export interface TeamDepartmentInputArtifact {
   };
   readonly uncertainties?: readonly string[];
   readonly unchecked?: readonly string[];
+  readonly clarifications?: readonly {
+    readonly id: string;
+    readonly question: string;
+    readonly context: string;
+    readonly options?: readonly string[];
+    readonly recommended?: string;
+    readonly blocking: boolean;
+  }[];
+  readonly humanDecision?: unknown;
 }
 
 export interface RunTeamDepartmentOptions {
@@ -56,6 +66,7 @@ export interface TeamDepartmentResult {
   readonly artifact: TeamArtifact;
   readonly taskResults: readonly TeamTaskResult[];
   readonly metrics: TeamDepartmentMetrics;
+  readonly comparison: ReturnType<typeof compareTeamResults>;
 }
 
 
@@ -109,6 +120,26 @@ function redactedArtifact(value: TeamArtifact, sensitiveValues: readonly string[
     validation: strings(value.validation, MAX_ITEMS, 800, sensitiveValues),
     uncertainties: strings(value.uncertainties, MAX_ITEMS, 800, sensitiveValues),
     whatWasNotChecked: strings(value.whatWasNotChecked, MAX_ITEMS, 800, sensitiveValues),
+    ...(value.clarificationRequests?.length
+      ? {
+          clarificationRequests: value.clarificationRequests.slice(0, 8).map((request) => ({
+            id: text(request.id, 120, sensitiveValues),
+            question: text(request.question, 2_000, sensitiveValues),
+            context: text(request.context, 4_000, sensitiveValues),
+            ...(request.options?.length
+              ? {
+                  options: request.options.slice(0, 8).map((option) => ({
+                    id: text(option.id, 80, sensitiveValues),
+                    label: text(option.label, 300, sensitiveValues),
+                    ...(option.impact ? { impact: text(option.impact, 600, sensitiveValues) } : {}),
+                  })),
+                }
+              : {}),
+            ...(request.recommended ? { recommended: text(request.recommended, 80, sensitiveValues) } : {}),
+            blocking: request.blocking === true,
+          })),
+        }
+      : {}),
     ...(applicablePatch ? { applicablePatch } : {}),
     ...(value.metrics ? { metrics: aggregateTeamMetrics([value.metrics], 1) } : {}),
   };
@@ -152,6 +183,27 @@ function dependencyContext(artifacts: readonly TeamDepartmentInputArtifact[], se
       .map((value) => text(value, 200, sensitiveValues)),
     uncertainties: strings(artifact.uncertainties, 4, 300, sensitiveValues),
     unchecked: strings(artifact.unchecked, 4, 300, sensitiveValues),
+    clarifications: (artifact.clarifications ?? []).slice(0, 4).flatMap((request) => {
+      const question = text(request.question, 1_000, sensitiveValues);
+      const context = text(request.context, 1_200, sensitiveValues);
+      return question ? [{
+        id: text(request.id, 160, sensitiveValues),
+        question,
+        context,
+        options: strings(request.options, 8, 300, sensitiveValues),
+        recommended: text(request.recommended, 160, sensitiveValues),
+        blocking: request.blocking === true,
+      }] : [];
+    }),
+    humanDecision: artifact.humanDecision === undefined
+      ? undefined
+      : (() => {
+          try {
+            return JSON.parse(text(JSON.stringify(artifact.humanDecision), 4_000, sensitiveValues));
+          } catch {
+            return undefined;
+          }
+        })(),
   })).filter((artifact) => artifact.artifactId && artifact.sourceStage && artifact.summary);
   if (!rows.length) return "";
   return JSON.stringify({
@@ -457,6 +509,10 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
     );
     observedTaskResults = taskResults;
     const metrics = departmentMetrics(taskResults, started, taskMetrics);
+    const comparison = compareTeamResults(
+      taskResults.filter((result) => result.task.id !== "synthesis"),
+      "department",
+    );
     const completed = taskResults.filter(completedTask).length;
     const failed = taskResults.length - completed;
     if (combined.signal.aborted) {
@@ -502,7 +558,7 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
     }
     emitTerminal(failed ? "failed" : "completed", completed, failed);
     if (failed) throw new TeamDepartmentRunError("team_department_task_failed", metrics);
-    return { runId, artifact: final.artifact, taskResults, metrics };
+    return { runId, artifact: final.artifact, taskResults, metrics, comparison };
   } catch (error) {
     emitTerminal(combined.signal.aborted ? "interrupted" : "failed", 0, tasks.length);
     if (error instanceof TeamDepartmentRunError) throw error;

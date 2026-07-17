@@ -8,8 +8,9 @@
 
 import { createHash } from "node:crypto";
 import type { MemoryDoc, MemoryStore, VectorStore } from "../data/ports.js";
-import { getEmbedAdapter, embedText, isZeroVector } from "./embed-adapter.js";
+import { getEmbedAdapter, embedText, isZeroVector, splitTextForEmbedding } from "./embed-adapter.js";
 import { redact } from "../security/secrets.js";
+import { normalizeWorkspaceTag, sameWorkspaceTag } from "./workspace-id.js";
 
 export interface ProjectableSessionMessage {
   id?: string;
@@ -110,8 +111,10 @@ async function pruneSessionDocs(
 ): Promise<number> {
   let pruned = 0;
   try {
-    const docs = await memory.listDocs({ scope: "session", workspace });
+    const canonicalWorkspace = normalizeWorkspaceTag(workspace);
+    const docs = await memory.listDocs({ scope: "session" });
     for (const d of docs) {
+      if (!sameWorkspaceTag(d.workspace, canonicalWorkspace)) continue;
       const match =
         d.sourceRef === `session:${sessionId}`
         || d.id.startsWith(`sess:${sessionId}:`)
@@ -138,6 +141,7 @@ export async function projectSessionsIntoMemory(
   const maxMessages = opts.maxMessagesPerSession ?? 80;
   const maxChars = opts.maxCharsPerMessage ?? 4_000;
   const pruneStale = opts.pruneStale !== false;
+  const workspace = normalizeWorkspaceTag(opts.workspace);
   let upserted = 0;
   let vectorsUpserted = 0;
   let pruned = 0;
@@ -153,7 +157,7 @@ export async function projectSessionsIntoMemory(
   const slice = sessions.slice(0, maxSessions);
   for (const session of slice) {
     if (pruneStale) {
-      pruned += await pruneSessionDocs(opts.memory, session.id, opts.workspace);
+      pruned += await pruneSessionDocs(opts.memory, session.id, workspace);
     }
     const msgs = session.messages
       .filter((m) => {
@@ -174,7 +178,7 @@ export async function projectSessionsIntoMemory(
         scope: "session",
         kind: "notes",
         path: `session/${session.id}/${msgKey}`,
-        workspace: opts.workspace,
+        workspace,
         title: scrub(`${session.title || session.id} · ${m.role ?? "msg"}`, opts.sensitiveValues),
         body: `[${m.role ?? "message"}] ${body}`,
         contentHash: contentHash(body),
@@ -190,16 +194,24 @@ export async function projectSessionsIntoMemory(
       upserted += 1;
       if (opts.vectors) {
         try {
-          const embedding = await embedText(`${doc.title}\n${doc.body}`);
-          if (!isZeroVector(embedding)) {
-            pendingVectors.push({
-              ownerType: "memory_doc",
-              ownerId: id,
-              chunkIndex: 0,
-              model: getEmbedAdapter().modelId,
-              embedding,
-              contentHash: doc.contentHash,
-            });
+          await opts.vectors.deleteByOwner("memory_doc", id);
+        } catch {
+          /* fail-open */
+        }
+        try {
+          const chunks = splitTextForEmbedding(doc.body);
+          for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+            const embedding = await embedText(`${doc.title}\n${chunks[chunkIndex]!}`.trim());
+            if (!isZeroVector(embedding)) {
+              pendingVectors.push({
+                ownerType: "memory_doc",
+                ownerId: id,
+                chunkIndex,
+                model: getEmbedAdapter().modelId,
+                embedding,
+                contentHash: doc.contentHash,
+              });
+            }
           }
         } catch {
           /* fail-open */

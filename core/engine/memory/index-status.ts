@@ -6,6 +6,10 @@
 import { access, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createStores, createStoresAsync, type Stores } from "../data/index.js";
+import {
+  buildProjectIndexIncremental,
+  persistProjectIndex,
+} from "../intel/project-index.js";
 import type { MemoryIndexConfig } from "./index-backend.js";
 import { reindexProjectMemory } from "./project-indexer.js";
 import {
@@ -13,6 +17,8 @@ import {
   type ProjectableSession,
 } from "./session-project.js";
 import { configureEmbedAdapterFromConfig, type EmbedConfig } from "./embed-adapter.js";
+import type { VaultConfig } from "./vault.js";
+import { normalizeWorkspaceTag, sameWorkspaceTag } from "./workspace-id.js";
 
 export interface MemoryIndexStatus {
   state: "ready" | "disabled" | "no_workspace" | "error";
@@ -82,7 +88,7 @@ export async function inspectWorkspaceMemoryIndex(opts: {
   workspace?: string | null;
   config?: MemoryIndexConfig;
 }): Promise<MemoryIndexStatus> {
-  const workspace = opts.workspace?.trim() || "";
+  const workspace = opts.workspace?.trim() ? normalizeWorkspaceTag(opts.workspace) : "";
   const config: MemoryIndexConfig = {
     enabled: opts.config?.enabled !== false,
     backend: opts.config?.backend === "postgres"
@@ -136,9 +142,9 @@ export async function inspectWorkspaceMemoryIndex(opts: {
   let stores: Stores | null = null;
   try {
     stores = await openStores(workspace, config);
-    const docs = await stores.memory.listDocs({ workspace });
-    // Also count docs without workspace filter (some legacy rows may omit it).
-    const all = docs.length ? docs : await stores.memory.listDocs({});
+    const all = (await stores.memory.listDocs({})).filter((doc) =>
+      !doc.workspace || sameWorkspaceTag(doc.workspace, workspace)
+    );
     return {
       state: "ready",
       enabled: true,
@@ -186,6 +192,14 @@ export async function reindexWorkspaceMemoryIndex(opts: {
   sessions?: readonly ProjectableSession[];
   /** Exact secret values scrubbed from session projections. */
   sensitiveValues?: readonly string[];
+  /** External markdown vault config, including disabled state for pruning. */
+  vault?: VaultConfig;
+  /**
+   * Refresh the deterministic project graph before rebuilding the memory
+   * projection. Reserved for explicit operator rebuilds because repository
+   * scanning can be too expensive for every memory mutation.
+   */
+  refreshProjectIndex?: boolean;
 }): Promise<{
   ok: boolean;
   upserted: number;
@@ -193,6 +207,9 @@ export async function reindexWorkspaceMemoryIndex(opts: {
   sessionUpserted: number;
   sources: string[];
   status: MemoryIndexStatus;
+  projectFiles?: number;
+  projectTruncated?: boolean;
+  projectPruned?: number;
   error?: string;
 }> {
   const config: MemoryIndexConfig = {
@@ -219,7 +236,15 @@ export async function reindexWorkspaceMemoryIndex(opts: {
   }
 
   let stores: Stores | null = null;
+  let projectFiles: number | undefined;
+  let projectTruncated: boolean | undefined;
   try {
+    if (opts.refreshProjectIndex) {
+      const projectIndex = await buildProjectIndexIncremental(opts.workspace);
+      await persistProjectIndex(opts.workspace, projectIndex);
+      projectFiles = projectIndex.fileCount;
+      projectTruncated = projectIndex.truncated;
+    }
     if (config.embed) {
       configureEmbedAdapterFromConfig(config.embed as EmbedConfig);
     }
@@ -231,9 +256,11 @@ export async function reindexWorkspaceMemoryIndex(opts: {
       vectors: stores.vectors,
       ltmEnabled: opts.ltmEnabled !== false,
       planningEnabled: opts.planningEnabled !== false,
+      ...(opts.vault !== undefined ? { vault: opts.vault } : {}),
     });
     let sessionUpserted = 0;
     const sources = [...result.sources];
+    if (opts.refreshProjectIndex) sources.unshift("project_index");
     // Cap session projection so Settings "Rebuild" cannot hang for hours on huge chat corpora.
     const sessionCap = 20;
     const sessions = opts.sessions?.length
@@ -265,6 +292,9 @@ export async function reindexWorkspaceMemoryIndex(opts: {
       sessionUpserted,
       sources,
       status,
+      ...(projectFiles !== undefined ? { projectFiles } : {}),
+      ...(projectTruncated !== undefined ? { projectTruncated } : {}),
+      ...(result.pruned > 0 ? { projectPruned: result.pruned } : {}),
     };
   } catch (error) {
     if (stores) {
@@ -282,6 +312,8 @@ export async function reindexWorkspaceMemoryIndex(opts: {
       sessionUpserted: 0,
       sources: [],
       status,
+      ...(projectFiles !== undefined ? { projectFiles } : {}),
+      ...(projectTruncated !== undefined ? { projectTruncated } : {}),
       error: error instanceof Error ? error.message : String(error),
     };
   }

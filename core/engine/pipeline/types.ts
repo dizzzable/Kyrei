@@ -214,6 +214,15 @@ export interface ArtifactContradiction {
   readonly resolution?: string;
 }
 
+export interface ArtifactClarification {
+  readonly id: string;
+  readonly question: string;
+  readonly context: string;
+  readonly options?: readonly string[];
+  readonly recommended?: string;
+  readonly blocking: boolean;
+}
+
 export type ArtifactKind =
   | "department"
   | "action"
@@ -257,4 +266,6 @@ export interface ArtifactEnvelope {
   readonly evidence: readonly EvidenceRef[];
   readonly checks: readonly ArtifactCheck[];
   readonly contradictions: readonly ArtifactContradiction[];
+  /** Optional human-intent questions; omitted by legacy artifacts. */
+  readonly clarifications?: readonly ArtifactClarification[];
 }

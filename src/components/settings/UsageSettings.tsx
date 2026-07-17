@@ -61,12 +61,49 @@ function reliabilityFromEngine(engine: Record<string, unknown> | undefined): {
   };
 }
 
+export function withUsageBudget(
+  engine: Record<string, unknown> | undefined,
+  budget: UsageBudgetConfig,
+): Record<string, unknown> {
+  return {
+    ...(engine ?? {}),
+    usageBudget: {
+      enabled: budget.enabled,
+      window: budget.window,
+      softCostUsd: budget.softCostUsd,
+      hardCostUsd: budget.hardCostUsd,
+      softTokens: budget.softTokens,
+      hardTokens: budget.hardTokens,
+    },
+  };
+}
+
+export function withReliabilityPolicy(
+  engine: Record<string, unknown> | undefined,
+  policy: ReturnType<typeof reliabilityFromEngine>,
+): Record<string, unknown> {
+  const previousReliability = engine && typeof engine.reliability === "object" && engine.reliability
+    ? engine.reliability as Record<string, unknown>
+    : {};
+  return {
+    ...(engine ?? {}),
+    reliability: {
+      ...previousReliability,
+      longTaskPlanGate: policy.longTaskPlanGate,
+      postEditVerify: policy.postEditVerify,
+      verifyBeforeDone: policy.verifyBeforeDone,
+    },
+  };
+}
+
 interface UsageSettingsProps {
   config?: AppConfig | null;
+  /** Reads the Settings modal's latest engine draft, not a stale config prop. */
+  getCurrentEngine?: () => Record<string, unknown>;
   onSaved?: (config: AppConfig) => void;
 }
 
-export function UsageSettings({ config, onSaved }: UsageSettingsProps) {
+export function UsageSettings({ config, getCurrentEngine, onSaved }: UsageSettingsProps) {
   const { t } = useI18n();
   const [days, setDays] = useState(30);
   const [summary, setSummary] = useState<UsageSummary | null>(null);
@@ -106,17 +143,7 @@ export function UsageSettings({ config, onSaved }: UsageSettingsProps) {
     setBudgetBusy(true);
     setBudgetFailed(false);
     try {
-      const engine = {
-        ...(config.engine ?? {}),
-        usageBudget: {
-          enabled: budgetDraft.enabled,
-          window: budgetDraft.window,
-          softCostUsd: budgetDraft.softCostUsd,
-          hardCostUsd: budgetDraft.hardCostUsd,
-          softTokens: budgetDraft.softTokens,
-          hardTokens: budgetDraft.hardTokens,
-        },
-      };
+      const engine = withUsageBudget(getCurrentEngine?.() ?? config.engine, budgetDraft);
       const next = await gateway.setConfig({ engine });
       onSaved?.(next);
       setBudgetSaved(true);
@@ -149,18 +176,7 @@ export function UsageSettings({ config, onSaved }: UsageSettingsProps) {
     setPolicyBusy(true);
     setPolicyFailed(false);
     try {
-      const prevReliability = config.engine && typeof config.engine.reliability === "object" && config.engine.reliability
-        ? config.engine.reliability as Record<string, unknown>
-        : {};
-      const engine = {
-        ...(config.engine ?? {}),
-        reliability: {
-          ...prevReliability,
-          longTaskPlanGate: policyDraft.longTaskPlanGate,
-          postEditVerify: policyDraft.postEditVerify,
-          verifyBeforeDone: policyDraft.verifyBeforeDone,
-        },
-      };
+      const engine = withReliabilityPolicy(getCurrentEngine?.() ?? config.engine, policyDraft);
       const next = await gateway.setConfig({ engine });
       onSaved?.(next);
       setPolicySaved(true);

@@ -47,6 +47,48 @@ export interface TeamSourceReceipt {
   readonly fetchedAt: string;
 }
 
+export interface TeamClarificationOption {
+  readonly id: string;
+  readonly label: string;
+  readonly impact?: string;
+}
+
+export interface TeamClarificationRequest {
+  readonly id: string;
+  readonly question: string;
+  readonly context: string;
+  readonly options?: readonly TeamClarificationOption[];
+  readonly recommended?: string;
+  readonly blocking: boolean;
+}
+
+export type TeamComparisonDecision = "converged" | "needs_verification" | "needs_human";
+
+export interface TeamComparisonClaim {
+  readonly id: string;
+  readonly taskId: string;
+  readonly summary: string;
+  readonly confidence: number;
+  readonly evidence: readonly string[];
+  readonly provenance: readonly string[];
+}
+
+export interface TeamComparisonConflict {
+  readonly id: string;
+  readonly claimIds: readonly string[];
+  readonly summary: string;
+  readonly resolved: false;
+}
+
+export interface TeamComparison {
+  readonly version: 1;
+  readonly decision: TeamComparisonDecision;
+  readonly agreementScore: number;
+  readonly claims: readonly TeamComparisonClaim[];
+  readonly conflicts: readonly TeamComparisonConflict[];
+  readonly clarificationRequests: readonly TeamClarificationRequest[];
+}
+
 export interface TeamArtifact {
   readonly taskId: string;
   readonly summary: string;
@@ -56,6 +98,8 @@ export interface TeamArtifact {
   readonly validation: readonly string[];
   readonly uncertainties: readonly string[];
   readonly whatWasNotChecked: readonly string[];
+  /** Questions that require the acting orchestrator or human, never a worker-to-worker chat. */
+  readonly clarificationRequests?: readonly TeamClarificationRequest[];
   /**
    * Optional context-anchored patch for pipeline implementation stages.
    * Multi-line body must be preserved (never whitespace-collapsed). The

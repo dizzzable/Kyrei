@@ -12,8 +12,9 @@ import { join } from "node:path";
 import type { MemoryDoc, MemoryStore, VectorStore } from "../data/ports.js";
 import { createLtmBridge } from "./ltm-bridge.js";
 import { createPlanStore } from "../orchestration/plan.js";
-import { getEmbedAdapter, embedText, isZeroVector } from "./embed-adapter.js";
+import { getEmbedAdapter, embedText, isZeroVector, splitTextForEmbedding } from "./embed-adapter.js";
 import { indexVaultIntoMemory, normalizeVaultConfig } from "./vault.js";
+import { normalizeWorkspaceTag, sameWorkspaceTag } from "./workspace-id.js";
 
 export interface ReindexProjectMemoryOptions {
   workspace: string;
@@ -33,6 +34,7 @@ export interface ReindexProjectMemoryOptions {
 export interface ReindexProjectMemoryResult {
   upserted: number;
   vectorsUpserted: number;
+  pruned: number;
   sources: string[];
   backendNote?: string;
 }
@@ -64,10 +66,13 @@ function doc(partial: Omit<MemoryDoc, "contentHash" | "updatedAt"> & { body: str
 export async function reindexProjectMemory(
   opts: ReindexProjectMemoryOptions,
 ): Promise<ReindexProjectMemoryResult> {
-  const { workspace, memory, vectors } = opts;
+  const workspace = normalizeWorkspaceTag(opts.workspace);
+  const { memory, vectors } = opts;
   const sources: string[] = [];
   let upserted = 0;
   let vectorsUpserted = 0;
+  let pruned = 0;
+  const projectedIds = new Set<string>();
   const pendingVectors: Array<{
     ownerType: string;
     ownerId: string;
@@ -79,20 +84,29 @@ export async function reindexProjectMemory(
 
   const upsert = async (d: MemoryDoc): Promise<void> => {
     await memory.upsertDoc(d);
+    projectedIds.add(d.id);
     upserted += 1;
     if (vectors) {
-      const text = `${d.title ?? ""}\n${d.body}`.trim();
       try {
-        const embedding = await embedText(text);
-        if (!isZeroVector(embedding)) {
-          pendingVectors.push({
-            ownerType: "memory_doc",
-            ownerId: d.id,
-            chunkIndex: 0,
-            model: getEmbedAdapter().modelId,
-            embedding,
-            contentHash: d.contentHash,
-          });
+        // Remove rows for prior content/model before writing the new chunks.
+        await vectors.deleteByOwner("memory_doc", d.id);
+      } catch {
+        /* fail-open: embedding below may still refresh the active chunk */
+      }
+      try {
+        const chunks = splitTextForEmbedding(d.body);
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+          const embedding = await embedText(`${d.title ?? ""}\n${chunks[chunkIndex]!}`.trim());
+          if (!isZeroVector(embedding)) {
+            pendingVectors.push({
+              ownerType: "memory_doc",
+              ownerId: d.id,
+              chunkIndex,
+              model: getEmbedAdapter().modelId,
+              embedding,
+              contentHash: d.contentHash,
+            });
+          }
         }
       } catch {
         /* fail-open: skip vector for this doc */
@@ -331,18 +345,22 @@ export async function reindexProjectMemory(
 
   // Wave C3: external markdown vault (opt-in paths).
   {
-    const vaultCfg = normalizeVaultConfig(opts.vault);
-    if (vaultCfg.enabled && vaultCfg.paths.length) {
+    // Only an explicitly supplied config owns the vault lifecycle. This keeps
+    // legacy callers from deleting external projections accidentally while
+    // allowing gateway/session rebuild paths to prune disabled vaults.
+    if (opts.vault !== undefined) {
       try {
+        const vaultCfg = normalizeVaultConfig(opts.vault);
         const vaultResult = await indexVaultIntoMemory({
           vault: vaultCfg,
           memory,
           ...(vectors ? { vectors } : {}),
           workspaceTag: workspace,
         });
-        if (vaultResult.upserted) {
+        if (vaultResult.upserted || vaultResult.pruned) {
           upserted += vaultResult.upserted;
           vectorsUpserted += vaultResult.vectorsUpserted;
+          pruned += vaultResult.pruned;
           sources.push("vault");
         }
       } catch (error) {
@@ -365,5 +383,22 @@ export async function reindexProjectMemory(
     }
   }
 
-  return { upserted, vectorsUpserted, sources };
+  // A rebuild must also remove Tier-A projections whose source files/ledger
+  // rows disappeared. Session and external-vault documents have independent
+  // lifecycle owners and are intentionally left untouched here.
+  try {
+    const existing = await memory.listDocs({ scope: "project" });
+    for (const existingDoc of existing) {
+      if (!sameWorkspaceTag(existingDoc.workspace, workspace)) continue;
+      if (!existingDoc.sourceRef?.startsWith("tier-a:")) continue;
+      if (projectedIds.has(existingDoc.id)) continue;
+      await memory.removeDoc(existingDoc.id);
+      if (vectors) await vectors.deleteByOwner("memory_doc", existingDoc.id);
+      pruned += 1;
+    }
+  } catch (error) {
+    console.warn("[kyrei memory-index] stale Tier-A prune failed:", error);
+  }
+
+  return { upserted, vectorsUpserted, pruned, sources };
 }

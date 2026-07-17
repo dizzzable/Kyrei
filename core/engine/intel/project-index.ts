@@ -24,6 +24,8 @@ const INDEX_IGNORE = [
   "**/coverage/**",
   "**/.next/**",
   "**/vendor/**",
+  // Generated desktop/browser verification artifacts in this repository.
+  "output/**",
   // Local reference implementation used for feature research; it is not a
   // dependency or source subtree of Kyrei itself.
   "hermes/**",
@@ -284,7 +286,7 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
       followSymbolicLinks: false,
       unique: true,
       suppressErrors: true,
-    })).map(normalizeRel);
+    })).map(normalizeRel).sort();
     const allFiles = entries.slice(0, MAX_FILES);
     const files = allFiles.filter((path) => (
       SOURCE_EXTENSIONS.some((extension) => path.toLowerCase().endsWith(extension))

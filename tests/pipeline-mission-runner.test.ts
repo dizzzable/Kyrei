@@ -52,7 +52,12 @@ function runInput(runId: string, workspace: string, stages: unknown[]) {
   };
 }
 
-function departmentArtifact(runId: string, stageId: string, workspaceDigest = BASELINE) {
+function departmentArtifact(
+  runId: string,
+  stageId: string,
+  workspaceDigest = BASELINE,
+  clarifications: readonly Record<string, unknown>[] = [],
+) {
   return {
     schemaVersion: 1 as const,
     id: `artifact-${stageId}`,
@@ -77,6 +82,7 @@ function departmentArtifact(runId: string, stageId: string, workspaceDigest = BA
     evidence: [],
     checks: [],
     contradictions: [],
+    ...(clarifications.length ? { clarifications } : {}),
   };
 }
 
@@ -321,6 +327,65 @@ describe("PipelineMissionRunner", () => {
     await store.transition("approval-run", "running", { reason: "approval_received" });
 
     expect((await runner.advance("approval-run")).outcome).toBe("completed");
+  });
+
+  it("turns upstream clarification requests into a durable question and forwards the human answer", async () => {
+    const dataDir = await root();
+    const workspace = join(dataDir, "workspace");
+    await mkdir(workspace);
+    const store = new PipelineRunStore({ dataDir });
+    const clarification = {
+      id: "intent",
+      question: "Which outcome should the next stage optimize for?",
+      context: "Reliability and speed are both valid goals.",
+      options: ["reliability", "speed"],
+      recommended: "reliability",
+      blocking: true,
+    };
+    await store.create(runInput("clarification-run", workspace, [
+      { id: "research", kind: "department" },
+      { id: "clarify", kind: "approval", dependsOn: ["research"] },
+      { id: "implement", kind: "department", dependsOn: ["clarify"] },
+    ]));
+    await store.start("clarification-run");
+    const calls: Array<{ stageId: string; dependencyArtifacts: Record<string, unknown[]> }> = [];
+    const runner = new PipelineMissionRunner({
+      runStore: store,
+      executeDepartment: async ({ run, stage, dependencyArtifacts }) => {
+        calls.push({ stageId: stage.id, dependencyArtifacts });
+        return stage.id === "research"
+          ? departmentArtifact(run.runId, stage.id, BASELINE, [clarification])
+          : departmentArtifact(run.runId, stage.id);
+      },
+    });
+
+    expect((await runner.advance("clarification-run")).outcome).toBe("awaiting_approval");
+    const waiting = await store.load("clarification-run");
+    expect(waiting?.approvals).toEqual([
+      expect.objectContaining({
+        stageId: "clarify",
+        kind: "clarification",
+        status: "requested",
+        metadata: { clarificationRequests: [clarification] },
+      }),
+    ]);
+
+    await store.recordApproval("clarification-run", {
+      id: "clarification-answer",
+      stageId: "clarify",
+      status: "approved",
+      actor: "operator",
+      metadata: { answers: { intent: "reliability" } },
+    });
+    await store.transition("clarification-run", "running", { reason: "clarification_answered" });
+    expect((await runner.advance("clarification-run")).outcome).toBe("completed");
+    expect(calls[1]?.dependencyArtifacts.clarify).toEqual([
+      expect.objectContaining({
+        id: "human:clarification-answer",
+        summary: expect.stringContaining('"intent":"reliability"'),
+        humanDecision: { answers: { intent: "reliability" } },
+      }),
+    ]);
   });
 
   it("fails a read-only department without pretending that later stages can continue", async () => {

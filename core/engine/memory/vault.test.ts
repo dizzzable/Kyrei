@@ -9,6 +9,7 @@ import {
   indexVaultIntoMemory,
 } from "./vault.js";
 import { openMemoryIndex, closeMemoryIndex } from "./index-backend.js";
+import { embedText } from "./embed-adapter.js";
 
 describe("vault (Wave C3)", () => {
   let root: string;
@@ -88,6 +89,46 @@ describe("vault (Wave C3)", () => {
       expect(result.upserted).toBe(3);
       const found = await opened.stores!.memory.search("widgets", { limit: 5 });
       expect(found.some((d) => d.body.includes("widgets"))).toBe(true);
+
+      await rm(join(vaultDir, "alpha.md"));
+      const rebuilt = await indexVaultIntoMemory({
+        vault: {
+          enabled: true,
+          paths: [vaultDir],
+          maxFiles: 50,
+          maxFileChars: 4_000,
+          maxDepth: 4,
+        },
+        memory: opened.stores!.memory,
+        vectors: opened.stores!.vectors,
+        workspaceTag: root,
+      });
+      expect(rebuilt.files).toBe(2);
+      expect(rebuilt.pruned).toBe(1);
+      const afterDelete = await opened.stores!.memory.listDocs({ scope: "project", workspace: root });
+      expect(afterDelete.some((d) => d.path.endsWith("alpha.md"))).toBe(false);
+
+      const disabled = await indexVaultIntoMemory({
+        vault: {
+          enabled: false,
+          paths: [],
+          maxFiles: 50,
+          maxFileChars: 4_000,
+          maxDepth: 4,
+        },
+        memory: opened.stores!.memory,
+        vectors: opened.stores!.vectors,
+        workspaceTag: root,
+      });
+      expect(disabled.files).toBe(0);
+      expect(disabled.pruned).toBe(2);
+      const afterDisable = await opened.stores!.memory.listDocs({ scope: "project", workspace: root });
+      expect(afterDisable.filter((d) => d.sourceRef === "vault:markdown")).toHaveLength(0);
+      const vectorHits = await opened.stores!.vectors!.query(await embedText("widgets"), {
+        k: 20,
+        ownerType: "memory_doc",
+      });
+      expect(vectorHits.some((hit) => hit.ownerId.startsWith("vault:"))).toBe(false);
     } finally {
       await closeMemoryIndex(opened.stores);
     }

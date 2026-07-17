@@ -1917,6 +1917,30 @@ export function createGatewayConfigPersistence({ dataDir, secretsCodec, requireP
   };
 }
 
+/**
+ * Keep the in-memory Skills workspace aligned with the durable gateway config.
+ * Skills validates the workspace before the config write; if that write fails,
+ * restore its previous root before surfacing the error to the caller.
+ */
+export async function saveConfigWithWorkspace({
+  previousWorkspace = "",
+  nextWorkspace = "",
+  skillsStore,
+  saveConfig,
+}) {
+  await skillsStore.setWorkspace(nextWorkspace);
+  try {
+    return await saveConfig();
+  } catch (error) {
+    try {
+      await skillsStore.setWorkspace(previousWorkspace);
+    } catch {
+      /* The original durable-save error is the actionable failure. */
+    }
+    throw error;
+  }
+}
+
 export async function startGateway({
   dataDir,
   chooseFolder,
@@ -3156,7 +3180,7 @@ export async function startGateway({
     }
   };
 
-  const reindexBuiltinMemoryIndex = async () => {
+  const reindexBuiltinMemoryIndex = async ({ refreshProjectIndex = false } = {}) => {
     const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
     if (!workspace) {
       return {
@@ -3204,6 +3228,8 @@ export async function startGateway({
       planningEnabled: planning.enabled !== false,
       sessions: collectSessionsForMemoryIndex(40),
       sensitiveValues: runtimeSensitiveValues(),
+      ...(isPlainRecord(memory.vault) ? { vault: memory.vault } : {}),
+      refreshProjectIndex,
     });
   };
 
@@ -4534,6 +4560,36 @@ export async function startGateway({
       && isPipelineTextList(value.uncertainties, 48, 1_000)
       && isPipelineTextList(value.whatWasNotChecked, 48, 1_000)
       && (
+        value.clarificationRequests === undefined
+        || (
+          Array.isArray(value.clarificationRequests)
+          && value.clarificationRequests.length <= 8
+          && value.clarificationRequests.every((request) => (
+            request
+            && typeof request === "object"
+            && !Array.isArray(request)
+            && isPipelineText(request.id, 120)
+            && isPipelineText(request.question, 2_000)
+            && typeof request.context === "string"
+            && request.context.length <= 4_000
+            && (request.options === undefined || (
+              Array.isArray(request.options)
+              && request.options.length <= 8
+              && request.options.every((option) => (
+                option
+                && typeof option === "object"
+                && !Array.isArray(option)
+                && isPipelineText(option.id, 80)
+                && isPipelineText(option.label, 300)
+                && (option.impact === undefined || isPipelineText(option.impact, 600))
+              ))
+            ))
+            && (request.recommended === undefined || isPipelineText(request.recommended, 80))
+            && typeof request.blocking === "boolean"
+          ))
+        )
+      )
+      && (
         value.applicablePatch === undefined
         || (
           typeof value.applicablePatch === "string"
@@ -4642,6 +4698,85 @@ export async function startGateway({
       // response. A model report never becomes trusted workspace evidence.
       outputDigest: digestJson(item),
     }));
+    const comparison = result?.comparison
+      && typeof result.comparison === "object"
+      && !Array.isArray(result.comparison)
+      ? result.comparison
+      : undefined;
+    const comparisonClaims = Array.isArray(comparison?.claims)
+      ? comparison.claims.slice(0, 256)
+      : [];
+    const comparisonClaimIds = new Map();
+    for (const [index, claim] of comparisonClaims.entries()) {
+      const statement = pipelineText(claim?.summary, 2_400, sensitiveValues);
+      if (!statement) continue;
+      const evidenceId = `comparison-evidence-${index + 1}`;
+      const claimId = `comparison-claim-${index + 1}`;
+      comparisonClaimIds.set(typeof claim?.id === "string" ? claim.id : "", claimId);
+      evidence.push({
+        id: evidenceId,
+        kind: "diagnostic",
+        origin: "reported",
+        summary: `comparison claim: ${statement}`,
+        capturedAt,
+        tool: "team-comparison",
+        outputDigest: digestJson({
+          taskId: pipelineText(claim?.taskId, 160, sensitiveValues),
+          summary: statement,
+          confidence: Number.isFinite(claim?.confidence) ? claim.confidence : 0,
+        }),
+      });
+    }
+    const claims = comparisonClaims.flatMap((claim, index) => {
+      const statement = pipelineText(claim?.summary, 2_400, sensitiveValues);
+      const claimId = `comparison-claim-${index + 1}`;
+      return statement && comparisonClaimIds.has(typeof claim?.id === "string" ? claim.id : "")
+        ? [{ id: claimId, statement, evidenceIds: [`comparison-evidence-${index + 1}`] }]
+        : [];
+    });
+    const contradictions = Array.isArray(comparison?.conflicts)
+      ? comparison.conflicts.slice(0, 16).flatMap((conflict, index) => {
+          const claimIds = Array.isArray(conflict?.claimIds)
+            ? conflict.claimIds.flatMap((id) => {
+                const mapped = comparisonClaimIds.get(typeof id === "string" ? id : "");
+                return mapped ? [mapped] : [];
+              })
+            : [];
+          const summary = pipelineText(conflict?.summary, 2_400, sensitiveValues);
+          return claimIds.length >= 2 && summary
+            ? [{ id: `comparison-conflict-${index + 1}`, claimIds: [...new Set(claimIds)], summary, resolved: false }]
+            : [];
+        })
+      : [];
+    const clarificationRequests = [];
+    const clarificationQuestions = new Set();
+    const rawClarifications = [
+      ...(Array.isArray(source.clarificationRequests) ? source.clarificationRequests : []),
+      ...(Array.isArray(comparison?.clarificationRequests) ? comparison.clarificationRequests : []),
+    ];
+    for (const [index, request] of rawClarifications.slice(0, 16).entries()) {
+      const question = pipelineText(request?.question, 2_000, sensitiveValues);
+      if (!question) continue;
+      const key = question.toLowerCase();
+      if (clarificationQuestions.has(key)) continue;
+      clarificationQuestions.add(key);
+      const options = Array.isArray(request?.options)
+        ? request.options.slice(0, 8).flatMap((option) => {
+            const label = pipelineText(option?.label, 300, sensitiveValues);
+            return label ? [label] : [];
+          })
+        : [];
+      clarificationRequests.push({
+        id: `team-clarification-${index + 1}`,
+        question,
+        context: pipelineText(request?.context, 4_000, sensitiveValues) || "No additional context provided.",
+        ...(options.length ? { options } : {}),
+        ...(typeof request?.recommended === "string" && request.recommended.trim()
+          ? { recommended: pipelineText(request.recommended, 80, sensitiveValues) }
+          : {}),
+        blocking: request?.blocking === true,
+      });
+    }
     if (source.applicablePatch !== undefined) {
       evidence.push(buildApplicablePatchEvidence(source.applicablePatch, {
         capturedAt,
@@ -4680,10 +4815,11 @@ export async function startGateway({
         providerCalls: budgetMetrics.providerCalls,
         durationMs: budgetMetrics.durationMs,
       },
-      claims: [],
+      claims,
       evidence,
       checks: [],
-      contradictions: [],
+      contradictions,
+      ...(clarificationRequests.length ? { clarifications: clarificationRequests } : {}),
     };
     return { artifact, budgetMetrics };
   }
@@ -6468,8 +6604,16 @@ export async function startGateway({
             nextConfig = reconcileReadyOrchestration(nextConfig, nextSecrets);
             nextSecrets = pruneProviderAccountSecrets(nextSecrets, nextConfig.providers);
             const previousWorkspace = typeof config.workspace === "string" ? config.workspace : "";
-            if (typeof body.workspace === "string") await skillsStore.setWorkspace(body.workspace);
-            await saveConfig(nextConfig, nextSecrets);
+            if (typeof body.workspace === "string") {
+              await saveConfigWithWorkspace({
+                previousWorkspace,
+                nextWorkspace: nextConfig.workspace,
+                skillsStore,
+                saveConfig: () => saveConfig(nextConfig, nextSecrets),
+              });
+            } else {
+              await saveConfig(nextConfig, nextSecrets);
+            }
             config = nextConfig;
             secrets = nextSecrets;
             invalidateAllProviderRuntimes();
@@ -6507,7 +6651,7 @@ export async function startGateway({
       }
 
       if (path === "/api/memory/index/reindex" && req.method === "POST") {
-        return sendJson(res, 200, await reindexBuiltinMemoryIndex());
+        return sendJson(res, 200, await reindexBuiltinMemoryIndex({ refreshProjectIndex: true }));
       }
 
       // Rebuild LTM runtime projection (files/ledger remain SoT).
@@ -8004,8 +8148,12 @@ export async function startGateway({
         if (folder) {
           snapshot = await mutateConfig(async () => {
             const nextConfig = { ...config, workspace: folder };
-            await skillsStore.setWorkspace(folder);
-            await saveConfig(nextConfig, secrets);
+            await saveConfigWithWorkspace({
+              previousWorkspace: typeof config.workspace === "string" ? config.workspace : "",
+              nextWorkspace: nextConfig.workspace,
+              skillsStore,
+              saveConfig: () => saveConfig(nextConfig, secrets),
+            });
             config = nextConfig;
             return publicGatewayConfig(config, secrets);
           });
