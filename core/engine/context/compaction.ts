@@ -15,6 +15,10 @@ export interface PruneConfig {
   pruneToChars: number;
   /** When true (default), use content-aware compress before head/tail stub. */
   smartCompress?: boolean;
+  /** Wave D1: goal/focus string for skim-aware compress. */
+  focus?: string;
+  /** Wave D1: enable goal skim (default true). */
+  goalSkim?: boolean;
 }
 
 export const DEFAULT_PRUNE: PruneConfig = {
@@ -22,6 +26,7 @@ export const DEFAULT_PRUNE: PruneConfig = {
   keepLastMessages: 6,
   pruneToChars: 500,
   smartCompress: true,
+  goalSkim: true,
 };
 
 export interface SummaryProtectConfig {
@@ -50,23 +55,39 @@ async function pruneOneOutput(
   cfg: PruneConfig,
   ccr: CcrStore,
   toolName?: string,
-): Promise<string> {
+): Promise<{ text: string; rawChars: number; shownChars: number; skimmed: boolean }> {
+  const rawChars = text.length;
   if (cfg.smartCompress !== false) {
     const result = await compressToolOutput(text, {
       maxChars: Math.max(cfg.pruneToChars, Math.min(cfg.maxToolOutputChars, 2_500)),
       ccr,
       headRatio: 0.55,
       ...(toolName ? { toolName } : {}),
+      ...(cfg.focus ? { focus: cfg.focus } : {}),
+      goalSkim: cfg.goalSkim !== false,
     });
-    if (result.compressed && result.hash) return result.text;
+    if (result.compressed && result.hash) {
+      return {
+        text: result.text,
+        rawChars,
+        shownChars: result.text.length,
+        skimmed: Boolean(cfg.focus) && result.kind === "code",
+      };
+    }
     if (result.compressed) {
       // CCR put failed — fall through to classic marker with fresh put
     } else {
-      return result.text;
+      return {
+        text: result.text,
+        rawChars,
+        shownChars: result.text.length,
+        skimmed: false,
+      };
     }
   }
   const hash = await ccr.put(text);
-  return truncateWithMarker(text, cfg.pruneToChars, hash);
+  const out = truncateWithMarker(text, cfg.pruneToChars, hash);
+  return { text: out, rawChars, shownChars: out.length, skimmed: false };
 }
 
 function outputToString(output: unknown): string {
@@ -92,9 +113,18 @@ export async function pruneToolOutputs(
   messages: ModelMessage[],
   ccr: CcrStore,
   cfg: PruneConfig = DEFAULT_PRUNE,
-): Promise<{ messages: ModelMessage[]; prunedCount: number }> {
+): Promise<{
+  messages: ModelMessage[];
+  prunedCount: number;
+  bytesRaw: number;
+  bytesShown: number;
+  goalSkims: number;
+}> {
   const cut = Math.max(0, messages.length - cfg.keepLastMessages);
   let prunedCount = 0;
+  let bytesRaw = 0;
+  let bytesShown = 0;
+  let goalSkims = 0;
   const out: ModelMessage[] = [];
 
   for (let i = 0; i < messages.length; i++) {
@@ -113,12 +143,16 @@ export async function pruneToolOutputs(
         const toolName = typeof p["toolName"] === "string" ? p["toolName"] : undefined;
         prunedCount++;
         changed = true;
-        return { ...p, output: await pruneOneOutput(text, cfg, ccr, toolName) };
+        const pruned = await pruneOneOutput(text, cfg, ccr, toolName);
+        bytesRaw += pruned.rawChars;
+        bytesShown += pruned.shownChars;
+        if (pruned.skimmed) goalSkims += 1;
+        return { ...p, output: pruned.text };
       }),
     );
     out.push(changed ? ({ ...m, content: newParts } as unknown as ModelMessage) : m);
   }
-  return { messages: out, prunedCount };
+  return { messages: out, prunedCount, bytesRaw, bytesShown, goalSkims };
 }
 
 /** Early incremental checkpoint marks (fractions of the soft budget). */

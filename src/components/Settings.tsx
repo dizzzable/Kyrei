@@ -40,6 +40,7 @@ import { UsageSettings } from "@/components/settings/UsageSettings";
 import { CapacitySettings } from "@/components/settings/CapacitySettings";
 import { ExperimentalSettings } from "@/components/settings/ExperimentalSettings";
 import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
+import { LtmDecisionsPanel } from "@/components/settings/LtmDecisionsPanel";
 import { KyreiMark } from "@/components/brand/KyreiMark";
 import {
   SETTINGS_SECTIONS,
@@ -1441,6 +1442,38 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           </div>
                         </Field>
                       )}
+                      {Boolean(getEngineField("memory.ltm.enabled", true)) && (
+                        <Field label={t("settings.ltmDecisions.label")} hint={t("settings.ltmDecisions.fieldHint")} stacked>
+                          <LtmDecisionsPanel />
+                        </Field>
+                      )}
+                      <GroupTitle>{t("settings.groups.memoryRecall")}</GroupTitle>
+                      <div className="divide-y divide-border-soft">
+                        <BoolField
+                          label={t("settings.memoryRecall.mmr.label")}
+                          hint={t("settings.memoryRecall.mmr.hint")}
+                          value={Boolean(getEngineField("memory.recall.mmrEnabled", true))}
+                          onChange={(value) => setEngineField("memory.recall.mmrEnabled", value)}
+                        />
+                        <BoolField
+                          label={t("settings.memoryRecall.cluster.label")}
+                          hint={t("settings.memoryRecall.cluster.hint")}
+                          value={Boolean(getEngineField("memory.recall.clusterEnabled", true))}
+                          onChange={(value) => setEngineField("memory.recall.clusterEnabled", value)}
+                        />
+                        <BoolField
+                          label={t("settings.memoryRecall.decay.label")}
+                          hint={t("settings.memoryRecall.decay.hint")}
+                          value={Boolean(getEngineField("memory.decay.enabled", true))}
+                          onChange={(value) => setEngineField("memory.decay.enabled", value)}
+                        />
+                        <BoolField
+                          label={t("settings.memoryRecall.citeOrRefuse.label")}
+                          hint={t("settings.memoryRecall.citeOrRefuse.hint")}
+                          value={Boolean(getEngineField("memory.citeOrRefuse.enabled", false))}
+                          onChange={(value) => setEngineField("memory.citeOrRefuse.enabled", value)}
+                        />
+                      </div>
                       <GroupTitle>{t("settings.groups.memoryCurator")}</GroupTitle>
                       <div className="divide-y divide-border-soft">
                         <BoolField

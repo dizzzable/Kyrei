@@ -31,6 +31,7 @@ describe("coding-mode", () => {
     expect(codingModePrompt("plan")).toContain("PLAN");
     expect(codingModePrompt("deepreep")).toContain("DEEPREEP");
     expect(codingModePrompt("auto")).toContain("AUTO");
+    expect(codingModePrompt("auto")).toContain("Long-horizon");
     expect(codingModePrompt("build")).not.toEqual(codingModePrompt("polish"));
   });
 

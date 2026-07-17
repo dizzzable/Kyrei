@@ -16,6 +16,9 @@ import {
   firedCheckpointMark,
   summarizeMiddleTurns,
 } from "../context/compaction.js";
+import { lastUserTextFromMessages } from "../context/goal-skim.js";
+import { withWorkingStatePin } from "../context/working-state.js";
+import type { HarnessMetrics } from "../observability/harness-metrics.js";
 import { readContextSummary, writeContextSummary } from "../context/summary-store.js";
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
 import { prepareMessagesForModel } from "../reliability/runtime.js";
@@ -44,10 +47,14 @@ export interface MakePrepareStepOptions {
   summaryModel?: LanguageModel;
   /** Inject generateText for tests; defaults to dynamic import of "ai". */
   generateText?: typeof import("ai").generateText;
+  /** Wave D0: optional harness metrics sink. */
+  metrics?: HarnessMetrics;
+  /** Explicit goal for pin/skim when provided by the gateway. */
+  goal?: string;
 }
 
 export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions): PrepareStep {
-  const { model, window, ccr, workspace, sessionId, ltmDir, onMemoryMutated, summaryModel } = opts;
+  const { model, window, ccr, workspace, sessionId, ltmDir, onMemoryMutated, summaryModel, metrics, goal } = opts;
   const checkpointBudget = window * cfg.contextBudget.softPct;
   const firedMarks = new Set<number>();
   /** In-memory anti-thrash for this stream (also backed by summary file mtime). */
@@ -111,33 +118,50 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
       protectFirstN: 2,
       summaryMinMessages: 12,
       summaryCooldownoffMs: 60_000,
+      alwaysMaskToolBodies: true,
+      goalSkim: true,
+      pinWorkingState: true,
     };
 
-    if (!of.soft && !of.hard) {
-      return working === messages ? undefined : { messages: working };
-    }
-
     let changed = working !== messages;
+    const focus = (goal ?? lastUserTextFromMessages(working)).trim();
+    metrics?.recordTurn();
+    if (of.soft) metrics?.recordOverflow("soft");
+    if (of.hard) metrics?.recordOverflow("hard");
 
-    // Stage A — tool prune (soft or hard). Can disable via compression.enabled.
-    if (compression.enabled !== false) {
+    // Stage A — observation masking:
+    // - always mask older tool bodies when alwaysMaskToolBodies (Wave D2 default)
+    // - always prune on soft/hard overflow (existing)
+    const alwaysMask = compression.alwaysMaskToolBodies !== false;
+    const shouldPrune = compression.enabled !== false && (alwaysMask || of.soft || of.hard);
+    if (shouldPrune) {
       const keepLast = of.hard
         ? Math.max(2, Math.floor((compression.protectLastN ?? 6) / 2))
         : (compression.protectLastN ?? DEFAULT_PRUNE.keepLastMessages);
+      // When only masking (no overflow), use a tighter cap so old dumps leave the active window.
+      const maskOnly = alwaysMask && !of.soft && !of.hard;
       const pruneCfg = {
         ...DEFAULT_PRUNE,
         maxToolOutputChars: of.hard
           ? Math.min(cfg.maxToolOutput, 4_000)
-          : cfg.maxToolOutput,
+          : maskOnly
+            ? Math.min(cfg.maxToolOutput, 6_000)
+            : cfg.maxToolOutput,
         keepLastMessages: keepLast,
         pruneToChars: of.hard
           ? Math.min(compression.pruneToChars ?? 500, 300)
-          : (compression.pruneToChars ?? DEFAULT_PRUNE.pruneToChars),
+          : maskOnly
+            ? Math.min(compression.pruneToChars ?? 500, 400)
+            : (compression.pruneToChars ?? DEFAULT_PRUNE.pruneToChars),
+        goalSkim: compression.goalSkim !== false,
+        ...(focus && compression.goalSkim !== false ? { focus } : {}),
       };
-      const { messages: pruned, prunedCount } = await pruneToolOutputs(working, ccr, pruneCfg);
-      if (prunedCount > 0) {
-        working = prepareMessagesForModel(pruned);
+      const pruned = await pruneToolOutputs(working, ccr, pruneCfg);
+      if (pruned.prunedCount > 0) {
+        working = prepareMessagesForModel(pruned.messages);
         changed = true;
+        metrics?.recordToolPrune(pruned.bytesRaw, pruned.bytesShown);
+        for (let i = 0; i < pruned.goalSkims; i++) metrics?.recordGoalSkim();
       }
     }
 
@@ -219,6 +243,7 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
           working = prepareMessagesForModel(stageB.messages);
           changed = true;
           lastSummaryAt = now;
+          metrics?.recordStageBSummary();
           if (of.hard) hardSummaryForced = true;
           if (workspace && sessionId) {
             try {
@@ -237,6 +262,13 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
           }
         }
       }
+    }
+
+    // Wave D2: re-pin working state at the end (model projection only).
+    if (compression.pinWorkingState !== false && working.length >= 4) {
+      working = withWorkingStatePin(working, { ...(focus ? { goal: focus } : {}) });
+      changed = true;
+      metrics?.recordWorkingStatePin();
     }
 
     return changed ? { messages: working } : (working === messages ? undefined : { messages: working });

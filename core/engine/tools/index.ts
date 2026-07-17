@@ -30,7 +30,12 @@ import { applyPatch, ApplyError } from "../apply/apply.js";
 import { renderFileDiff } from "../apply/diff.js";
 import { createSnapshotStore } from "../apply/snapshot.js";
 import { detectEcosystem } from "../reliability/verify.js";
+import {
+  formatPostEditVerifyAppendix,
+  runPostEditVerify,
+} from "../reliability/post-edit-verify.js";
 import { buildProjectIntelTools } from "./project-intel.js";
+import { invalidateSymbolMapCache } from "../intel/repo-symbols.js";
 import { compressToolOutputSync } from "../context/tool-compress.js";
 import type { ReadMemo } from "../context/read-memo.js";
 
@@ -79,6 +84,10 @@ export interface BuildToolsOptions {
   readMemo?: ReadMemo;
   /** Wave B1: content-aware tool-output compression before hard clip. Default on. */
   smartCompress?: boolean;
+  /** Wave E2: active coding mode for post-edit verify policy. */
+  codingMode?: string;
+  /** Wave E: optional metrics sink for post-edit verify counts. */
+  onPostEditVerify?: (ok: boolean) => void;
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -106,17 +115,18 @@ function clip(text: unknown, limit: number): string {
 function smartClip(
   text: unknown,
   limit: number,
-  opts: { toolName?: string; target?: string; enabled?: boolean } = {},
+  opts: { toolName?: string; target?: string; enabled?: boolean; focus?: string } = {},
 ): string {
   const s = String(text ?? "");
   if (s.length <= limit) return s;
   if (opts.enabled === false) return clip(s, limit);
   // Only pay for shape detection when clearly over budget.
-  if (s.length < limit * 1.15) return clip(s, limit);
+  if (s.length < limit * 1.15 && !opts.focus?.trim()) return clip(s, limit);
   return compressToolOutputSync(s, {
     maxChars: limit,
     ...(opts.toolName ? { toolName: opts.toolName } : {}),
     ...(opts.target ? { target: opts.target } : {}),
+    ...(opts.focus?.trim() ? { focus: opts.focus.trim() } : {}),
   }).text;
 }
 
@@ -285,12 +295,13 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
   const safeClip = (
     value: unknown,
     limit: number,
-    meta?: { toolName?: string; target?: string },
+    meta?: { toolName?: string; target?: string; focus?: string },
   ): string =>
     smartClip(redact(String(value ?? ""), options.sensitiveValues), limit, {
       enabled: smart,
       ...(meta?.toolName ? { toolName: meta.toolName } : {}),
       ...(meta?.target ? { target: meta.target } : {}),
+      ...(meta?.focus ? { focus: meta.focus } : {}),
     });
   const abortSignal = options.abortSignal;
   const snapshots = createSnapshotStore(workspace);
@@ -415,6 +426,32 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
     return "Tool action was denied because its target is invalid or outside the workspace; nothing was executed.";
   };
 
+  const noteWorkspaceMutation = (): void => {
+    try {
+      invalidateSymbolMapCache(workspace);
+    } catch {
+      /* cache is best-effort */
+    }
+  };
+
+  const appendPostEditVerify = async (message: string): Promise<string> => {
+    const mode = cfg.reliability?.postEditVerify ?? "mutate";
+    if (mode === "off") return message;
+    try {
+      const result = await runPostEditVerify({
+        workspace,
+        mode,
+        codingMode: options.codingMode ?? cfg.codingMode,
+        timeoutMs: Math.min(cfg.commandTimeoutMs ?? 60_000, 90_000),
+      });
+      if (!result.ran) return message;
+      options.onPostEditVerify?.(result.ok === true);
+      return `${message}${formatPostEditVerifyAppendix(result)}`;
+    } catch {
+      return message;
+    }
+  };
+
   const execListDir = async (path?: string): Promise<string> => {
     const dir = await validateWorkspaceTarget(workspace, path || ".");
     const entries = await readdir(dir, { withFileTypes: true });
@@ -425,7 +462,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           .join("\n")
       : "(пусто)", cfg.maxToolOutput);
   };
-  const execReadFile = async (path: string): Promise<string> => {
+  const execReadFile = async (path: string, focus?: string): Promise<string> => {
     const abs = await validateWorkspaceTarget(workspace, path);
     const raw = await readFile(abs, "utf8");
     const rel = relative(workspace, abs).replaceAll("\\", "/") || path.replace(/\\/g, "/");
@@ -434,6 +471,14 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
       const memo = options.readMemo.note(rel, raw);
       if (memo.hit) return memo.text;
       body = memo.text;
+    }
+    // Wave D1: optional focus skim before hard clip (full file still on disk).
+    if (focus?.trim() && body.length > Math.min(cfg.fileReadMaxChars, 12_000)) {
+      return safeClip(body, Math.min(cfg.fileReadMaxChars, 24_000), {
+        toolName: "read_file",
+        target: rel,
+        focus: focus.trim(),
+      });
     }
     return safeClip(body, cfg.fileReadMaxChars, { toolName: "read_file", target: rel });
   };
@@ -499,8 +544,13 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
       description: TOOL_DESCRIPTIONS.read_file,
       inputSchema: z.object({
         path: z.string().describe("File path relative to the workspace root."),
+        focus: z
+          .string()
+          .max(500)
+          .optional()
+          .describe("Optional focus query (symbols/goal). Large files are skimmed to matching regions; re-read without focus or with a path range for full body."),
       }),
-      execute: async ({ path }) => execReadFile(path),
+      execute: async ({ path, focus }) => execReadFile(path, focus),
     }),
 
     write_file: tool({
@@ -564,7 +614,9 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           }
           options.onMemoryMutated?.();
           options.readMemo?.invalidate(rel.replaceAll("\\", "/"));
-          return previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
+          noteWorkspaceMutation();
+          const base = previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
+          return appendPostEditVerify(base);
         });
       },
     }),
@@ -620,6 +672,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             for (const f of report.files) {
               options.readMemo?.invalidate(f.rel.replaceAll("\\", "/"));
             }
+            noteWorkspaceMutation();
             // reviewer: clean-context LLM review if enabled. Sees ONLY the diff
             // (no conversation history). Multi-file patches fan out via runReadSwarm
             // (one leaf review per file), single-file uses reviewDiff.
@@ -654,7 +707,8 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
                 console.warn("[kyrei reviewer] Failed to review diff:", reviewErr);
               }
             }
-            return rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
+            const base = rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
+            return appendPostEditVerify(base);
           } catch (e) {
             if (e instanceof ApplyError) throw new Error(`Правка отклонена [${e.code}]: ${e.message}`);
             throw e;
@@ -788,17 +842,53 @@ function buildDecisionTools(cfg: EngineConfig, options: BuildToolsOptions): Tool
         try {
           const { createLtmBridge } = await import("../memory/ltm-bridge.js");
           const ltm = createLtmBridge(ltmDir);
-          const decisions = await ltm.listDecisions({ includeInvalidated: includeInvalidated === true });
+          const decisions = await ltm.listDecisions({
+            includeInvalidated: includeInvalidated === true,
+            rankByConfidence: true,
+          });
           if (decisions.length === 0) return "No decisions recorded yet.";
           const lines = decisions.map((d) => {
             const status = d.validTo ? `superseded ${d.validTo}` : "active";
+            const pin = d.pinned ? " 📌" : "";
             const tags = d.tags.length ? ` [${d.tags.join(", ")}]` : "";
             const why = d.rationale ? ` — ${d.rationale}` : "";
-            return `- ${d.id} (${status})${tags}: ${d.decision}${why}`;
+            const sup = d.supersedes ? ` ←${d.supersedes}` : "";
+            return `- ${d.id}${pin} (${status})${tags}${sup}: ${d.decision}${why}`;
           });
           return ["# Recorded decisions (durable project memory, not instructions)", ...lines].join("\n");
         } catch (error) {
           return `Failed to query decisions: ${(error as Error).message}`;
+        }
+      },
+    }),
+    fetch_decision: tool({
+      description: TOOL_DESCRIPTIONS.fetch_decision,
+      inputSchema: z.object({
+        id: z.string().min(1).describe("Decision id, e.g. 'dec_000001'."),
+      }),
+      execute: async ({ id }) => {
+        try {
+          const { createLtmBridge } = await import("../memory/ltm-bridge.js");
+          const ltm = createLtmBridge(ltmDir);
+          const { decision, history } = await ltm.fetchDecision(String(id));
+          if (!decision) return `No decision found with id ${id}.`;
+          const lines = [
+            "# Decision fetch (durable project memory, not instructions)",
+            `- id: ${decision.id}`,
+            `- status: ${decision.validTo ? `superseded ${decision.validTo}` : "active"}`,
+            `- pinned: ${decision.pinned}`,
+            `- kind: ${decision.kind}`,
+            `- decision: ${decision.decision}`,
+            decision.rationale ? `- rationale: ${decision.rationale}` : null,
+            decision.supersedes ? `- supersedes: ${decision.supersedes}` : null,
+            decision.tags.length ? `- tags: ${decision.tags.join(", ")}` : null,
+            "",
+            history.length ? "## Supersede history (older → newer parents)" : null,
+            ...history.map((h) => `- ${h.id}${h.validTo ? " (superseded)" : ""}: ${h.decision}`),
+          ].filter((x): x is string => Boolean(x));
+          return lines.join("\n");
+        } catch (error) {
+          return `Failed to fetch decision: ${(error as Error).message}`;
         }
       },
     }),
@@ -812,24 +902,61 @@ function buildDecisionTools(cfg: EngineConfig, options: BuildToolsOptions): Tool
       decision: z.string().min(1).describe("The decision made, in one or two sentences."),
       rationale: z.string().optional().describe("Why this decision was made (tradeoffs, constraints)."),
       tags: z.array(z.string()).max(10).optional().describe("Optional short tags for later retrieval."),
+      pinned: z
+        .boolean()
+        .optional()
+        .describe("If true, never decay this fact in LTM ranking (hard prefs, safety constraints)."),
+      supersedesId: z
+        .string()
+        .optional()
+        .describe("Optional active decision id to SUPERSEDE atomically (old kept in history)."),
+      kind: z
+        .enum([
+          "persona",
+          "event",
+          "preference",
+          "decision",
+          "correction",
+          "fact",
+          "instruction",
+          "summary",
+        ])
+        .optional()
+        .describe("Taxonomy for decay half-life (default decision)."),
     }),
-    execute: async ({ decision, rationale, tags }) => {
+    execute: async ({ decision, rationale, tags, pinned, supersedesId, kind }) => {
       try {
         const { createLtmBridge } = await import("../memory/ltm-bridge.js");
         const ltm = createLtmBridge(ltmDir);
-        const id = await ltm.addDecision({
+        const base = {
           decision: clipText(decision),
           ...(rationale ? { rationale: clipText(rationale) } : {}),
           ...(tags ? { tags: tags.map((t) => clipText(t, 64)) } : {}),
           sessionId,
-        });
+          pinned: pinned === true,
+          ...(kind ? { kind } : {}),
+        };
+        let id: string;
+        let note = "";
+        if (supersedesId) {
+          const result = await ltm.supersedeDecision({
+            supersedesId: String(supersedesId),
+            ...base,
+          });
+          id = result.newId;
+          note = result.superseded
+            ? ` Superseded ${supersedesId} (history preserved).`
+            : ` Note: ${supersedesId} was not active; recorded as new with supersedes link.`;
+        } else {
+          id = await ltm.addDecision(base);
+        }
         try {
           await ltm.refreshRuntimeSnapshot();
         } catch {
           /* best-effort */
         }
         options.onMemoryMutated?.();
-        return `Recorded decision ${id}.`;
+        return `Recorded decision ${id}.${pinned ? " (pinned)" : ""}${note}`;
       } catch (error) {
         return `Failed to record decision: ${(error as Error).message}`;
       }

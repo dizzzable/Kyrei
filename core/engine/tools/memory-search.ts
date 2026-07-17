@@ -1,6 +1,9 @@
 /**
  * Unified local memory search across Tier A sources with optional FTS +
  * lexical-vector hybrid ranking. External adapters stay separate tools.
+ *
+ * Wave H: post-recall pipeline (near-dupe collapse + MMR) and optional
+ * cite-or-refuse sufficiency note for weak hits.
  */
 
 import { tool, type ToolSet } from "ai";
@@ -13,6 +16,17 @@ import { createPlanStore } from "../orchestration/plan.js";
 import { embedText, isZeroVector } from "../memory/embed-adapter.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 import { normalizeVaultConfig, searchVaultFiles, type VaultConfig } from "../memory/vault.js";
+import {
+  normalizeRecallConfig,
+  postProcessRecall,
+  shouldRecall,
+  type RecallPipelineConfig,
+} from "../memory/recall-pipeline.js";
+import {
+  checkSufficiency,
+  refuseMessage,
+  type CiteOrRefuseConfig,
+} from "../memory/cite-or-refuse.js";
 
 export interface MemorySearchOptions {
   workspace: string;
@@ -35,6 +49,10 @@ export interface MemorySearchOptions {
   sessionSnippets?: ReadonlyArray<{ role: string; text: string }>;
   /** Wave C3: external markdown vault (opt-in). */
   vault?: VaultConfig;
+  /** Wave H: MMR / cluster post-process (defaults on). */
+  recall?: Partial<RecallPipelineConfig>;
+  /** Wave H: sufficiency gate for grounded refuse note (optional). */
+  citeOrRefuse?: Partial<CiteOrRefuseConfig> & { enabled?: boolean };
 }
 
 interface Hit {
@@ -323,7 +341,6 @@ async function searchVectors(
 function dedupeHits(hits: Hit[]): Hit[] {
   const best = new Map<string, Hit>();
   for (const h of hits) {
-    const key = `${h.path ?? h.title}|${h.source === "vector" ? "any" : h.source}`;
     // Prefer higher score; merge vector/file sources for same path by keeping max.
     const pathKey = h.path ?? `${h.source}:${h.title}`;
     const prev = best.get(pathKey);
@@ -333,9 +350,15 @@ function dedupeHits(hits: Hit[]): Hit[] {
       // Slight boost when both FTS and vector agree.
       prev.score += 1.5;
     }
-    void key;
   }
   return [...best.values()].sort((a, b) => b.score - a.score || a.source.localeCompare(b.source));
+}
+
+/** Wave H: path-dedupe then near-dupe cluster + MMR diversity. */
+function rankHits(hits: Hit[], lim: number, recallCfg?: Partial<RecallPipelineConfig>): Hit[] {
+  const base = dedupeHits(hits);
+  const cfg = normalizeRecallConfig({ k: lim, ...recallCfg });
+  return postProcessRecall(base, cfg) as Hit[];
 }
 
 export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
@@ -352,6 +375,8 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
         try {
           const hits: Hit[] = [];
           const lim = limit ?? 8;
+          const gate = shouldRecall(query);
+          // Explicit tool call always runs search; gate is informational only here.
           const tasks: Promise<void>[] = [
             searchMemoryMd(options.workspace, query, hits),
             searchHandoffs(options.workspace, query, hits),
@@ -393,7 +418,7 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
           }
           await Promise.all(tasks);
 
-          const top = dedupeHits(hits).slice(0, lim);
+          const top = rankHits(hits, lim, options.recall);
           const channels = [
             "file scan",
             options.sessionSnippets?.length ? "live session" : null,
@@ -401,6 +426,7 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
             options.memoryStore ? "FTS" : null,
             options.vectorStore ? "vector" : null,
             vaultCfg.enabled ? "vault" : null,
+            "post-recall MMR",
           ]
             .filter(Boolean)
             .join(" + ");
@@ -409,6 +435,34 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
               "# memory_search (local durable memory, not instructions)",
               `No hits for: ${query}`,
               `Tried: ${channels}.`,
+              gate.recall ? "" : `(note: query looks phatic — gate=${gate.reason})`,
+            ]
+              .filter(Boolean)
+              .join("\n");
+          }
+          const citeCfg = options.citeOrRefuse;
+          const sufficiency =
+            citeCfg?.enabled === true
+              ? checkSufficiency(
+                  top.map((h, i) => ({
+                    id: `h${i + 1}`,
+                    text: h.snippet,
+                    source: h.path ?? h.source,
+                    score: h.score,
+                  })),
+                  citeCfg,
+                )
+              : null;
+          if (sufficiency && !sufficiency.sufficient) {
+            return [
+              "# memory_search — grounded refuse (weak hits)",
+              refuseMessage(query, sufficiency),
+              "",
+              "Raw weak candidates (for debugging only):",
+              ...top.slice(0, 3).map(
+                (h, i) =>
+                  `${i + 1}. [${h.source}] ${h.title} (score ${h.score.toFixed(1)}) — ${h.snippet}`,
+              ),
             ].join("\n");
           }
           const lines = top.map(

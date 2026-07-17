@@ -171,6 +171,26 @@ export function StatusBar({
           </DropdownMenu>
         )}
 
+        {status?.harness?.intentRoute ? (
+          <StatusText
+            icon={<Activity className="size-3" />}
+            label={status.harness.intentRoute}
+            detail={
+              typeof status.harness.wasteRatio === "number"
+                ? `${Math.round(status.harness.wasteRatio * 100)}%`
+                : undefined
+            }
+            title={t("shell.status.harnessHint", {
+              intent: status.harness.intentRoute,
+              waste: typeof status.harness.wasteRatio === "number"
+                ? Math.round(status.harness.wasteRatio * 100)
+                : 0,
+              prunes: status.harness.toolPrunes ?? 0,
+            })}
+            className="hidden min-[960px]:inline-flex"
+          />
+        ) : null}
+
         {Number.isFinite(sessionTime) && (
           <StatusText
             label={t("shell.status.session")}

@@ -12,6 +12,7 @@
 
 import { createHash } from "node:crypto";
 import type { CcrStore } from "./ccr.js";
+import { skimTextForFocus } from "./goal-skim.js";
 
 export type ToolContentKind =
   | "json"
@@ -33,6 +34,13 @@ export interface CompressOptions {
   toolName?: string;
   /** Path or other target for stub context (optional). */
   target?: string;
+  /**
+   * Wave D1: goal/focus string for line-level skim (code/text).
+   * When set, prefer match-preserving skim over blind head/tail.
+   */
+  focus?: string;
+  /** When false, skip goal skim even if focus is set. Default true. */
+  goalSkim?: boolean;
 }
 
 export interface CompressResult {
@@ -271,7 +279,17 @@ export function compressMarkdown(text: string, maxChars: number): string {
   return body;
 }
 
-function shapeCompress(text: string, kind: ToolContentKind, maxChars: number): string {
+function shapeCompress(
+  text: string,
+  kind: ToolContentKind,
+  maxChars: number,
+  focus?: string,
+  goalSkim = true,
+): string {
+  if (goalSkim !== false && focus?.trim() && (kind === "code" || kind === "text" || kind === "markdown")) {
+    const skimmed = skimTextForFocus(text, { maxChars, focus });
+    if (skimmed.skimmed) return skimmed.text;
+  }
   switch (kind) {
     case "json":
       return compressJson(text, maxChars);
@@ -332,7 +350,13 @@ export async function compressToolOutput(
 
   // Reserve room for stub prefix + hash line.
   const budget = Math.max(200, maxChars - 160);
-  let shaped = shapeCompress(text, kind, budget);
+  let shaped = shapeCompress(
+    text,
+    kind,
+    budget,
+    options.focus,
+    options.goalSkim !== false,
+  );
   if (shaped.length > budget) shaped = headTail(shaped, budget, options.headRatio ?? 0.6);
 
   let hash: string | undefined;
@@ -377,7 +401,13 @@ export function compressToolOutputSync(
     return { text, kind, originalChars, compressed: false, ratio: 1 };
   }
   const budget = Math.max(200, maxChars - 120);
-  let shaped = shapeCompress(text, kind, budget);
+  let shaped = shapeCompress(
+    text,
+    kind,
+    budget,
+    options.focus,
+    options.goalSkim !== false,
+  );
   if (shaped.length > budget) shaped = headTail(shaped, budget, options.headRatio ?? 0.6);
   const contentHash = shortHash(text);
   const prefix = stubPrefix({

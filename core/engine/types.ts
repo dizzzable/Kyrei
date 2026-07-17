@@ -301,6 +301,15 @@ export interface CompressionConfig {
   summaryMinMessages: number;
   /** Anti-thrash cooldown after a successful summary (ms). */
   summaryCooldownoffMs: number;
+  /**
+   * Wave D2: always mask tool bodies older than protectLastN even without soft overflow.
+   * Full bodies remain in CCR when smart compress archives them.
+   */
+  alwaysMaskToolBodies: boolean;
+  /** Wave D1: goal/focus-aware skim when compressing code/text tool output. */
+  goalSkim: boolean;
+  /** Wave D2: re-pin goal/open threads at the end of model history each prepareStep. */
+  pinWorkingState: boolean;
 }
 
 /**
@@ -458,6 +467,34 @@ export interface EngineConfig {
       maxFileChars: number;
       maxDepth: number;
     };
+    /**
+     * Wave H (MemoHood patterns): post-recall diversity for memory_search.
+     * Near-dupe collapse + MMR; pure local, no network.
+     */
+    recall: {
+      k: number;
+      clusterEnabled: boolean;
+      clusterThreshold: number;
+      mmrEnabled: boolean;
+      mmrLambda: number;
+    };
+    /**
+     * Wave H: Ebbinghaus-style ranking decay for LTM decisions (pinned exempt).
+     * Ledger rows are never deleted; low confidence only drops from snapshot.
+     */
+    decay: {
+      enabled: boolean;
+      floor: number;
+    };
+    /**
+     * Wave H (MemoBase patterns): optional grounded refuse when memory_search
+     * hits are too weak. Off by default — search still returns candidates.
+     */
+    citeOrRefuse: {
+      enabled: boolean;
+      minTopScore: number;
+      minHits: number;
+    };
   };
   /** Plan-as-files support (.kyrei/plan/ROADMAP.md, STATE.json, phase-N.md) */
   planning: { enabled: boolean };
@@ -484,6 +521,29 @@ export interface EngineConfig {
     maxSubagents?: number;
     /** Hermes tool_loop_guardrails (repeated call + heal thresholds). */
     toolLoop: ToolLoopConfig;
+    /**
+     * Wave D3: when codingMode is auto and the user goal looks long-horizon,
+     * force plan-mode tools until a plan artifact exists or the user authorizes build.
+     */
+    longTaskPlanGate: boolean;
+    /**
+     * Wave D3: when no explicit goal is passed, verify against the last user turn
+     * for polish mode or final-audit markers.
+     */
+    goalVerifyFromUserTurn: boolean;
+    /**
+     * Wave E2 / G1.1: run a light typecheck/lint after successful edit_file/write_file.
+     * - off: never
+     * - polish: only polish mode
+     * - mutate: build / polish / deepreep / auto (default; pairs with verify-before-done)
+     * - on: always (fail-open, append evidence)
+     */
+    postEditVerify: "off" | "on" | "polish" | "mutate";
+    /**
+     * Wave G1: if the turn mutated files and status would be complete without
+     * diagnostics/tests/post-edit evidence, mark goal_unsatisfied instead.
+     */
+    verifyBeforeDone: boolean;
   };
   /**
    * Optional MCP client (stdio servers). Off by default — user must enable
@@ -579,6 +639,9 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     protectFirstN: 2,
     summaryMinMessages: 12,
     summaryCooldownoffMs: 60_000,
+    alwaysMaskToolBodies: true,
+    goalSkim: true,
+    pinWorkingState: true,
   },
   permissions: {
     terminal: "auto",
@@ -647,6 +710,22 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       maxFileChars: 12_000,
       maxDepth: 6,
     },
+    recall: {
+      k: 8,
+      clusterEnabled: true,
+      clusterThreshold: 0.86,
+      mmrEnabled: true,
+      mmrLambda: 0.72,
+    },
+    decay: {
+      enabled: true,
+      floor: 0.05,
+    },
+    citeOrRefuse: {
+      enabled: false,
+      minTopScore: 4,
+      minHits: 1,
+    },
   },
   /** Local plan-as-files under .kyrei/plan — on by default (no external deps). */
   planning: { enabled: true },
@@ -659,6 +738,10 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       hardStopEnabled: true,
       healAfterFailures: 3,
     },
+    longTaskPlanGate: true,
+    goalVerifyFromUserTurn: true,
+    postEditVerify: "mutate",
+    verifyBeforeDone: true,
   },
   messaging: {
     enabled: false,
@@ -1007,6 +1090,8 @@ export interface RunKyreiChatResult {
   healHandoffPath?: string;
   /** Present when supervised mode requires accept/reject of file edits. */
   fileReview?: FileReviewState;
+  /** Wave D/E harness efficiency snapshot (no secrets). */
+  harness?: import("./observability/harness-metrics.js").HarnessMetricsSnapshot;
 }
 
 /** A single hunk of a context-anchored patch (apply engine, requirements §3). */

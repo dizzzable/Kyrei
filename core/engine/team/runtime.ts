@@ -19,6 +19,7 @@ import { buildGBrainTools } from "../tools/gbrain.js";
 import { buildPlanningTools } from "../tools/planning.js";
 import { buildOpenVikingTools } from "../tools/openviking.js";
 import { buildMemorySearchTools } from "../tools/memory-search.js";
+import { buildMemoryAskTools } from "../tools/memory-ask.js";
 import { buildSkillTools } from "../tools/skills.js";
 import { codingModePrompt, normalizeCodingMode } from "../coding-mode.js";
 import { isWorkspaceDir } from "../security/jail.js";
@@ -223,6 +224,29 @@ export async function createTeamRoleExecutors(
               indexBackend: options.indexBackend ?? "off",
               ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
               ...(options.vectorStore ? { vectorStore: options.vectorStore } : {}),
+              ...(options.config.memory?.recall ? { recall: options.config.memory.recall } : {}),
+              ...(options.config.memory?.citeOrRefuse
+                ? {
+                    citeOrRefuse: {
+                      enabled: options.config.memory.citeOrRefuse.enabled,
+                      minTopScore: options.config.memory.citeOrRefuse.minTopScore,
+                      minHits: options.config.memory.citeOrRefuse.minHits,
+                    },
+                  }
+                : {}),
+            })
+          : {};
+      const scopedMemoryAsk =
+        canReadMemory && workspaceReady
+          ? buildMemoryAskTools({
+              workspace: options.workspace!,
+              ...(ltmDir ? { ltmDir, ltmEnabled: true } : { ltmEnabled: false }),
+              maxModelOutputChars: options.config.maxToolOutput,
+              ...(options.config.memory?.vault?.enabled ? { vault: options.config.memory.vault } : {}),
+              citeOrRefuse: {
+                minTopScore: options.config.memory?.citeOrRefuse?.minTopScore ?? 4,
+                minHits: options.config.memory?.citeOrRefuse?.minHits ?? 1,
+              },
             })
           : {};
       return selectTeamRoleTools(
@@ -235,6 +259,7 @@ export async function createTeamRoleExecutors(
         scopedOpenVikingTools,
         scopedDecisionTools,
         scopedMemorySearch,
+        scopedMemoryAsk,
         assignedSkillTools,
       );
     };

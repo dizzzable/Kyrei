@@ -141,6 +141,7 @@ export const ruShell = {
   "shell.status.turnRunning": "Выполняется",
   "shell.status.context": "Контекст",
   "shell.status.contextUsed": "Использовано {used} из {limit} токенов",
+  "shell.status.harnessHint": "Последний harness: intent={intent}, waste≈{waste}%, prunes={prunes}",
   "shell.status.session": "Сессия",
   "shell.status.autonomyOn": "Автономность Turbo включена",
   "shell.status.autonomyOff": "Включить автономность Turbo",

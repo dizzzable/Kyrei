@@ -20,7 +20,9 @@ const CAPABILITY_TO_TOOLS: Readonly<Record<AgentCapability, readonly string[]>> 
   // Mutations stay denied under memory.write (empty) and Team Light.
   "memory.read": [
     "memory_search",
+    "memory_ask",
     "query_decisions",
+    "fetch_decision",
     "plan_read",
     "openviking_health",
     "openviking_find",

@@ -512,12 +512,13 @@ describe("runKyreiChat project context wiring", () => {
         model: "mock-model",
         workspace: "/workspace",
       }),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       text: "ok",
       parts: [],
       status: "complete",
       attempts: [],
       route: { providerId: "mock-provider", modelId: "mock-model" },
+      harness: expect.objectContaining({ intentRoute: expect.any(String) }),
     });
 
     expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(

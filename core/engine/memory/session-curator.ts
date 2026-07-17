@@ -17,6 +17,16 @@ import { generateText, type LanguageModel } from "ai";
 import { writeMemory } from "./writer.js";
 import { createLtmBridge } from "./ltm-bridge.js";
 import { writeHandoff, type HandoffArtifact } from "./handoff.js";
+import {
+  DEFAULT_CAPTURE_THRESHOLD,
+  extractCaptureSignals,
+  type CaptureKind,
+} from "./capture-signals.js";
+import { jaccardSimilarity } from "./recall-pipeline.js";
+
+function jaccardish(a: string, b: string): number {
+  return jaccardSimilarity(a, b);
+}
 
 export type CuratorApplyMode = "propose" | "apply_safe" | "apply_all";
 export type CuratorTarget = "notes" | "memory" | "ltm_checkpoint" | "handoff";
@@ -136,14 +146,17 @@ const NEXT_RE = /^(todo|next|should|need to|FIXME|TODO|далее|нужно|с�
 const FACT_RE = /^(uses?|prefer|always|never|project|stack|convention|default|важно|проект|стек|конвенци)/i;
 const DONE_RE = /^(done|fixed|implemented|merged|completed|сделано|готово|исправлено)\b/i;
 
-/** Pure heuristic proposals — no network. */
+/** Pure heuristic proposals — no network. Wave H: capture-signal scoring + pins. */
 export function heuristicCurateProposals(
   transcript: string,
   sessionId: string,
   title?: string,
+  opts: { captureThreshold?: number } = {},
 ): CuratorProposal[] {
   const proposals: CuratorProposal[] = [];
   const lines = transcript.split(/\n+/).map((l) => l.replace(/^(USER|ASSISTANT|SYSTEM):\s*/i, "").trim());
+  const threshold = opts.captureThreshold ?? DEFAULT_CAPTURE_THRESHOLD;
+  const capture = extractCaptureSignals(transcript, threshold);
 
   const decisions: string[] = [];
   const nexts: string[] = [];
@@ -158,11 +171,26 @@ export function heuristicCurateProposals(
     else if (DONE_RE.test(bare)) done.push(clip(bare, 280));
   }
 
+  // Merge high-score capture signals into buckets (MemoHood cheap gate).
+  for (const s of capture.durable) {
+    const text = clip(s.line, 280);
+    if (s.kind === "decision" || s.kind === "correction") {
+      if (!decisions.includes(text)) decisions.push(text);
+    } else if (s.kind === "event" && s.reasons.includes("done")) {
+      if (!done.includes(text)) done.push(text);
+    } else if (s.kind === "event" && s.reasons.includes("next")) {
+      if (!nexts.includes(text)) nexts.push(text);
+    } else {
+      if (!facts.includes(text)) facts.push(text);
+    }
+  }
+
   const uniq = (arr: string[]) => [...new Set(arr)].slice(0, 12);
   const d = uniq(decisions);
   const n = uniq(nexts);
   const f = uniq(facts);
   const dn = uniq(done);
+  const pinnedLines = capture.pinned.map((s) => clip(s.line, 280));
 
   const label = title?.trim() || sessionId;
   const notesBody = [
@@ -173,6 +201,7 @@ export function heuristicCurateProposals(
     ...(d.length ? ["### Decisions", ...d.map((x) => `- ${x}`), ""] : []),
     ...(n.length ? ["### Next", ...n.map((x) => `- ${x}`), ""] : []),
     ...(f.length ? ["### Notes", ...f.map((x) => `- ${x}`), ""] : []),
+    ...(pinnedLines.length ? ["### Pinned", ...pinnedLines.map((x) => `- ${x}`), ""] : []),
   ].join("\n").trim();
 
   if (notesBody.length > 80) {
@@ -183,10 +212,12 @@ export function heuristicCurateProposals(
     });
   }
 
-  if (f.length || d.length) {
+  if (f.length || d.length || pinnedLines.length) {
     const mem = [
       `## From session ${label} (${sessionId.slice(0, 12)}…)`,
-      ...[...f, ...d].slice(0, 10).map((x) => `- ${x}`),
+      ...[...pinnedLines.map((x) => `📌 ${x}`), ...f, ...d].slice(0, 12).map((x) =>
+        x.startsWith("📌") || x.startsWith("-") ? `- ${x.replace(/^- /, "")}` : `- ${x}`,
+      ),
     ].join("\n");
     proposals.push({
       target: "memory",
@@ -195,24 +226,45 @@ export function heuristicCurateProposals(
     });
   }
 
+  const decisionPayloads = d.slice(0, 8).map((decision) => {
+    const sig = capture.signals.find((s) => s.line === decision || decision.includes(s.line.slice(0, 40)));
+    return {
+      decision,
+      rationale: "Extracted from archived session transcript",
+      pinned: sig?.pinned === true || pinnedLines.includes(decision),
+      kind: (sig?.kind ?? "decision") as CaptureKind,
+    };
+  });
+  // Ensure pinned facts become LTM decisions even if not in d.
+  for (const p of capture.pinned.slice(0, 5)) {
+    const text = clip(p.line, 280);
+    if (!decisionPayloads.some((x) => x.decision === text)) {
+      decisionPayloads.push({
+        decision: text,
+        rationale: "Pinned capture signal",
+        pinned: true,
+        kind: p.kind,
+      });
+    }
+  }
+
   const ltmPayload = {
     summary: clip(
       [label, dn[0], d[0], n[0]].filter(Boolean).join(" · ") || `Archived session ${sessionId}`,
       500,
     ),
-    decisions: d.slice(0, 8).map((decision) => ({
-      decision,
-      rationale: "Extracted from archived session transcript",
-    })),
+    decisions: decisionPayloads,
     openThreads: n.slice(0, 8),
     nextActions: n.slice(0, 8),
     changedFiles: [] as string[],
     sessionId,
+    /** Wave H: also write bi-temporal decision rows (with SUPERSEDE when near-dupe). */
+    recordDecisions: true,
   };
   proposals.push({
     target: "ltm_checkpoint",
     content: JSON.stringify(ltmPayload, null, 2),
-    rationale: "LTM checkpoint for hybrid recall",
+    rationale: "LTM checkpoint + ranked decisions for hybrid recall",
   });
 
   proposals.push({
@@ -377,21 +429,67 @@ export async function applyCuratorProposals(
       try {
         const payload = JSON.parse(p.content) as {
           summary?: string;
-          decisions?: Array<{ decision: string; rationale: string }>;
+          decisions?: Array<{
+            decision: string;
+            rationale?: string;
+            pinned?: boolean;
+            kind?: CaptureKind;
+          }>;
           openThreads?: string[];
           nextActions?: string[];
           changedFiles?: string[];
           sessionId?: string;
+          recordDecisions?: boolean;
         };
         const ltm = createLtmBridge(ltmDir);
+        const sid = payload.sessionId || sessionId;
         await ltm.appendCheckpoint({
           summary: payload.summary || `Archived session ${sessionId}`,
           changedFiles: payload.changedFiles ?? [],
-          decisions: payload.decisions ?? [],
+          decisions: (payload.decisions ?? []).map((d) => ({
+            decision: d.decision,
+            rationale: d.rationale ?? "",
+          })),
           openThreads: payload.openThreads ?? [],
           nextActions: payload.nextActions ?? [],
-          sessionId: payload.sessionId || sessionId,
+          sessionId: sid,
         });
+        // Wave H: promote durable decisions into bi-temporal ledger with SUPERSEDE.
+        if (payload.recordDecisions !== false) {
+          for (const d of (payload.decisions ?? []).slice(0, 12)) {
+            const text = String(d.decision ?? "").trim();
+            if (text.length < 8) continue;
+            try {
+              const similar = await ltm.findSimilarActiveDecision(text, 0.78);
+              if (similar && jaccardish(similar.decision, text) >= 0.92) {
+                // Near-exact duplicate — skip (no spam).
+                continue;
+              }
+              if (similar && (d.kind === "correction" || jaccardish(similar.decision, text) >= 0.55)) {
+                await ltm.supersedeDecision({
+                  supersedesId: similar.id,
+                  decision: text,
+                  rationale: d.rationale ?? `Supersedes ${similar.id} from curator`,
+                  sessionId: sid,
+                  pinned: d.pinned === true,
+                  kind: d.kind ?? "decision",
+                  tags: d.pinned ? ["pinned", "curator"] : ["curator"],
+                });
+              } else {
+                await ltm.addDecision({
+                  decision: text,
+                  rationale: d.rationale ?? "Curator session archive",
+                  sessionId: sid,
+                  pinned: d.pinned === true,
+                  kind: d.kind ?? "decision",
+                  tags: d.pinned ? ["pinned", "curator"] : ["curator"],
+                });
+              }
+            } catch {
+              /* one bad decision must not block checkpoint */
+            }
+          }
+        }
         try {
           await ltm.refreshRuntimeSnapshot();
         } catch {

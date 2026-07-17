@@ -15,6 +15,36 @@ export { createStores, createFileStores, createPostgresStores, createStoresAsync
 export type { Stores } from "./data/index.js";
 export { createLtmBridge } from "./memory/ltm-bridge.js";
 export type { LtmEvent, LtmCheckpoint, LtmDecisionRecord } from "./memory/ltm-bridge.js";
+export {
+  postProcessRecall,
+  shouldRecall,
+  collapseNearDuplicates,
+  mmrRerank,
+  jaccardSimilarity,
+  normalizeRecallConfig,
+  DEFAULT_RECALL_PIPELINE,
+} from "./memory/recall-pipeline.js";
+export type { RecallHit, RecallPipelineConfig } from "./memory/recall-pipeline.js";
+export {
+  scoreCaptureLine,
+  extractCaptureSignals,
+  effectiveConfidence,
+  detectPinned,
+  normalizeDecayConfig,
+  DEFAULT_CAPTURE_THRESHOLD,
+  DEFAULT_DECAY_CONFIG,
+} from "./memory/capture-signals.js";
+export type { CaptureKind, CaptureSignal, DecayConfig } from "./memory/capture-signals.js";
+export {
+  checkSufficiency,
+  verifyCitation,
+  filterVerifiedCitations,
+  refuseMessage,
+  buildGroundedContextPack,
+  normalizeCiteConfig,
+  DEFAULT_CITE_OR_REFUSE,
+} from "./memory/cite-or-refuse.js";
+export type { GroundedSnippet, SufficiencyResult, CitationCheck, CiteOrRefuseConfig } from "./memory/cite-or-refuse.js";
 export { assembleSystemContext } from "./memory/layers.js";
 export { writeHandoff, readHandoff, reseedFromHandoff, HandoffSchema } from "./memory/handoff.js";
 export type { HandoffArtifact } from "./memory/handoff.js";
@@ -145,6 +175,35 @@ export {
   detectToolContentKind,
 } from "./context/tool-compress.js";
 export type { ToolContentKind, CompressResult } from "./context/tool-compress.js";
+export {
+  extractFocusTerms,
+  isLongHorizonGoal,
+  skimTextForFocus,
+  lastUserTextFromMessages,
+  userAuthorizedBuild,
+} from "./context/goal-skim.js";
+export { classifyIntent, classifyIntentFromMessages } from "./context/intent-router.js";
+export type { IntentDecision, IntentRoute } from "./context/intent-router.js";
+export { shouldForcePlanMode, planArtifactExists } from "./context/plan-gate.js";
+export { withWorkingStatePin, buildWorkingStatePin } from "./context/working-state.js";
+export { createHarnessMetrics } from "./observability/harness-metrics.js";
+export type { HarnessMetricsSnapshot } from "./observability/harness-metrics.js";
+export {
+  buildBudgetedSymbolMap,
+  clearSymbolMapCache,
+  invalidateSymbolMapCache,
+} from "./intel/repo-symbols.js";
+export {
+  runPostEditVerify,
+  preferVerifyCommand,
+  formatPostEditVerifyAppendix,
+} from "./reliability/post-edit-verify.js";
+export {
+  evaluateVerifyBeforeDone,
+  turnHadFileMutations,
+  turnHasVerifyEvidence,
+  verifyBeforeDoneMessage,
+} from "./reliability/verify-before-done.js";
 export { createReadMemo, contentFingerprint } from "./context/read-memo.js";
 export type { ReadMemo, ReadMemoEntry } from "./context/read-memo.js";
 export { resolveEngineConfig, EngineConfigSchema } from "./config/schema.js";
@@ -198,6 +257,7 @@ export { buildGBrainTools } from "./tools/gbrain.js";
 export { buildPlanningTools } from "./tools/planning.js";
 export { buildOpenVikingTools } from "./tools/openviking.js";
 export { buildMemorySearchTools } from "./tools/memory-search.js";
+export { buildMemoryAskTools, runMemoryAsk, collectAskSnippets } from "./tools/memory-ask.js";
 export { buildMemoryWriteTools } from "./tools/memory-write.js";
 export { buildMcpTools } from "./tools/mcp.js";
 export { createMcpManager, normalizeMcpConfig } from "./mcp/manager.js";

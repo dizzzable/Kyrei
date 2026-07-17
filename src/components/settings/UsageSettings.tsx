@@ -40,6 +40,27 @@ function budgetFromEngine(engine: Record<string, unknown> | undefined): UsageBud
   };
 }
 
+type PostEditMode = "off" | "on" | "polish" | "mutate";
+
+function reliabilityFromEngine(engine: Record<string, unknown> | undefined): {
+  longTaskPlanGate: boolean;
+  postEditVerify: PostEditMode;
+  verifyBeforeDone: boolean;
+} {
+  const raw = engine && typeof engine.reliability === "object" && engine.reliability
+    ? engine.reliability as Record<string, unknown>
+    : {};
+  const post = raw.postEditVerify;
+  return {
+    longTaskPlanGate: raw.longTaskPlanGate !== false,
+    postEditVerify:
+      post === "off" || post === "on" || post === "polish" || post === "mutate"
+        ? post
+        : "mutate",
+    verifyBeforeDone: raw.verifyBeforeDone !== false,
+  };
+}
+
 interface UsageSettingsProps {
   config?: AppConfig | null;
   onSaved?: (config: AppConfig) => void;
@@ -54,9 +75,14 @@ export function UsageSettings({ config, onSaved }: UsageSettingsProps) {
   const [budgetBusy, setBudgetBusy] = useState(false);
   const [budgetSaved, setBudgetSaved] = useState(false);
   const [budgetFailed, setBudgetFailed] = useState(false);
+  const [policyDraft, setPolicyDraft] = useState(() => reliabilityFromEngine(config?.engine));
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [policySaved, setPolicySaved] = useState(false);
+  const [policyFailed, setPolicyFailed] = useState(false);
 
   useEffect(() => {
     setBudgetDraft(budgetFromEngine(config?.engine));
+    setPolicyDraft(reliabilityFromEngine(config?.engine));
   }, [config?.engine]);
 
   const load = useCallback(async (windowDays: number) => {
@@ -118,6 +144,34 @@ export function UsageSettings({ config, onSaved }: UsageSettingsProps) {
     }));
   };
 
+  const savePolicies = async () => {
+    if (!config) return;
+    setPolicyBusy(true);
+    setPolicyFailed(false);
+    try {
+      const prevReliability = config.engine && typeof config.engine.reliability === "object" && config.engine.reliability
+        ? config.engine.reliability as Record<string, unknown>
+        : {};
+      const engine = {
+        ...(config.engine ?? {}),
+        reliability: {
+          ...prevReliability,
+          longTaskPlanGate: policyDraft.longTaskPlanGate,
+          postEditVerify: policyDraft.postEditVerify,
+          verifyBeforeDone: policyDraft.verifyBeforeDone,
+        },
+      };
+      const next = await gateway.setConfig({ engine });
+      onSaved?.(next);
+      setPolicySaved(true);
+      window.setTimeout(() => setPolicySaved(false), 1400);
+    } catch {
+      setPolicyFailed(true);
+    } finally {
+      setPolicyBusy(false);
+    }
+  };
+
   const budget = summary?.budget;
   const level = budget?.level ?? "ok";
 
@@ -177,6 +231,137 @@ export function UsageSettings({ config, onSaved }: UsageSettingsProps) {
           ) : null}
         </div>
       ) : null}
+
+      {config ? (
+        <div className="space-y-3 rounded-lg border border-border-soft bg-surface/45 p-3">
+          <div>
+            <h4 className="text-[11px] font-semibold text-foreground">{t("settings.usage.harness.policyTitle")}</h4>
+            <p className="mt-0.5 text-[10px] leading-4 text-muted">{t("settings.usage.harness.policyHint")}</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-[10.5px] text-secondary">{t("settings.usage.harness.planGateToggle")}</span>
+            <Switch
+              checked={policyDraft.longTaskPlanGate}
+              disabled={policyBusy}
+              onCheckedChange={(longTaskPlanGate) => setPolicyDraft((c) => ({ ...c, longTaskPlanGate }))}
+              aria-label={t("settings.usage.harness.planGateToggle")}
+            />
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-[10.5px] text-secondary">{t("settings.usage.harness.verifyBeforeDoneToggle")}</span>
+            <Switch
+              checked={policyDraft.verifyBeforeDone}
+              disabled={policyBusy}
+              onCheckedChange={(verifyBeforeDone) => setPolicyDraft((c) => ({ ...c, verifyBeforeDone }))}
+              aria-label={t("settings.usage.harness.verifyBeforeDoneToggle")}
+            />
+          </div>
+          <label className="flex flex-wrap items-center justify-between gap-3 text-[10.5px]">
+            <span className="text-secondary">{t("settings.usage.harness.postEditLabel")}</span>
+            <select
+              value={policyDraft.postEditVerify}
+              disabled={policyBusy}
+              className="h-8 rounded-md border border-border bg-surface px-2 text-[11px]"
+              onChange={(event) => {
+                const v = event.target.value;
+                if (v === "off" || v === "on" || v === "polish" || v === "mutate") {
+                  setPolicyDraft((c) => ({ ...c, postEditVerify: v }));
+                }
+              }}
+            >
+              <option value="off">{t("settings.usage.harness.postEdit.off")}</option>
+              <option value="polish">{t("settings.usage.harness.postEdit.polish")}</option>
+              <option value="mutate">{t("settings.usage.harness.postEdit.mutate")}</option>
+              <option value="on">{t("settings.usage.harness.postEdit.on")}</option>
+            </select>
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" disabled={policyBusy} onClick={() => void savePolicies()}>
+              {policyBusy ? <LoaderCircle className="size-3.5 animate-spin" /> : null}
+              {t("settings.usage.harness.policySave")}
+            </Button>
+            {policySaved ? <span className="text-[10px] text-primary">{t("settings.usage.harness.policySaved")}</span> : null}
+            {policyFailed ? <span className="text-[10px] text-danger">{t("settings.usage.harness.policyFailed")}</span> : null}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="space-y-2 rounded-lg border border-border-soft bg-surface/45 p-3">
+        <div>
+          <h4 className="text-[11px] font-semibold text-foreground">{t("settings.usage.harness.title")}</h4>
+          <p className="mt-0.5 text-[10px] leading-4 text-muted">{t("settings.usage.harness.hint")}</p>
+        </div>
+        {summary?.harness ? (
+          <dl className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3 text-[10.5px]">
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.intent")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">
+                {summary.harness.intentRoute ?? "—"}
+                {summary.harness.intentReason ? (
+                  <span className="ml-1 font-normal text-muted">({summary.harness.intentReason})</span>
+                ) : null}
+              </dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.waste")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">
+                {typeof summary.harness.wasteRatio === "number"
+                  ? `${Math.round(summary.harness.wasteRatio * 100)}%`
+                  : "—"}
+              </dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.prunes")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">{summary.harness.toolPrunes}</dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.skims")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">{summary.harness.goalSkims}</dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.pins")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">{summary.harness.workingStatePins}</dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.planGate")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">{summary.harness.longTaskPlanGates}</dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.goalVerify")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">{summary.harness.goalVerifies}</dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.postEdit")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">
+                {summary.harness.postEditVerifies}
+                {summary.harness.postEditFailures > 0
+                  ? ` (${summary.harness.postEditFailures} fail)`
+                  : ""}
+              </dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.mapCache")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">{summary.harness.symbolMapCacheHits}</dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.cacheBp")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">
+                {summary.harness.cacheBreakpoints
+                  ? t("settings.usage.harness.yes")
+                  : t("settings.usage.harness.no")}
+              </dd>
+            </div>
+            <div className="rounded-md border border-border-soft/80 bg-bg/30 px-2 py-1.5">
+              <dt className="text-muted">{t("settings.usage.harness.overflow")}</dt>
+              <dd className="mt-0.5 font-medium text-foreground">
+                soft {summary.harness.softOverflows} · hard {summary.harness.hardOverflows}
+              </dd>
+            </div>
+          </dl>
+        ) : (
+          <p className="text-[10.5px] text-muted">{t("settings.usage.harness.empty")}</p>
+        )}
+      </div>
 
       {config ? (
         <div className="space-y-3 rounded-lg border border-border-soft bg-surface/45 p-3">

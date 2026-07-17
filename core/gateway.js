@@ -1992,6 +1992,38 @@ export async function startGateway({
   };
   /** Durable multi-provider usage ledger (governance P0). Fail-open on write. */
   const usageLedger = createUsageLedger({ dataDir });
+  /** Wave E: last coding-harness snapshot from a completed chat turn (no secrets). */
+  let lastHarnessMetrics = null;
+  const sanitizeHarnessMetrics = (raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const n = (v) => {
+      const x = Number(v);
+      return Number.isFinite(x) && x >= 0 ? x : 0;
+    };
+    const s = (v, max = 64) => (typeof v === "string" ? v.trim().slice(0, max) : undefined);
+    return {
+      sessionId: s(raw.sessionId, 120),
+      turns: n(raw.turns),
+      toolPrunes: n(raw.toolPrunes),
+      toolBytesRaw: n(raw.toolBytesRaw),
+      toolBytesShown: n(raw.toolBytesShown),
+      goalSkims: n(raw.goalSkims),
+      workingStatePins: n(raw.workingStatePins),
+      softOverflows: n(raw.softOverflows),
+      hardOverflows: n(raw.hardOverflows),
+      stageBSummaries: n(raw.stageBSummaries),
+      longTaskPlanGates: n(raw.longTaskPlanGates),
+      goalVerifies: n(raw.goalVerifies),
+      intentRoute: s(raw.intentRoute, 40),
+      intentReason: s(raw.intentReason, 80),
+      postEditVerifies: n(raw.postEditVerifies),
+      postEditFailures: n(raw.postEditFailures),
+      symbolMapCacheHits: n(raw.symbolMapCacheHits),
+      cacheBreakpoints: raw.cacheBreakpoints === true,
+      wasteRatio: Number.isFinite(Number(raw.wasteRatio)) ? Number(raw.wasteRatio) : undefined,
+      updatedAt: s(raw.updatedAt, 40),
+    };
+  };
   const recordChatUsage = (payload) => {
     void usageLedger.record(payload).catch(() => undefined);
   };
@@ -3126,6 +3158,132 @@ export async function startGateway({
   };
 
   /**
+   * Wave H UI: list / fetch / pin / supersede LTM decisions for Settings.
+   * Ledger remains SoT under workspace/ltm/store/decisions.jsonl.
+   */
+  const withLtmBridge = async () => {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace) return { ok: false, error: "workspace_not_configured" };
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    if (memory.ltm?.enabled === false) return { ok: false, error: "ltm_disabled" };
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return { ok: false, error: "adapter_unavailable" };
+    }
+    if (typeof mod?.createLtmBridge !== "function") {
+      return { ok: false, error: "adapter_unavailable" };
+    }
+    const pathMod = await import("node:path");
+    const ltmDir = pathMod.join(workspace, "ltm");
+    const bridge = mod.createLtmBridge(ltmDir);
+    return { ok: true, bridge, ltmDir, workspace };
+  };
+
+  const listLtmDecisionsApi = async (opts = {}) => {
+    const ctx = await withLtmBridge();
+    if (!ctx.ok) return ctx;
+    try {
+      const includeInvalidated = opts.includeInvalidated === true;
+      const decisions = await ctx.bridge.listDecisions({
+        includeInvalidated,
+        rankByConfidence: true,
+      });
+      return {
+        ok: true,
+        count: decisions.length,
+        decisions: decisions.map((d) => ({
+          id: d.id,
+          decision: d.decision,
+          rationale: d.rationale,
+          validFrom: d.validFrom,
+          validTo: d.validTo,
+          tags: d.tags,
+          sessionId: d.sessionId,
+          pinned: Boolean(d.pinned),
+          kind: d.kind,
+          confidence: d.confidence,
+          supersedes: d.supersedes,
+          lastAccessedAt: d.lastAccessedAt,
+          active: d.validTo == null,
+        })),
+      };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? "list_decisions_failed" };
+    }
+  };
+
+  const fetchLtmDecisionApi = async (id) => {
+    const ctx = await withLtmBridge();
+    if (!ctx.ok) return ctx;
+    if (typeof id !== "string" || !id.trim()) return { ok: false, error: "id_required" };
+    try {
+      const { decision, history } = await ctx.bridge.fetchDecision(id.trim());
+      if (!decision) return { ok: false, error: "not_found" };
+      const map = (d) => ({
+        id: d.id,
+        decision: d.decision,
+        rationale: d.rationale,
+        validFrom: d.validFrom,
+        validTo: d.validTo,
+        tags: d.tags,
+        sessionId: d.sessionId,
+        pinned: Boolean(d.pinned),
+        kind: d.kind,
+        confidence: d.confidence,
+        supersedes: d.supersedes,
+        lastAccessedAt: d.lastAccessedAt,
+        active: d.validTo == null,
+      });
+      return { ok: true, decision: map(decision), history: history.map(map) };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? "fetch_decision_failed" };
+    }
+  };
+
+  /** Toggle pin by rewriting the decision row tags/pinned flag (no supersede). */
+  const pinLtmDecisionApi = async (id, pinned) => {
+    const ctx = await withLtmBridge();
+    if (!ctx.ok) return ctx;
+    if (typeof id !== "string" || !id.trim()) return { ok: false, error: "id_required" };
+    try {
+      const { decision } = await ctx.bridge.fetchDecision(id.trim());
+      if (!decision) return { ok: false, error: "not_found" };
+      if (decision.validTo) return { ok: false, error: "decision_superseded" };
+      // Re-record via supersede of self with flipped pin is wrong; use raw ledger rewrite:
+      // invalidate is not pin. Use addDecision after invalidate would lose history link.
+      // Prefer supersede with same text + pin tag when bridge has no setPinned — Wave H uses supersede with same body.
+      const wantPinned = pinned === true;
+      if (Boolean(decision.pinned) === wantPinned) {
+        return { ok: true, id: decision.id, pinned: wantPinned, unchanged: true };
+      }
+      const result = await ctx.bridge.supersedeDecision({
+        supersedesId: decision.id,
+        decision: decision.decision,
+        rationale: decision.rationale || (wantPinned ? "Pinned in Settings" : "Unpinned in Settings"),
+        sessionId: decision.sessionId || "settings-ui",
+        pinned: wantPinned,
+        kind: decision.kind || "decision",
+        tags: [
+          ...decision.tags.filter((t) => !/^pinned?$/i.test(t) && t !== "settings-pin"),
+          ...(wantPinned ? ["pinned", "settings-pin"] : ["settings-pin"]),
+        ],
+      });
+      try {
+        await ctx.bridge.refreshRuntimeSnapshot();
+      } catch {
+        /* optional */
+      }
+      void reindexBuiltinMemoryIndex().catch(() => undefined);
+      return { ok: true, id: result.newId, pinned: wantPinned, superseded: result.superseded, previousId: decision.id };
+    } catch (error) {
+      return { ok: false, error: error?.message ?? "pin_decision_failed" };
+    }
+  };
+
+  /**
    * Distill a session into notes / MEMORY / LTM / handoff (session-curator).
    * Fail-open: never blocks archive. Optional small LLM when provider ready.
    */
@@ -3984,6 +4142,38 @@ export async function startGateway({
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Wave G2: resolve modelAssignments role (plan/build/polish/deepreep) for the
+   * session coding mode. Fail-open to undefined → keep session model.
+   * @param {"plan"|"build"|"polish"|"deepreep"} role
+   * @param {string} [sessionId]
+   */
+  function roleAssignmentRuntimeTarget(role, sessionId) {
+    const ref = config.modelAssignments?.[role];
+    if (!ref || typeof ref.providerId !== "string" || typeof ref.modelId !== "string") {
+      return undefined;
+    }
+    try {
+      return privateRuntimeTargetForConfig(config, secrets, ref.providerId, ref.modelId, {
+        routingKey: sessionId ? `${sessionId}:role:${role}` : `role:${role}`,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Map session codingMode → assignment role. Auto has no forced role switch.
+   * @param {string|undefined} codingMode
+   * @returns {"plan"|"build"|"polish"|"deepreep"|null}
+   */
+  function codingModeToAssignmentRole(codingMode) {
+    if (codingMode === "plan" || codingMode === "build" || codingMode === "polish" || codingMode === "deepreep") {
+      return codingMode;
+    }
+    return null;
   }
 
   function fallbackRuntimeTargets(sessionId) {
@@ -4861,19 +5051,50 @@ export async function startGateway({
 
     let mainTarget;
     let mainTargets = [];
+    // Wave G2: prefer modelAssignments for explicit coding modes (plan/build/polish/deepreep).
+    const modeRole = codingModeToAssignmentRole(session?.codingMode);
+    const roleTarget = modeRole ? roleAssignmentRuntimeTarget(modeRole, sessionId) : undefined;
     try {
-      mainTargets = privateRuntimeTargetsForConfig(
-        config,
-        secrets,
-        session.providerId,
-        session.modelId,
-        {
-          fallbackToDefault: true,
-          sessionId,
-          preferredAccountId: session.providerAccountId,
-        },
-      );
-      mainTarget = mainTargets[0];
+      if (roleTarget) {
+        mainTarget = roleTarget;
+        mainTargets = [roleTarget];
+        // Also keep session-model accounts as capacity spares after the role model.
+        try {
+          const sessionTargets = privateRuntimeTargetsForConfig(
+            config,
+            secrets,
+            session.providerId,
+            session.modelId,
+            {
+              fallbackToDefault: true,
+              sessionId,
+              preferredAccountId: session.providerAccountId,
+            },
+          );
+          for (const t of sessionTargets) {
+            if (t.providerId === mainTarget.providerId && t.model === mainTarget.model
+              && (t.accountId ?? "") === (mainTarget.accountId ?? "")) {
+              continue;
+            }
+            mainTargets.push(t);
+          }
+        } catch {
+          /* role target alone is enough */
+        }
+      } else {
+        mainTargets = privateRuntimeTargetsForConfig(
+          config,
+          secrets,
+          session.providerId,
+          session.modelId,
+          {
+            fallbackToDefault: true,
+            sessionId,
+            preferredAccountId: session.providerAccountId,
+          },
+        );
+        mainTarget = mainTargets[0];
+      }
     } catch {
       emitActiveTurnEvent(turn, { type: "error", payload: { code: "provider_not_configured" } });
       await finalizeActiveTurn(turn, { status: "error" });
@@ -4956,9 +5177,32 @@ export async function startGateway({
         preferredAccountId: session.providerAccountId,
         signal: controller.signal,
       });
+      const turnMessages = await convoFor(sessionId);
+      // Wave F: always pass a goal for harness (plan gate / goal-verify) from the
+      // latest user turn when the client did not set one. No secrets — chat text only.
+      let derivedGoal = "";
+      for (let i = turnMessages.length - 1; i >= 0; i--) {
+        const m = turnMessages[i];
+        if (!m || m.role !== "user") continue;
+        if (typeof m.content === "string" && m.content.trim()) {
+          derivedGoal = m.content.trim().slice(0, 4_000);
+          break;
+        }
+        if (Array.isArray(m.content)) {
+          const text = m.content
+            .map((part) => (typeof part === "string" ? part : (part && typeof part === "object" && typeof part.text === "string" ? part.text : "")))
+            .filter(Boolean)
+            .join("\n")
+            .trim();
+          if (text) {
+            derivedGoal = text.slice(0, 4_000);
+            break;
+          }
+        }
+      }
       const common = {
         emit: event => emitActiveTurnEvent(turn, event),
-        messages: await convoFor(sessionId),
+        messages: turnMessages,
         providerBase: mainTarget.baseURL,
         providerProtocol: mainTarget.protocol,
         providerId: mainTarget.providerId,
@@ -4974,6 +5218,7 @@ export async function startGateway({
         ...(workerProvider ? { workerProvider } : {}),
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
         ...(team ? { team } : {}),
+        ...(derivedGoal ? { goal: derivedGoal } : {}),
         workspace: config.workspace,
         globalMemoryDir: join(dataDir, "memory"),
         sessionMirrorDir: join(dataDir, "session-mirror"),
@@ -5001,6 +5246,10 @@ export async function startGateway({
         config: engineConfigForSession(sessionId),
         ...(safeModelParams ? { modelParams: safeModelParams } : {}),
       });
+      // Wave E: remember last harness snapshot for Usage settings (no secrets).
+      if (result?.harness && typeof result.harness === "object") {
+        lastHarnessMetrics = sanitizeHarnessMetrics(result.harness);
+      }
       // UI parts and structured model history can legitimately share the same
       // tool input object. Redact them as separate roots: the generic cycle
       // guard otherwise replaces the second reference with "[CIRCULAR]" and
@@ -5397,6 +5646,7 @@ export async function startGateway({
             total: pipelineRuns.length,
           },
           agents: [...subagentRuns.values()].sort((left, right) => right.updatedAt - left.updatedAt),
+          ...(lastHarnessMetrics ? { harness: lastHarnessMetrics } : {}),
         });
       }
 
@@ -5423,7 +5673,12 @@ export async function startGateway({
           const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days")) || 30));
           const summary = await usageLedger.summary({ days });
           const budget = await usageBudgetSnapshot();
-          return sendJson(res, 200, { days, ...summary, budget });
+          return sendJson(res, 200, {
+            days,
+            ...summary,
+            budget,
+            ...(lastHarnessMetrics ? { harness: lastHarnessMetrics } : {}),
+          });
         }
       }
       if (path === "/api/usage/budget") {
@@ -6185,6 +6440,44 @@ export async function startGateway({
 
       if (path === "/api/memory/ltm/consolidate" && req.method === "POST") {
         return sendJson(res, 200, await consolidateBuiltinLtm());
+      }
+
+      if (path === "/api/memory/ltm/decisions" && req.method === "GET") {
+        const url = new URL(req.url || "/", "http://localhost");
+        const includeInvalidated = url.searchParams.get("includeInvalidated") === "1"
+          || url.searchParams.get("includeInvalidated") === "true";
+        const result = await listLtmDecisionsApi({ includeInvalidated });
+        return sendJson(res, result.ok ? 200 : result.error === "workspace_not_configured" ? 400 : 503, result);
+      }
+
+      if (path === "/api/memory/ltm/decisions/fetch" && req.method === "GET") {
+        const url = new URL(req.url || "/", "http://localhost");
+        const id = url.searchParams.get("id") || "";
+        const result = await fetchLtmDecisionApi(id);
+        const status = result.ok
+          ? 200
+          : result.error === "not_found"
+            ? 404
+            : result.error === "workspace_not_configured" || result.error === "id_required"
+              ? 400
+              : 503;
+        return sendJson(res, status, result);
+      }
+
+      if (path === "/api/memory/ltm/decisions/pin" && req.method === "POST") {
+        assertGatewayAcceptingMutations();
+        const body = await readBody(req).catch(() => ({}));
+        const id = typeof body?.id === "string" ? body.id : "";
+        const pinned = body?.pinned !== false;
+        const result = await pinLtmDecisionApi(id, pinned);
+        const status = result.ok
+          ? 200
+          : result.error === "not_found"
+            ? 404
+            : result.error === "workspace_not_configured" || result.error === "id_required"
+              ? 400
+              : 503;
+        return sendJson(res, status, result);
       }
 
       // ── Messaging inbound webhook ─────────────────────────────────

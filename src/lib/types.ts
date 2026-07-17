@@ -179,6 +179,16 @@ export interface GatewayStatus {
   cron: { enabled: number; total: number; nextRunAt?: string };
   pipelines?: { active: number; total: number };
   agents: SubagentRun[];
+  /** Last completed chat-turn harness metrics (Wave E/F, no secrets). */
+  harness?: {
+    intentRoute?: string;
+    wasteRatio?: number;
+    toolPrunes?: number;
+    longTaskPlanGates?: number;
+    postEditVerifies?: number;
+    cacheBreakpoints?: boolean;
+    updatedAt?: string;
+  };
 }
 
 export type SkillProvenance = "global" | "workspace" | "custom" | "kiro";
@@ -885,6 +895,47 @@ export interface MemoryIndexReindexResult {
   vectorsUpserted: number;
   sources: string[];
   status: MemoryIndexRuntimeStatus;
+  error?: string;
+}
+
+/** Wave H: LTM decision row for Settings pin/history UI. */
+export interface LtmDecisionRow {
+  id: string;
+  decision: string;
+  rationale: string;
+  validFrom: string;
+  validTo: string | null;
+  tags: string[];
+  sessionId: string;
+  pinned: boolean;
+  kind: string;
+  confidence: number;
+  supersedes: string | null;
+  lastAccessedAt: string;
+  active: boolean;
+}
+
+export interface LtmDecisionsListResult {
+  ok: boolean;
+  count?: number;
+  decisions?: LtmDecisionRow[];
+  error?: string;
+}
+
+export interface LtmDecisionFetchResult {
+  ok: boolean;
+  decision?: LtmDecisionRow;
+  history?: LtmDecisionRow[];
+  error?: string;
+}
+
+export interface LtmDecisionPinResult {
+  ok: boolean;
+  id?: string;
+  pinned?: boolean;
+  previousId?: string;
+  superseded?: boolean;
+  unchanged?: boolean;
   error?: string;
 }
 

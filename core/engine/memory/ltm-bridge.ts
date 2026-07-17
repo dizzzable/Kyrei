@@ -2,12 +2,23 @@
  * LTM bridge (Requirements §6.5). Uses the existing `ltm/store/*.jsonl` as the
  * SINGLE ledger — no duplicate journal. Appends events/checkpoints in the
  * documented format with id generation, secret redaction, and a file lock.
+ *
+ * Wave H: pin + confidence/decay ranking, atomic SUPERSEDE with history link
+ * (MemoHood-inspired; proposal-first still applies at MEMORY.md layer).
  */
 
 import { mkdir, readFile, appendFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { withFileLock } from "./lock.js";
 import { redact } from "../security/secrets.js";
+import {
+  effectiveConfidence,
+  normalizeDecayConfig,
+  type CaptureKind,
+  type DecayConfig,
+  DEFAULT_DECAY_CONFIG,
+} from "./capture-signals.js";
+import { jaccardSimilarity } from "./recall-pipeline.js";
 
 export interface LtmEvent {
   filesChanged: string[];
@@ -31,6 +42,9 @@ export interface LtmCheckpoint {
  * superseding it sets `validTo`, preserving "what was true then" alongside
  * "what is true now". Mirrors the Python `ltm.py decision add/invalidate`
  * contract so both writers stay compatible on the same ledger.
+ *
+ * Wave H fields (`pinned`, `confidence`, `kind`, `supersedes`, `lastAccessedAt`)
+ * are optional on disk for backward compatibility with older ledger lines.
  */
 export interface LtmDecisionRecord {
   id: string;
@@ -40,6 +54,16 @@ export interface LtmDecisionRecord {
   validTo: string | null;
   tags: string[];
   sessionId: string;
+  /** Never decay in runtime ranking (allergy, hard prefs, explicit pin). */
+  pinned: boolean;
+  /** Base confidence before decay [0,1]. Default 1. */
+  confidence: number;
+  /** Taxonomy for decay half-life. */
+  kind: CaptureKind;
+  /** Id of the decision this one replaced (SUPERSEDE history). */
+  supersedes: string | null;
+  /** Last time this fact was recalled or written (ISO). */
+  lastAccessedAt: string;
 }
 
 async function countLines(path: string): Promise<number> {
@@ -121,14 +145,47 @@ export function createLtmBridge(ltmDir: string) {
   }
 
   function toDecisionRecord(rec: Record<string, unknown>): LtmDecisionRecord {
+    const tags = Array.isArray(rec["tags"]) ? rec["tags"].map(String) : [];
+    const pinnedFlag =
+      rec["pinned"] === true ||
+      tags.some((t) => /^pinned?$/i.test(t)) ||
+      tags.includes("pin");
+    const confRaw = Number(rec["confidence"]);
+    const kindRaw = String(rec["kind"] ?? "decision");
+    const kind = (
+      [
+        "persona",
+        "event",
+        "preference",
+        "decision",
+        "correction",
+        "fact",
+        "instruction",
+        "summary",
+      ] as CaptureKind[]
+    ).includes(kindRaw as CaptureKind)
+      ? (kindRaw as CaptureKind)
+      : "decision";
+    const last =
+      typeof rec["last_accessed_at"] === "string" && rec["last_accessed_at"]
+        ? String(rec["last_accessed_at"])
+        : String(rec["valid_from"] ?? new Date().toISOString());
     return {
       id: String(rec["id"] ?? ""),
       decision: String(rec["decision"] ?? ""),
       rationale: String(rec["rationale"] ?? ""),
       validFrom: String(rec["valid_from"] ?? ""),
       validTo: rec["valid_to"] == null ? null : String(rec["valid_to"]),
-      tags: Array.isArray(rec["tags"]) ? rec["tags"].map(String) : [],
+      tags,
       sessionId: String(rec["session_id"] ?? ""),
+      pinned: pinnedFlag,
+      confidence: Number.isFinite(confRaw) ? Math.min(1, Math.max(0, confRaw)) : 1,
+      kind,
+      supersedes:
+        rec["supersedes"] == null || rec["supersedes"] === ""
+          ? null
+          : String(rec["supersedes"]),
+      lastAccessedAt: last,
     };
   }
 
@@ -144,28 +201,68 @@ export function createLtmBridge(ltmDir: string) {
     }
   }
 
+  function writeDecisionRow(input: {
+    id: string;
+    decision: string;
+    rationale: string;
+    tags: string[];
+    sessionId: string;
+    pinned?: boolean;
+    confidence?: number;
+    kind?: CaptureKind;
+    supersedes?: string | null;
+    validFrom?: string;
+    validTo?: string | null;
+    lastAccessedAt?: string;
+  }): Record<string, unknown> {
+    const now = new Date().toISOString();
+    const tags = [...input.tags];
+    if (input.pinned && !tags.some((t) => /^pinned?$/i.test(t))) tags.push("pinned");
+    return {
+      id: input.id,
+      decision: redact(input.decision),
+      rationale: redact(input.rationale),
+      valid_from: input.validFrom ?? now,
+      valid_to: input.validTo ?? null,
+      tags,
+      session_id: input.sessionId,
+      pinned: input.pinned === true,
+      confidence: input.confidence ?? 1,
+      kind: input.kind ?? "decision",
+      supersedes: input.supersedes ?? null,
+      last_accessed_at: input.lastAccessedAt ?? now,
+    };
+  }
+
   /**
    * Record a new architectural decision. Never overwrites or deletes a prior
-   * decision — call `invalidateDecision` to mark an existing one superseded.
+   * decision — call `invalidateDecision` / `supersedeDecision` to mark an
+   * existing one superseded.
    */
   async function addDecision(input: {
     decision: string;
     rationale?: string;
     tags?: string[];
     sessionId: string;
+    pinned?: boolean;
+    kind?: CaptureKind;
+    confidence?: number;
+    supersedes?: string | null;
   }): Promise<string> {
     await mkdir(storeDir, { recursive: true });
     return withFileLock(decisionsPath, async () => {
       const id = nextId("dec", await countLines(decisionsPath));
-      const rec = {
+      const rec = writeDecisionRow({
         id,
-        decision: redact(input.decision),
-        rationale: redact(input.rationale ?? ""),
-        valid_from: new Date().toISOString(),
-        valid_to: null,
+        decision: input.decision,
+        rationale: input.rationale ?? "",
         tags: input.tags ?? [],
-        session_id: input.sessionId,
-      };
+        sessionId: input.sessionId,
+        pinned: input.pinned,
+        kind: input.kind,
+        confidence: input.confidence,
+        supersedes: input.supersedes ?? null,
+      });
       await appendFile(decisionsPath, JSON.stringify(rec) + "\n", "utf8");
       return id;
     });
@@ -187,10 +284,136 @@ export function createLtmBridge(ltmDir: string) {
     });
   }
 
+  /**
+   * Atomic SUPERSEDE: invalidate `supersedesId` (if active) and append a new
+   * decision linked via `supersedes`. Old row stays in the ledger for history
+   * (`memohood_fetch`-style: list with includeInvalidated / fetchDecision).
+   */
+  async function supersedeDecision(input: {
+    supersedesId: string;
+    decision: string;
+    rationale?: string;
+    tags?: string[];
+    sessionId: string;
+    pinned?: boolean;
+    kind?: CaptureKind;
+  }): Promise<{ newId: string; superseded: boolean }> {
+    await mkdir(storeDir, { recursive: true });
+    return withFileLock(decisionsPath, async () => {
+      const records = await readDecisions();
+      let superseded = false;
+      const target = records.find((r) => r["id"] === input.supersedesId && r["valid_to"] == null);
+      if (target) {
+        target["valid_to"] = new Date().toISOString();
+        superseded = true;
+      }
+      const id = nextId("dec", records.length);
+      const rec = writeDecisionRow({
+        id,
+        decision: input.decision,
+        rationale: input.rationale ?? "",
+        tags: input.tags ?? [],
+        sessionId: input.sessionId,
+        pinned: input.pinned,
+        kind: input.kind ?? "decision",
+        supersedes: input.supersedesId,
+      });
+      records.push(rec);
+      await writeFile(decisionsPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      return { newId: id, superseded };
+    });
+  }
+
+  /**
+   * Find the best active decision that is near-duplicate of `text` (Jaccard).
+   * Used by curator apply-safe to SUPERSEDE rather than duplicate.
+   */
+  async function findSimilarActiveDecision(
+    text: string,
+    threshold = 0.72,
+  ): Promise<LtmDecisionRecord | null> {
+    const active = await listDecisions({ includeInvalidated: false });
+    let best: LtmDecisionRecord | null = null;
+    let bestSim = threshold;
+    for (const d of active) {
+      const sim = jaccardSimilarity(text, `${d.decision} ${d.rationale}`);
+      if (sim >= bestSim) {
+        bestSim = sim;
+        best = d;
+      }
+    }
+    return best;
+  }
+
+  /** One decision + optional supersede chain (oldest → newest). */
+  async function fetchDecision(
+    id: string,
+  ): Promise<{ decision: LtmDecisionRecord | null; history: LtmDecisionRecord[] }> {
+    const all = (await readDecisions()).map(toDecisionRecord);
+    const decision = all.find((d) => d.id === id) ?? null;
+    if (!decision) return { decision: null, history: [] };
+    const history: LtmDecisionRecord[] = [];
+    let cursor: string | null = decision.supersedes;
+    const seen = new Set<string>([decision.id]);
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const prev = all.find((d) => d.id === cursor);
+      if (!prev) break;
+      history.unshift(prev);
+      cursor = prev.supersedes;
+    }
+    return { decision, history };
+  }
+
   /** List decisions. By default only currently-active (`validTo === null`) ones. */
-  async function listDecisions(opts: { includeInvalidated?: boolean } = {}): Promise<LtmDecisionRecord[]> {
-    const records = (await readDecisions()).map(toDecisionRecord);
-    return opts.includeInvalidated ? records : records.filter((r) => r.validTo === null);
+  async function listDecisions(
+    opts: {
+      includeInvalidated?: boolean;
+      /** Sort by pin then effective confidence (Wave H). */
+      rankByConfidence?: boolean;
+      decay?: DecayConfig;
+      now?: Date;
+    } = {},
+  ): Promise<LtmDecisionRecord[]> {
+    let records = (await readDecisions()).map(toDecisionRecord);
+    if (!opts.includeInvalidated) records = records.filter((r) => r.validTo === null);
+    if (opts.rankByConfidence) {
+      const decay = opts.decay ?? DEFAULT_DECAY_CONFIG;
+      const now = opts.now ?? new Date();
+      records = [...records].sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        const ca = effectiveConfidence({
+          baseConfidence: a.confidence,
+          kind: a.kind,
+          pinned: a.pinned,
+          lastAccessedAt: a.lastAccessedAt,
+          now,
+          config: decay,
+        });
+        const cb = effectiveConfidence({
+          baseConfidence: b.confidence,
+          kind: b.kind,
+          pinned: b.pinned,
+          lastAccessedAt: b.lastAccessedAt,
+          now,
+          config: decay,
+        });
+        return cb - ca || b.validFrom.localeCompare(a.validFrom);
+      });
+    }
+    return records;
+  }
+
+  /** Touch last_accessed_at for ranking boost after successful recall. */
+  async function touchDecision(id: string): Promise<boolean> {
+    return withFileLock(decisionsPath, async () => {
+      const records = await readDecisions();
+      const target = records.find((r) => r["id"] === id);
+      if (!target) return false;
+      target["last_accessed_at"] = new Date().toISOString();
+      await writeFile(decisionsPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      return true;
+    });
   }
 
   async function readJsonlTail(path: string, maxLines: number): Promise<Record<string, unknown>[]> {
@@ -207,12 +430,29 @@ export function createLtmBridge(ltmDir: string) {
    * Best-effort TypeScript regenerate of `ltm/runtime/*` from the ledger.
    * Does not require Python `ltm.py`. Fail-open; never throws past this API.
    * Keeps LTM_RECALL layer useful without a dream-cycle scheduler.
+   *
+   * Wave H: rank active decisions by pin + Ebbinghaus confidence; drop those
+   * below decay floor from the *recall snapshot* (ledger rows stay intact).
    */
-  async function refreshRuntimeSnapshot(): Promise<void> {
+  async function refreshRuntimeSnapshot(opts: { decay?: DecayConfig } = {}): Promise<void> {
     try {
       const runtime = join(ltmDir, "runtime");
       await mkdir(runtime, { recursive: true });
-      const decisions = await listDecisions();
+      const decay = normalizeDecayConfig(opts.decay ?? DEFAULT_DECAY_CONFIG);
+      const now = new Date();
+      const ranked = await listDecisions({ rankByConfidence: true, decay, now });
+      const decisions = ranked.filter((d) => {
+        if (d.pinned) return true;
+        const conf = effectiveConfidence({
+          baseConfidence: d.confidence,
+          kind: d.kind,
+          pinned: d.pinned,
+          lastAccessedAt: d.lastAccessedAt,
+          now,
+          config: decay,
+        });
+        return conf > decay.floor;
+      });
       const events = await readJsonlTail(eventsPath, 12);
       const checkpoints = await readJsonlTail(checkpointsPath, 6);
 
@@ -242,6 +482,9 @@ export function createLtmBridge(ltmDir: string) {
           id: d.id,
           decision: d.decision,
           tags: d.tags,
+          pinned: d.pinned,
+          kind: d.kind,
+          supersedes: d.supersedes,
         })),
       };
 
@@ -249,7 +492,11 @@ export function createLtmBridge(ltmDir: string) {
       if (decisions.length) {
         recallLines.push("### Active decisions");
         for (const d of decisions.slice(0, 15)) {
-          recallLines.push(`- ${d.id}: ${d.decision}${d.rationale ? ` — ${d.rationale}` : ""}`);
+          const pin = d.pinned ? " 📌" : "";
+          const sup = d.supersedes ? ` (supersedes ${d.supersedes})` : "";
+          recallLines.push(
+            `- ${d.id}${pin}${sup}: ${d.decision}${d.rationale ? ` — ${d.rationale}` : ""}`,
+          );
         }
         recallLines.push("");
       }
@@ -296,7 +543,11 @@ export function createLtmBridge(ltmDir: string) {
     recall,
     addDecision,
     invalidateDecision,
+    supersedeDecision,
+    findSimilarActiveDecision,
+    fetchDecision,
     listDecisions,
+    touchDecision,
     refreshRuntimeSnapshot,
   };
 }

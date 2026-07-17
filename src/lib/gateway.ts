@@ -10,6 +10,9 @@ import type {
   MemoryIndexReindexResult,
   MemoryIndexRuntimeStatus,
   LtmConsolidateResult,
+  LtmDecisionsListResult,
+  LtmDecisionFetchResult,
+  LtmDecisionPinResult,
   SessionMirrorRuntimeStatus,
   SessionMirrorSearchResult,
   SessionMirrorSyncResult,
@@ -98,6 +101,30 @@ export interface UsageBudgetSnapshot {
   };
 }
 
+/** Wave D/E coding-harness efficiency snapshot (no secrets). */
+export interface HarnessMetricsSummary {
+  sessionId?: string;
+  turns: number;
+  toolPrunes: number;
+  toolBytesRaw: number;
+  toolBytesShown: number;
+  goalSkims: number;
+  workingStatePins: number;
+  softOverflows: number;
+  hardOverflows: number;
+  stageBSummaries: number;
+  longTaskPlanGates: number;
+  goalVerifies: number;
+  intentRoute?: string;
+  intentReason?: string;
+  postEditVerifies: number;
+  postEditFailures: number;
+  symbolMapCacheHits: number;
+  cacheBreakpoints: boolean;
+  wasteRatio?: number;
+  updatedAt?: string;
+}
+
 /** Durable usage ledger summary (`GET /api/usage`). */
 export interface UsageSummary {
   days: number;
@@ -110,6 +137,8 @@ export interface UsageSummary {
   byModel: Array<{ key: string; requestCount: number; totalTokens: number; costUsd: number }>;
   byDay: Array<{ day: string; requestCount: number; totalTokens: number; costUsd: number }>;
   budget?: UsageBudgetSnapshot;
+  /** Last completed chat turn harness metrics (Wave E). */
+  harness?: HarnessMetricsSummary;
 }
 
 /** One accounting row from `GET /api/usage/events` (no prompts/secrets). */
@@ -228,6 +257,19 @@ export const gateway = {
   getMemoryIndexStatus: () => json<MemoryIndexRuntimeStatus>("/api/memory/index"),
   reindexMemoryIndex: () => json<MemoryIndexReindexResult>("/api/memory/index/reindex", { method: "POST" }),
   consolidateLtm: () => json<LtmConsolidateResult>("/api/memory/ltm/consolidate", { method: "POST" }),
+  listLtmDecisions: (includeInvalidated = false) =>
+    json<LtmDecisionsListResult>(
+      `/api/memory/ltm/decisions?includeInvalidated=${includeInvalidated ? "1" : "0"}`,
+    ),
+  fetchLtmDecision: (id: string) =>
+    json<LtmDecisionFetchResult>(
+      `/api/memory/ltm/decisions/fetch?id=${encodeURIComponent(id)}`,
+    ),
+  pinLtmDecision: (id: string, pinned = true) =>
+    json<LtmDecisionPinResult>("/api/memory/ltm/decisions/pin", {
+      method: "POST",
+      body: JSON.stringify({ id, pinned }),
+    }),
   getSessionMirrorStatus: () => json<SessionMirrorRuntimeStatus>("/api/memory/session-mirror"),
   searchSessionMirror: (q: string, limit = 20) =>
     json<SessionMirrorSearchResult>(

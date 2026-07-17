@@ -50,6 +50,7 @@ import { buildGBrainTools } from "../tools/gbrain.js";
 import { buildPlanningTools } from "../tools/planning.js";
 import { buildOpenVikingTools } from "../tools/openviking.js";
 import { buildMemorySearchTools } from "../tools/memory-search.js";
+import { buildMemoryAskTools } from "../tools/memory-ask.js";
 import { buildMemoryWriteTools } from "../tools/memory-write.js";
 import { buildMcpTools } from "../tools/mcp.js";
 import { buildSkillTools } from "../tools/skills.js";
@@ -63,6 +64,11 @@ import {
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
 import { createReadMemo } from "../context/read-memo.js";
+import { lastUserTextFromMessages } from "../context/goal-skim.js";
+import { classifyIntentFromMessages } from "../context/intent-router.js";
+import { shouldForcePlanMode } from "../context/plan-gate.js";
+import { createHarnessMetrics } from "../observability/harness-metrics.js";
+import { buildBudgetedSymbolMap, symbolMapLastWasCacheHit } from "../intel/repo-symbols.js";
 import { assembleSystemContext } from "../memory/layers.js";
 import { MemoryIndexSession } from "../memory/index-session.js";
 import { snippetsFromModelMessages } from "../memory/session-project.js";
@@ -73,6 +79,14 @@ import {
   maybeVerifyTurnGoal,
   prepareMessagesForModel,
 } from "../reliability/runtime.js";
+import {
+  formatPostEditVerifyAppendix,
+  runPostEditVerify,
+} from "../reliability/post-edit-verify.js";
+import {
+  evaluateVerifyBeforeDone,
+  verifyBeforeDoneMessage,
+} from "../reliability/verify-before-done.js";
 import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/file-review.js";
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
 import { buildSystemPromptParts } from "./system-prompt.js";
@@ -199,6 +213,9 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   /** Wave B4: turn-scoped path@hash memo for repeated read_file. */
   const readMemo = createReadMemo();
   const audit = opts.auditLogPath ? createAuditLog(opts.auditLogPath) : undefined;
+  const harnessMetrics = createHarnessMetrics({
+    ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+  });
 
   // Configure process embedder (lexical default; optional HTTP neural endpoint).
   try {
@@ -322,6 +339,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(reviewModel ? { reviewModel } : {}),
         readMemo,
         smartCompress: true,
+        codingMode: normalizeCodingMode(cfg.codingMode),
+        onPostEditVerify: (ok) => harnessMetrics.recordPostEditVerify(ok),
       })
     : undefined;
   const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};
@@ -368,6 +387,28 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(sessionMirrorStores ? { sessionStore: sessionMirrorStores.sessions } : {}),
         ...(sessionSnippets.length ? { sessionSnippets } : {}),
         ...(cfg.memory.vault?.enabled ? { vault: cfg.memory.vault } : {}),
+        ...(cfg.memory.recall ? { recall: cfg.memory.recall } : {}),
+        ...(cfg.memory.citeOrRefuse
+          ? {
+              citeOrRefuse: {
+                enabled: cfg.memory.citeOrRefuse.enabled,
+                minTopScore: cfg.memory.citeOrRefuse.minTopScore,
+                minHits: cfg.memory.citeOrRefuse.minHits,
+              },
+            }
+          : {}),
+      })
+    : {};
+  const memoryAskTools = workspaceReady
+    ? buildMemoryAskTools({
+        workspace: opts.workspace!,
+        ...(cfg.memory.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm"), ltmEnabled: true } : { ltmEnabled: false }),
+        maxModelOutputChars: cfg.maxToolOutput,
+        ...(cfg.memory.vault?.enabled ? { vault: cfg.memory.vault } : {}),
+        citeOrRefuse: {
+          minTopScore: cfg.memory.citeOrRefuse?.minTopScore ?? 4,
+          minHits: cfg.memory.citeOrRefuse?.minHits ?? 1,
+        },
       })
     : {};
   const memoryWriteTools = workspaceReady
@@ -409,14 +450,32 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     ...planningTools,
     ...openvikingTools,
     ...memorySearchTools,
+    ...memoryAskTools,
     ...memoryWriteTools,
     ...mcpTools,
     ...skillTools,
   };
   // Plan mode hard-gates mutating tools (edit/write/shell/MCP write surfaces).
+  // Wave D3: long-horizon auto goals force plan tools until plan exists / user authorizes build.
+  const configuredCodingMode = normalizeCodingMode(cfg.codingMode);
+  const intent = classifyIntentFromMessages(
+    (opts.messages ?? []) as Array<{ role?: string; content?: unknown }>,
+    opts.goal,
+  );
+  const forcePlan = workspaceReady
+    && await shouldForcePlanMode({
+      codingMode: configuredCodingMode,
+      longTaskPlanGate: cfg.reliability?.longTaskPlanGate !== false,
+      workspace: opts.workspace,
+      messages: (opts.messages ?? []) as Array<{ role?: string; content?: unknown }>,
+      ...(opts.goal ? { goal: opts.goal } : {}),
+    });
+  harnessMetrics.recordIntent(intent.route, intent.reason);
+  if (forcePlan) harnessMetrics.recordLongTaskPlanGate();
+  const effectiveStartMode = forcePlan ? "plan" as const : configuredCodingMode;
   const filteredToolSet = filterToolsForCodingMode(
     baseToolSet as Record<string, unknown>,
-    normalizeCodingMode(cfg.codingMode),
+    effectiveStartMode,
   ) as ToolSet | undefined;
   const tools = filteredToolSet && Object.keys(filteredToolSet).length ? filteredToolSet : undefined;
   // MCP is intentionally not available to read-only children (external process surface).
@@ -444,6 +503,20 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(opts.globalMemoryDir ? { globalDir: opts.globalMemoryDir } : {}),
       });
       projectContext = assembled.trim() ? assembled : undefined;
+      // Wave D4: budgeted symbol map (fail-open; complements import graph tools).
+      try {
+        const symbolMap = await buildBudgetedSymbolMap(opts.workspace!, { maxChars: 1_600 });
+        if (symbolMapLastWasCacheHit(opts.workspace!)) {
+          harnessMetrics.recordSymbolMapCacheHit();
+        }
+        if (symbolMap.trim()) {
+          projectContext = projectContext
+            ? `${projectContext}\n\n${symbolMap}`
+            : symbolMap;
+        }
+      } catch (mapErr) {
+        console.warn("[kyrei v2] symbol map skipped:", mapErr);
+      }
     } catch (error) {
       console.warn("[kyrei v2] project context disabled:", error);
     }
@@ -691,6 +764,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           workspace: opts.workspace,
           sessionId: opts.sessionId,
           onMemoryMutated,
+          metrics: harnessMetrics,
+          ...(opts.goal ? { goal: opts.goal } : {}),
           ...(cfg.memory?.ltm?.enabled && opts.workspace ? { ltmDir: join(opts.workspace, "ltm") } : {}),
           // Stage-B LLM summary uses worker when configured; fail-open to heuristic.
           ...(cfg.compression?.summaryUseLlm ? { summaryModel: workerModel } : {}),
@@ -734,7 +809,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     const callTools: ToolSet | undefined = useTools && Object.keys(mergedTools).length
       ? mergedTools
       : undefined;
-    const configuredMode = normalizeCodingMode(cfg.codingMode);
+    const configuredMode = forcePlan ? "plan" as const : normalizeCodingMode(cfg.codingMode);
     /** Plan-safe subset used when auto declares Effective phase: plan mid-turn. */
     const planActiveToolNames = callTools
       ? (Object.keys(
@@ -753,7 +828,9 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
             ? await compactionPrepareStep(stepOpts)
             : undefined;
           const messages = compacted?.messages ?? stepOpts.messages;
-          const effective = effectiveCodingModeFromMessages(messages, configuredMode);
+          const effective = forcePlan
+            ? "plan" as const
+            : effectiveCodingModeFromMessages(messages, configuredMode);
           if (effective === "plan" && planActiveToolNames.length) {
             return {
               ...(compacted ?? {}),
@@ -768,6 +845,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     // Wave B2: Anthropic gets system messages with cacheControl on the stable
     // prefix; other protocols keep a single instructions string (stable first).
     const packedSystem = packSystemForCache(systemParts, target.protocol);
+    if (packedSystem.cacheBreakpoints) harnessMetrics.recordCacheBreakpoints(true);
     const historyMessages = prepareMessagesForModel((opts.messages ?? []) as ModelMessage[]);
     const streamMessages = packedSystem.systemMessages?.length
       ? [...packedSystem.systemMessages, ...historyMessages]
@@ -790,8 +868,10 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
               toolCall: { toolCallId: string; toolName: string; input: unknown };
               messages: import("ai").ModelMessage[];
             }) => {
-              // Hard-deny mutating tools when plan is configured or auto declared plan.
-              const effective = effectiveCodingModeFromMessages(messages, configuredMode);
+              // Hard-deny mutating tools when plan is configured, long-task gate, or auto declared plan.
+              const effective = forcePlan
+                ? "plan" as const
+                : effectiveCodingModeFromMessages(messages, configuredMode);
               if (effective === "plan" && isPlanModeBlockedTool(toolCall.toolName)) {
                 return { type: "denied" as const, reason: "plan_mode_blocks_mutating_tools" };
               }
@@ -938,30 +1018,51 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     }
   }
 
-  // Post-turn goal verifier: only when an explicit goal was provided and the
-  // turn otherwise looks successful (or hit step budget).
+  // Post-turn goal verifier: explicit goal, Wave D3 polish/audit, or Wave E intent preferGoalVerify.
+  const derivedUserGoal = lastUserTextFromMessages((opts.messages ?? []) as Array<{ role?: string; content?: unknown }>);
+  const verifyFromUser = cfg.reliability?.goalVerifyFromUserTurn !== false
+    && !opts.goal?.trim()
+    && (
+      normalizeCodingMode(cfg.codingMode) === "polish"
+      || intent.preferGoalVerify
+      || /KYREI_FINAL_AUDIT|KYREI_RUN_COMPLETE/.test(bridged.text)
+    )
+    && derivedUserGoal.length >= 12;
+  const goalForVerify = opts.goal?.trim() || (verifyFromUser ? derivedUserGoal : "");
   if (
     cfg.reliability?.goalVerify !== false
-    && opts.goal?.trim()
+    && goalForVerify
     && (status === "complete" || status === "max_steps")
     && !opts.abortSignal?.aborted
   ) {
     try {
+      harnessMetrics.recordGoalVerify();
+      // Wave F3: prefer cheap worker assignment for goal judge (isolated from main chat model).
+      const worker = opts.workerProvider;
+      const judgeTarget = worker ?? selected.target;
+      const judgeEntry = worker
+        ? resolveModel(worker.model, {
+            baseURL: worker.baseURL,
+            id: worker.model,
+            provider: worker.providerId,
+            protocol: worker.protocol,
+          })
+        : selected.entry;
       const judgeCredentials = {
-        ...(selected.target.credentials ?? {}),
-        ...(!selected.target.credentials?.apiKey && selected.target.apiKey
-          ? { apiKey: selected.target.apiKey }
+        ...(judgeTarget.credentials ?? {}),
+        ...(!judgeTarget.credentials?.apiKey && judgeTarget.apiKey
+          ? { apiKey: judgeTarget.apiKey }
           : {}),
       };
-      const judgeFetch = providerFetchFor(selected.target.accountId || opts.providerAccountId || "judge");
+      const judgeFetch = providerFetchFor(judgeTarget.accountId || opts.providerAccountId || "judge");
       const judge = createModelGoalJudge(
         buildModel({
-          protocol: selected.target.protocol,
-          baseURL: selected.target.baseURL,
-          apiKey: selected.target.apiKey,
+          protocol: judgeTarget.protocol,
+          baseURL: judgeTarget.baseURL,
+          apiKey: judgeTarget.apiKey,
           credentials: judgeCredentials,
-          model: selected.entry.id,
-          headers: selected.target.headers,
+          model: judgeEntry.id,
+          headers: judgeTarget.headers,
           identifyEngine: !hideEngineIdentity,
           ...(judgeFetch ? { fetch: judgeFetch } : {}),
         }),
@@ -978,7 +1079,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         .join("\n\n");
       const verdict = await maybeVerifyTurnGoal({
         enabled: true,
-        goal: opts.goal,
+        goal: goalForVerify,
         transcript,
         judge,
       });
@@ -999,6 +1100,92 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       }
     } catch (error) {
       console.warn("[kyrei reliability] goal verify skipped:", error);
+    }
+  }
+
+  // Wave G1 / G1.1: mutations without verify evidence cannot stay pure "complete".
+  // If mid-turn post-edit was skipped, try one fail-open harness verify before blocking.
+  if (
+    cfg.reliability?.verifyBeforeDone !== false
+    && !opts.abortSignal?.aborted
+  ) {
+    const codingModeNow = normalizeCodingMode(cfg.codingMode);
+    let partsForGate = parts as Array<{ type?: string; name?: string; result?: string; error?: string }>;
+    let gate = evaluateVerifyBeforeDone({
+      enabled: true,
+      status,
+      codingMode: codingModeNow,
+      parts: partsForGate,
+      assistantText: bridged.text,
+    });
+
+    if (
+      gate.blocked
+      && workspaceReady
+      && opts.workspace
+      && cfg.reliability?.postEditVerify !== "off"
+    ) {
+      try {
+        const rescue = await runPostEditVerify({
+          workspace: opts.workspace,
+          mode: cfg.reliability?.postEditVerify ?? "mutate",
+          codingMode: codingModeNow,
+          timeoutMs: Math.min(cfg.commandTimeoutMs ?? 60_000, 90_000),
+          force: true,
+        });
+        if (rescue.ran) {
+          harnessMetrics.recordPostEditVerify(rescue.ok === true);
+          const appendix = formatPostEditVerifyAppendix(rescue);
+          if (appendix) {
+            opts.emit({ type: "message.delta", payload: { text: appendix } });
+          }
+          // Successful typecheck/tests satisfy the gate; failures keep blocked.
+          if (rescue.ok) {
+            partsForGate = [
+              ...partsForGate,
+              {
+                type: "tool",
+                name: "diagnostics",
+                result: `[post-edit-verify ok] ${rescue.command ?? "verify"}\n${rescue.output ?? ""}`,
+              },
+            ];
+            gate = evaluateVerifyBeforeDone({
+              enabled: true,
+              status,
+              codingMode: codingModeNow,
+              parts: partsForGate,
+              assistantText: bridged.text,
+            });
+          } else if (rescue.command) {
+            // Record failed verify as explicit gap (still not complete).
+            goalVerify = {
+              satisfied: false,
+              gap: `post_edit_verify_failed:${rescue.command}`,
+            };
+          }
+        }
+      } catch (rescueErr) {
+        console.warn("[kyrei reliability] end-of-turn verify rescue skipped:", rescueErr);
+      }
+    }
+
+    if (gate.blocked) {
+      status = "goal_unsatisfied";
+      try {
+        harnessMetrics.recordGoalVerify();
+      } catch {
+        /* */
+      }
+      opts.emit({
+        type: "message.delta",
+        payload: { text: verifyBeforeDoneMessage("en") },
+      });
+      if (!goalVerify) {
+        goalVerify = {
+          satisfied: false,
+          gap: "mutations_without_verify_evidence",
+        };
+      }
     }
   }
 
@@ -1040,10 +1227,18 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     ? { ...usageFromBridge, ...(costUsd !== undefined ? { costUsd } : {}) }
     : undefined;
 
+  const harnessSnapshot = harnessMetrics.snapshot();
+  try {
+    harnessMetrics.log("end");
+  } catch {
+    /* metrics must never fail the turn */
+  }
+
   return {
     text: bridged.text,
     parts,
     status,
+    harness: harnessSnapshot,
     ...(responseMessages?.length ? { responseMessages } : {}),
     attempts: publicAttempts(stream.attempts),
     route: {

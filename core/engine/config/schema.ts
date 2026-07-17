@@ -192,6 +192,25 @@ const VaultConfigSchema = z.object({
   maxDepth: z.number().int().min(1).max(12).default(DEFAULT_ENGINE_CONFIG.memory.vault.maxDepth),
 });
 
+const MemoryRecallConfigSchema = z.object({
+  k: z.number().int().min(1).max(20).default(DEFAULT_ENGINE_CONFIG.memory.recall.k),
+  clusterEnabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.recall.clusterEnabled),
+  clusterThreshold: z.number().min(0.5).max(0.99).default(DEFAULT_ENGINE_CONFIG.memory.recall.clusterThreshold),
+  mmrEnabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.recall.mmrEnabled),
+  mmrLambda: z.number().min(0).max(1).default(DEFAULT_ENGINE_CONFIG.memory.recall.mmrLambda),
+});
+
+const MemoryDecayConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.decay.enabled),
+  floor: z.number().min(0.001).max(0.5).default(DEFAULT_ENGINE_CONFIG.memory.decay.floor),
+});
+
+const MemoryCiteOrRefuseConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.citeOrRefuse.enabled),
+  minTopScore: z.number().min(0).max(100).default(DEFAULT_ENGINE_CONFIG.memory.citeOrRefuse.minTopScore),
+  minHits: z.number().int().min(1).max(20).default(DEFAULT_ENGINE_CONFIG.memory.citeOrRefuse.minHits),
+});
+
 const MemoryConfigSchema = z.object({
   gbrain: GBrainConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.gbrain),
   ltm: LtmConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.ltm),
@@ -200,6 +219,9 @@ const MemoryConfigSchema = z.object({
   sessionMirror: SessionMirrorConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.sessionMirror),
   curator: MemoryCuratorConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.curator),
   vault: VaultConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.vault),
+  recall: MemoryRecallConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.recall),
+  decay: MemoryDecayConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.decay),
+  citeOrRefuse: MemoryCiteOrRefuseConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.citeOrRefuse),
 });
 
 const PlanningConfigSchema = z.object({
@@ -228,6 +250,12 @@ const ReliabilityConfigSchema = z.object({
   maxCostUsd: z.number().min(0).max(1_000_000).optional(),
   maxSubagents: z.number().int().min(1).max(64).optional(),
   toolLoop: ToolLoopConfigSchema.default(DEFAULT_ENGINE_CONFIG.reliability.toolLoop),
+  longTaskPlanGate: z.boolean().default(DEFAULT_ENGINE_CONFIG.reliability.longTaskPlanGate),
+  goalVerifyFromUserTurn: z.boolean().default(DEFAULT_ENGINE_CONFIG.reliability.goalVerifyFromUserTurn),
+  postEditVerify: z.enum(["off", "on", "polish", "mutate"]).default(
+    DEFAULT_ENGINE_CONFIG.reliability.postEditVerify,
+  ),
+  verifyBeforeDone: z.boolean().default(DEFAULT_ENGINE_CONFIG.reliability.verifyBeforeDone),
 });
 
 const CompressionConfigSchema = z.object({
@@ -243,6 +271,9 @@ const CompressionConfigSchema = z.object({
   summaryCooldownoffMs: z.number().int().min(0).max(3_600_000).default(
     DEFAULT_ENGINE_CONFIG.compression.summaryCooldownoffMs,
   ),
+  alwaysMaskToolBodies: z.boolean().default(DEFAULT_ENGINE_CONFIG.compression.alwaysMaskToolBodies),
+  goalSkim: z.boolean().default(DEFAULT_ENGINE_CONFIG.compression.goalSkim),
+  pinWorkingState: z.boolean().default(DEFAULT_ENGINE_CONFIG.compression.pinWorkingState),
 });
 
 const McpServerConfigSchema = z.object({

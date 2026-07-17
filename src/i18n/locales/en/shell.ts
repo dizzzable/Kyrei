@@ -140,6 +140,7 @@ export const enShell = {
   "shell.status.turnRunning": "Running",
   "shell.status.context": "Context",
   "shell.status.contextUsed": "{used} of {limit} tokens used",
+  "shell.status.harnessHint": "Last harness: intent={intent}, tool waste≈{waste}%, prunes={prunes}",
   "shell.status.session": "Session",
   "shell.status.autonomyOn": "Turbo autonomy is on",
   "shell.status.autonomyOff": "Enable Turbo autonomy",

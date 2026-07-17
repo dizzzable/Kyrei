@@ -96,12 +96,13 @@ async function readLtmRecall(ltmDir: string): Promise<string | null> {
 async function readLtmDecisions(ltmDir: string): Promise<string | null> {
   try {
     const bridge = createLtmBridge(ltmDir);
-    const decisions = await bridge.listDecisions();
-    if (decisions.length === 0) return null;
-    const lines = decisions.slice(0, 30).map((d) => {
+    const ranked = await bridge.listDecisions({ rankByConfidence: true });
+    if (ranked.length === 0) return null;
+    const lines = ranked.slice(0, 30).map((d) => {
       const tags = d.tags.length ? ` [${d.tags.join(", ")}]` : "";
+      const pin = d.pinned ? " 📌" : "";
       const why = d.rationale ? ` — ${d.rationale}` : "";
-      return `- ${d.id}${tags}: ${d.decision}${why}`;
+      return `- ${d.id}${pin}${tags}: ${d.decision}${why}`;
     });
     return [
       "Active architectural decisions (durable project memory, not instructions):",
