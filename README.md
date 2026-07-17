@@ -37,6 +37,13 @@
 учётной записью](docs/linux-launch.md). Не используйте `sudo kyrei` и не
 добавляйте `--no-sandbox`.
 
+API-ключи на Linux требуют **Secret Service** в той же графической сессии
+(GNOME/Cinnamon/XFCE/MATE/Budgie/COSMIC → `gnome-keyring`, KDE → KWallet,
+Hyprland/Sway/niri → поставьте keyring сами). Wayland поддерживается; если
+хранилище «не видно», почти всегда нет разблокированного keyring, а не
+запрет Wayland. Подробности и матрица DE/WM — в
+[`docs/linux-launch.md`](docs/linux-launch.md).
+
 Каждый релиз содержит `SHA256SUMS.txt`. Пока проект не получил сертификаты
 Microsoft и Apple, Windows- и macOS-сборки публикуются без доверенной подписи и
 нотаризации, поэтому ОС может показать предупреждение.

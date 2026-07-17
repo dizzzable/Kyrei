@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
@@ -203,6 +203,23 @@
     "appImage": {
       "executableArgs": []
     },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ],
+      "recommends": [
+        "gnome-keyring",
+        "libsecret-tools"
+      ]
+    },
     "pacman": {
       "artifactName": "${productName}-${version}-${arch}.pkg.tar.zst",
       "depends": [
@@ -221,6 +238,11 @@
         "libappindicator",
         "libsecret",
         "xdg-utils"
+      ],
+      "fpm": [
+        "--pacman-optional-depends=gnome-keyring: Secret Service for GNOME, Cinnamon, XFCE, MATE, Budgie, COSMIC, Pantheon, LXQt, and most Wayland WMs (Hyprland/Sway/niri)",
+        "--pacman-optional-depends=kwallet: KDE Plasma KWallet Secret Service",
+        "--pacman-optional-depends=keepassxc: alternative Secret Service provider when desktop keyring is unavailable"
       ]
     }
   }

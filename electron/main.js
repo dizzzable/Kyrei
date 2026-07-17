@@ -7,6 +7,7 @@ import { createAppUpdater } from "./app-updater.js";
 import { registerDesktopIpc } from "./desktop-ipc.js";
 import { installDesktopViewportGuard } from "./desktop-viewport-guard.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
+import { formatLinuxSecretsUnavailableMessage } from "./linux-secrets-env.js";
 import {
   createWindowsDpapiSecretsCodec,
   createWindowsProtectedSecretsCodec,
@@ -45,8 +46,30 @@ async function openPath(path) {
   if (error) throw new Error(error);
 }
 
+function warnLinuxSecretsUnavailable(backend) {
+  try {
+    console.warn(formatLinuxSecretsUnavailableMessage({
+      backend: typeof backend === "string" ? backend : undefined,
+      env: process.env,
+    }));
+  } catch {
+    console.warn("[kyrei] Linux protected credential storage is unavailable.");
+  }
+}
+
 async function createSecretsCodec() {
-  if (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text") return undefined;
+  let selectedBackend;
+  try {
+    selectedBackend = safeStorage.getSelectedStorageBackend?.();
+  } catch {
+    selectedBackend = undefined;
+  }
+  // Electron's basic_text backend is not OS-protected storage. Refuse it so
+  // provider keys never land on disk as pseudo-encrypted plaintext.
+  if (process.platform === "linux" && selectedBackend === "basic_text") {
+    warnLinuxSecretsUnavailable(selectedBackend);
+    return undefined;
+  }
   let safeStorageCodec;
   if (await safeStorage.isAsyncEncryptionAvailable()) {
     const codec = {
@@ -83,6 +106,9 @@ async function createSecretsCodec() {
     if (safeStorageCodec || dpapiCodec) {
       return createWindowsProtectedSecretsCodec({ safeStorageCodec, dpapiCodec });
     }
+  }
+  if (process.platform === "linux" && !safeStorageCodec) {
+    warnLinuxSecretsUnavailable(selectedBackend ?? "probe_failed");
   }
   return safeStorageCodec;
 }
