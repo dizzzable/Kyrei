@@ -78,10 +78,12 @@ export function LtmDecisionsPanel() {
       setNote(
         result.unchanged
           ? t("settings.ltmDecisions.pinUnchanged")
-          : t("settings.ltmDecisions.pinOk", {
-              id: result.id ?? row.id,
-              pinned: result.pinned ? "on" : "off",
-            }),
+          : t(
+              result.pinned
+                ? "settings.ltmDecisions.pinOkOn"
+                : "settings.ltmDecisions.pinOkOff",
+              { id: result.id ?? row.id },
+            ),
       );
       await load();
     } catch (e) {
@@ -176,6 +178,7 @@ export function LtmDecisionsPanel() {
                     disabled={pinBusyId === row.id}
                     onClick={() => void togglePin(row)}
                     title={row.pinned ? t("settings.ltmDecisions.unpin") : t("settings.ltmDecisions.pin")}
+                    aria-label={row.pinned ? t("settings.ltmDecisions.unpin") : t("settings.ltmDecisions.pin")}
                   >
                     {row.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
                   </Button>
@@ -194,7 +197,7 @@ export function LtmDecisionsPanel() {
                       {history.map((h) => (
                         <li key={h.id} className="text-[11px] leading-snug text-muted">
                           <span className="font-mono">{h.id}</span>
-                          {h.validTo ? " · superseded" : ""}: {clip(h.decision, 160)}
+                          {h.validTo ? ` · ${t("settings.ltmDecisions.badgeSuperseded")}` : ""}: {clip(h.decision, 160)}
                         </li>
                       ))}
                     </ul>

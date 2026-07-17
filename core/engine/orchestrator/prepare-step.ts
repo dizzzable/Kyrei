@@ -17,6 +17,7 @@ import {
   summarizeMiddleTurns,
 } from "../context/compaction.js";
 import { lastUserTextFromMessages } from "../context/goal-skim.js";
+import { isWorkingStatePinMessage } from "../context/working-state.js";
 import { withWorkingStatePin } from "../context/working-state.js";
 import type { HarnessMetrics } from "../observability/harness-metrics.js";
 import { readContextSummary, writeContextSummary } from "../context/summary-store.js";
@@ -124,7 +125,9 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
     };
 
     let changed = working !== messages;
-    const focus = (goal ?? lastUserTextFromMessages(working)).trim();
+    // Strip working-state pins so synthetic re-pin text never hijacks goal focus.
+    const focusMessages = working.filter((m) => !isWorkingStatePinMessage(m));
+    const focus = (goal ?? lastUserTextFromMessages(focusMessages)).trim();
     metrics?.recordTurn();
     if (of.soft) metrics?.recordOverflow("soft");
     if (of.hard) metrics?.recordOverflow("hard");

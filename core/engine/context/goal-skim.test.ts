@@ -42,6 +42,14 @@ describe("goal-skim", () => {
 
   it("recognizes build authorization phrases", () => {
     expect(userAuthorizedBuild("LGTM, implement the plan")).toBe(true);
+    expect(userAuthorizedBuild("go ahead")).toBe(true);
     expect(userAuthorizedBuild("what do you think?")).toBe(false);
+    // Bare implement is a task request, not plan release.
+    expect(
+      userAuthorizedBuild(
+        "Implement OAuth across gateway, UI, and session store with tests end-to-end",
+      ),
+    ).toBe(false);
+    expect(userAuthorizedBuild("реализуй авторизацию во всём проекте")).toBe(false);
   });
 });

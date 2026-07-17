@@ -28,6 +28,57 @@ function jaccardish(a: string, b: string): number {
   return jaccardSimilarity(a, b);
 }
 
+/**
+ * When LLM distill succeeds, re-inject pinned capture signals into the
+ * ltm_checkpoint payload so allergy/hard prefs are not dropped.
+ */
+export function mergePinnedCaptureIntoProposals(
+  heuristic: CuratorProposal[],
+  llm: CuratorProposal[],
+  transcript: string,
+): CuratorProposal[] {
+  const capture = extractCaptureSignals(transcript);
+  if (!capture.pinned.length) return llm;
+  return llm.map((p) => {
+    if (p.target !== "ltm_checkpoint") return p;
+    try {
+      const payload = JSON.parse(p.content) as {
+        decisions?: Array<{ decision?: string; pinned?: boolean; kind?: string; rationale?: string }>;
+        recordDecisions?: boolean;
+        [key: string]: unknown;
+      };
+      const decisions = Array.isArray(payload.decisions) ? [...payload.decisions] : [];
+      for (const pin of capture.pinned) {
+        const text = pin.line.slice(0, 280);
+        const exists = decisions.some((d) => {
+          const dec = String(d.decision ?? "");
+          return dec === text || jaccardish(dec, text) >= 0.85;
+        });
+        if (!exists) {
+          decisions.push({
+            decision: text,
+            rationale: "Pinned capture signal (merged after LLM distill)",
+            pinned: true,
+            kind: pin.kind,
+          });
+        } else {
+          for (const d of decisions) {
+            if (jaccardish(String(d.decision ?? ""), text) >= 0.85) {
+              d.pinned = true;
+              if (!d.kind) d.kind = pin.kind;
+            }
+          }
+        }
+      }
+      payload.decisions = decisions;
+      payload.recordDecisions = true;
+      return { ...p, content: JSON.stringify(payload, null, 2) };
+    } catch {
+      return p;
+    }
+  });
+}
+
 export type CuratorApplyMode = "propose" | "apply_safe" | "apply_all";
 export type CuratorTarget = "notes" | "memory" | "ltm_checkpoint" | "handoff";
 /** Which model to use for the optional LLM pass (gateway resolves credentials). */
@@ -460,12 +511,15 @@ export async function applyCuratorProposals(
             const text = String(d.decision ?? "").trim();
             if (text.length < 8) continue;
             try {
-              const similar = await ltm.findSimilarActiveDecision(text, 0.78);
-              if (similar && jaccardish(similar.decision, text) >= 0.92) {
-                // Near-exact duplicate — skip (no spam).
+              // Corrections need a lower find threshold — real rewrites often score ~0.5.
+              const findThreshold = d.kind === "correction" ? 0.42 : 0.72;
+              const similar = await ltm.findSimilarActiveDecision(text, findThreshold);
+              const sim = similar ? jaccardish(similar.decision, text) : 0;
+              if (similar && sim >= 0.92 && d.kind !== "correction") {
+                // Near-exact duplicate — skip (no spam). Corrections always rewrite.
                 continue;
               }
-              if (similar && (d.kind === "correction" || jaccardish(similar.decision, text) >= 0.55)) {
+              if (similar && (d.kind === "correction" || sim >= 0.5)) {
                 await ltm.supersedeDecision({
                   supersedesId: similar.id,
                   decision: text,
@@ -589,7 +643,8 @@ export async function curateSession(input: CurateSessionInput): Promise<CurateSe
       input.abortSignal,
     );
     if (llm?.length) {
-      proposals = llm;
+      // Preserve Wave H pins from capture signals even when LLM replaces heuristics.
+      proposals = mergePinnedCaptureIntoProposals(proposals, llm, transcript);
       via = "llm";
     } else {
       via = "heuristic_fallback";

@@ -63,7 +63,13 @@ export function checkSufficiency(
   config?: Partial<CiteOrRefuseConfig>,
 ): SufficiencyResult {
   const cfg = normalizeCiteConfig({ ...DEFAULT_CITE_OR_REFUSE, ...config });
-  const strong = snippets.filter((s) => s.score >= cfg.minTopScore && s.text.trim().length >= 12);
+  // Short high-score ADRs ("Prefer SQLite") must still count as evidence.
+  const strong = snippets.filter((s) => {
+    if (s.score < cfg.minTopScore) return false;
+    const len = s.text.trim().length;
+    if (len >= 12) return true;
+    return len >= 6 && s.score >= cfg.minTopScore + 2;
+  });
   const topScore = snippets.reduce((m, s) => Math.max(m, s.score), 0);
   if (strong.length < cfg.minHits) {
     return {

@@ -7,8 +7,8 @@
  * (MemoHood-inspired; proposal-first still applies at MEMORY.md layer).
  */
 
-import { mkdir, readFile, appendFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, appendFile, writeFile, rename, unlink } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { withFileLock } from "./lock.js";
 import { redact } from "../security/secrets.js";
 import {
@@ -77,6 +77,36 @@ async function countLines(path: string): Promise<number> {
 
 function nextId(prefix: string, n: number): string {
   return `${prefix}_${String(n + 1).padStart(6, "0")}`;
+}
+
+/** Prefer max(numeric suffix)+1 so sparse / mixed ledgers never collide. */
+function nextDecisionId(records: ReadonlyArray<{ id?: unknown } | Record<string, unknown>>): string {
+  let max = 0;
+  for (const rec of records) {
+    const id = String((rec as { id?: unknown })["id"] ?? "");
+    const m = /^dec_(\d+)$/i.exec(id);
+    if (m) max = Math.max(max, Number.parseInt(m[1]!, 10));
+  }
+  return nextId("dec", max);
+}
+
+/** Atomic JSONL rewrite (temp + rename; Windows-safe fallback). */
+async function atomicWriteJsonl(path: string, records: ReadonlyArray<Record<string, unknown>>): Promise<void> {
+  const dir = dirname(path);
+  await mkdir(dir, { recursive: true });
+  const body = records.length ? `${records.map((r) => JSON.stringify(r)).join("\n")}\n` : "";
+  const tmp = join(dir, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
+  await writeFile(tmp, body, "utf8");
+  try {
+    await rename(tmp, path);
+  } catch {
+    await writeFile(path, body, "utf8");
+    try {
+      await unlink(tmp);
+    } catch {
+      /* best effort */
+    }
+  }
 }
 
 export function createLtmBridge(ltmDir: string) {
@@ -192,10 +222,16 @@ export function createLtmBridge(ltmDir: string) {
   async function readDecisions(): Promise<Record<string, unknown>[]> {
     try {
       const raw = await readFile(decisionsPath, "utf8");
-      return raw
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const out: Record<string, unknown>[] = [];
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          out.push(JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          // skip_bad — one corrupt line must not wipe the ledger view
+        }
+      }
+      return out;
     } catch {
       return [];
     }
@@ -251,7 +287,8 @@ export function createLtmBridge(ltmDir: string) {
   }): Promise<string> {
     await mkdir(storeDir, { recursive: true });
     return withFileLock(decisionsPath, async () => {
-      const id = nextId("dec", await countLines(decisionsPath));
+      const existing = await readDecisions();
+      const id = nextDecisionId(existing);
       const rec = writeDecisionRow({
         id,
         decision: input.decision,
@@ -279,7 +316,28 @@ export function createLtmBridge(ltmDir: string) {
       const target = records.find((r) => r["id"] === id && r["valid_to"] == null);
       if (!target) return false;
       target["valid_to"] = new Date().toISOString();
-      await writeFile(decisionsPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      await atomicWriteJsonl(decisionsPath, records);
+      return true;
+    });
+  }
+
+  /**
+   * In-place pin flip without SUPERSEDE (stable id for Settings UI).
+   * Returns false when id missing or already superseded.
+   */
+  async function setPinned(id: string, pinned: boolean): Promise<boolean> {
+    return withFileLock(decisionsPath, async () => {
+      const records = await readDecisions();
+      const target = records.find((r) => r["id"] === id && r["valid_to"] == null);
+      if (!target) return false;
+      const tags = Array.isArray(target["tags"])
+        ? (target["tags"] as unknown[]).map(String).filter((t) => !/^pinned?$/i.test(t))
+        : [];
+      if (pinned) tags.push("pinned");
+      target["pinned"] = pinned === true;
+      target["tags"] = tags;
+      target["last_accessed_at"] = new Date().toISOString();
+      await atomicWriteJsonl(decisionsPath, records);
       return true;
     });
   }
@@ -307,7 +365,7 @@ export function createLtmBridge(ltmDir: string) {
         target["valid_to"] = new Date().toISOString();
         superseded = true;
       }
-      const id = nextId("dec", records.length);
+      const id = nextDecisionId(records);
       const rec = writeDecisionRow({
         id,
         decision: input.decision,
@@ -319,7 +377,7 @@ export function createLtmBridge(ltmDir: string) {
         supersedes: input.supersedesId,
       });
       records.push(rec);
-      await writeFile(decisionsPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      await atomicWriteJsonl(decisionsPath, records);
       return { newId: id, superseded };
     });
   }
@@ -411,7 +469,7 @@ export function createLtmBridge(ltmDir: string) {
       const target = records.find((r) => r["id"] === id);
       if (!target) return false;
       target["last_accessed_at"] = new Date().toISOString();
-      await writeFile(decisionsPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      await atomicWriteJsonl(decisionsPath, records);
       return true;
     });
   }
@@ -543,6 +601,7 @@ export function createLtmBridge(ltmDir: string) {
     recall,
     addDecision,
     invalidateDecision,
+    setPinned,
     supersedeDecision,
     findSimilarActiveDecision,
     fetchDecision,

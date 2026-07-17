@@ -92,15 +92,15 @@ async function readIf(path: string): Promise<string | null> {
 
 async function searchDecisions(ltmDir: string, query: string, hits: Hit[]): Promise<void> {
   const bridge = createLtmBridge(ltmDir);
-  const decisions = await bridge.listDecisions({ includeInvalidated: false });
+  const decisions = await bridge.listDecisions({ includeInvalidated: false, rankByConfidence: true });
   for (const d of decisions) {
     const blob = `${d.id} ${d.decision} ${d.rationale} ${d.tags.join(" ")}`;
     const score = scoreText(query, blob);
     if (score <= 0) continue;
     hits.push({
       source: "decision",
-      score: score + 4,
-      title: d.id,
+      score: score + 4 + (d.pinned ? 3 : 0),
+      title: d.pinned ? `${d.id} 📌` : d.id,
       snippet: clip(`${d.decision}${d.rationale ? ` — ${d.rationale}` : ""}`, 280),
       path: `ltm/store/decisions.jsonl#${d.id}`,
     });

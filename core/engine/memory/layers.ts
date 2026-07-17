@@ -8,6 +8,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createLtmBridge } from "./ltm-bridge.js";
+import { effectiveConfidence, DEFAULT_DECAY_CONFIG } from "./capture-signals.js";
 
 async function readIfExists(path: string): Promise<string | null> {
   try {
@@ -98,7 +99,22 @@ async function readLtmDecisions(ltmDir: string): Promise<string | null> {
     const bridge = createLtmBridge(ltmDir);
     const ranked = await bridge.listDecisions({ rankByConfidence: true });
     if (ranked.length === 0) return null;
-    const lines = ranked.slice(0, 30).map((d) => {
+    // Align with refreshRuntimeSnapshot: drop aged unpinned below decay floor.
+    const now = new Date();
+    const visible = ranked.filter((d) => {
+      if (d.pinned) return true;
+      const conf = effectiveConfidence({
+        baseConfidence: d.confidence,
+        kind: d.kind,
+        pinned: d.pinned,
+        lastAccessedAt: d.lastAccessedAt,
+        now,
+        config: DEFAULT_DECAY_CONFIG,
+      });
+      return conf > DEFAULT_DECAY_CONFIG.floor;
+    });
+    if (visible.length === 0) return null;
+    const lines = visible.slice(0, 30).map((d) => {
       const tags = d.tags.length ? ` [${d.tags.join(", ")}]` : "";
       const pin = d.pinned ? " 📌" : "";
       const why = d.rationale ? ` — ${d.rationale}` : "";

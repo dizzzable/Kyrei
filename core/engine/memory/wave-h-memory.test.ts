@@ -258,7 +258,7 @@ describe("curator + capture integration", () => {
   it("apply_safe writes decisions with supersede on correction", async () => {
     const ltmDir = join(ws, "ltm");
     const bridge = createLtmBridge(ltmDir);
-    await bridge.addDecision({
+    const oldId = await bridge.addDecision({
       decision: "Use cloud embeddings by default",
       sessionId: "old",
     });
@@ -286,6 +286,53 @@ describe("curator + capture integration", () => {
     const { applied } = await applyCuratorProposals(ws, "new", proposals, "apply_safe");
     expect(applied).toContain("ltm_checkpoint");
     const active = await bridge.listDecisions();
-    expect(active.some((d) => /local lexical/i.test(d.decision))).toBe(true);
+    expect(active).toHaveLength(1);
+    expect(active[0]!.decision).toMatch(/local lexical/i);
+    expect(active[0]!.supersedes).toBe(oldId);
+    const all = await bridge.listDecisions({ includeInvalidated: true });
+    expect(all.find((d) => d.id === oldId)?.validTo).toBeTruthy();
+  });
+
+  it("setPinned flips pin without changing id", async () => {
+    const bridge = createLtmBridge(join(ws, "ltm-pin"));
+    const id = await bridge.addDecision({
+      decision: "Never store secrets in MEMORY.md",
+      sessionId: "s1",
+    });
+    expect((await bridge.fetchDecision(id)).decision?.pinned).toBe(false);
+    expect(await bridge.setPinned(id, true)).toBe(true);
+    const after = await bridge.fetchDecision(id);
+    expect(after.decision?.id).toBe(id);
+    expect(after.decision?.pinned).toBe(true);
+  });
+
+  it("nextDecisionId avoids collision on sparse ledger", async () => {
+    const dir = join(ws, "ltm-sparse");
+    const bridge = createLtmBridge(dir);
+    // Seed a high id by supersede chain then only keep mental model of max-id.
+    await bridge.addDecision({ decision: "first", sessionId: "s" });
+    await bridge.addDecision({ decision: "second", sessionId: "s" });
+    const third = await bridge.addDecision({ decision: "third", sessionId: "s" });
+    expect(third).toBe("dec_000003");
+    const { newId } = await bridge.supersedeDecision({
+      supersedesId: third,
+      decision: "third revised",
+      sessionId: "s",
+    });
+    expect(newId).toBe("dec_000004");
+  });
+
+  it("skips corrupt JSONL lines without wiping ledger", async () => {
+    const dir = join(ws, "ltm-corrupt");
+    const bridge = createLtmBridge(dir);
+    await bridge.addDecision({ decision: "Keep me", sessionId: "s" });
+    const { appendFile, mkdir } = await import("node:fs/promises");
+    const { join: j } = await import("node:path");
+    await mkdir(j(dir, "store"), { recursive: true });
+    await appendFile(j(dir, "store", "decisions.jsonl"), "{not-json\n", "utf8");
+    await bridge.addDecision({ decision: "Also keep", sessionId: "s" });
+    const list = await bridge.listDecisions({ includeInvalidated: true });
+    expect(list.some((d) => d.decision === "Keep me")).toBe(true);
+    expect(list.some((d) => d.decision === "Also keep")).toBe(true);
   });
 });

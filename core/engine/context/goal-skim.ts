@@ -62,12 +62,26 @@ export function isLongHorizonGoal(text: string): boolean {
   return multiFile || (multiStep && longEnough) || (longEnough && multiStep);
 }
 
-/** User messages that release plan-first gate (approve implement). */
+/**
+ * User messages that release plan-first gate (approve implement).
+ * Bare "implement X" / "реализуй Y" is a long task request, NOT approval —
+ * only explicit release phrases (or implement/build tied to "the plan").
+ */
 export function userAuthorizedBuild(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
-  return /\b(implement|build it|go ahead|approved|lgtm|ship it|execute the plan|start coding|приступай|реализуй|делай|одобряю|согласен)\b/i
-    .test(t);
+  // Explicit approval / release phrases.
+  if (
+    /\b(build it|go ahead|approved|lgtm|ship it|execute the plan|start coding|приступай|одобряю|согласен)\b/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  // "Implement the plan" / "реализуй план" after planning — not bare task verbs.
+  if (/\b(implement|build|реализуй|делай)\b[\s\S]{0,48}\b(the )?plan\b/i.test(t)) return true;
+  if (/\b(the )?plan\b[\s\S]{0,48}\b(implement|build|реализуй)\b/i.test(t)) return true;
+  return false;
 }
 
 export interface SkimOptions {

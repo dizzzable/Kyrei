@@ -3243,7 +3243,7 @@ export async function startGateway({
     }
   };
 
-  /** Toggle pin by rewriting the decision row tags/pinned flag (no supersede). */
+  /** Toggle pin in-place (stable id — no SUPERSEDE spam). */
   const pinLtmDecisionApi = async (id, pinned) => {
     const ctx = await withLtmBridge();
     if (!ctx.ok) return ctx;
@@ -3252,32 +3252,22 @@ export async function startGateway({
       const { decision } = await ctx.bridge.fetchDecision(id.trim());
       if (!decision) return { ok: false, error: "not_found" };
       if (decision.validTo) return { ok: false, error: "decision_superseded" };
-      // Re-record via supersede of self with flipped pin is wrong; use raw ledger rewrite:
-      // invalidate is not pin. Use addDecision after invalidate would lose history link.
-      // Prefer supersede with same text + pin tag when bridge has no setPinned — Wave H uses supersede with same body.
       const wantPinned = pinned === true;
       if (Boolean(decision.pinned) === wantPinned) {
         return { ok: true, id: decision.id, pinned: wantPinned, unchanged: true };
       }
-      const result = await ctx.bridge.supersedeDecision({
-        supersedesId: decision.id,
-        decision: decision.decision,
-        rationale: decision.rationale || (wantPinned ? "Pinned in Settings" : "Unpinned in Settings"),
-        sessionId: decision.sessionId || "settings-ui",
-        pinned: wantPinned,
-        kind: decision.kind || "decision",
-        tags: [
-          ...decision.tags.filter((t) => !/^pinned?$/i.test(t) && t !== "settings-pin"),
-          ...(wantPinned ? ["pinned", "settings-pin"] : ["settings-pin"]),
-        ],
-      });
+      if (typeof ctx.bridge.setPinned !== "function") {
+        return { ok: false, error: "adapter_unavailable" };
+      }
+      const ok = await ctx.bridge.setPinned(decision.id, wantPinned);
+      if (!ok) return { ok: false, error: "decision_superseded" };
       try {
         await ctx.bridge.refreshRuntimeSnapshot();
       } catch {
         /* optional */
       }
       void reindexBuiltinMemoryIndex().catch(() => undefined);
-      return { ok: true, id: result.newId, pinned: wantPinned, superseded: result.superseded, previousId: decision.id };
+      return { ok: true, id: decision.id, pinned: wantPinned };
     } catch (error) {
       return { ok: false, error: error?.message ?? "pin_decision_failed" };
     }
@@ -6468,15 +6458,19 @@ export async function startGateway({
         assertGatewayAcceptingMutations();
         const body = await readBody(req).catch(() => ({}));
         const id = typeof body?.id === "string" ? body.id : "";
-        const pinned = body?.pinned !== false;
+        const pinned = body?.pinned === true;
         const result = await pinLtmDecisionApi(id, pinned);
         const status = result.ok
           ? 200
           : result.error === "not_found"
             ? 404
-            : result.error === "workspace_not_configured" || result.error === "id_required"
-              ? 400
-              : 503;
+            : result.error === "decision_superseded"
+              ? 409
+              : result.error === "workspace_not_configured"
+                || result.error === "id_required"
+                || result.error === "ltm_disabled"
+                ? 400
+                : 503;
         return sendJson(res, status, result);
       }
 

@@ -52,4 +52,20 @@ describe("memory_ask", () => {
     );
     expect(out).toMatch(/Never store API keys|Grounded sources/i);
   });
+
+  it("accepts short high-score decision ADRs", async () => {
+    const ltmDir = join(ws, "ltm-short");
+    const bridge = createLtmBridge(ltmDir);
+    await bridge.addDecision({
+      decision: "Prefer SQLite",
+      rationale: "local",
+      sessionId: "s1",
+    });
+    const out = await runMemoryAsk(
+      { workspace: ws, ltmDir, ltmEnabled: true },
+      "Prefer SQLite",
+    );
+    expect(out).not.toMatch(/grounded refuse/i);
+    expect(out).toMatch(/Prefer SQLite|Grounded sources/i);
+  });
 });
