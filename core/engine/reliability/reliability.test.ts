@@ -2,7 +2,14 @@ import { describe, it, expect } from "vitest";
 import type { ModelMessage } from "ai";
 import { cleanupIncomplete } from "./cleanup.js";
 import { detectLoop, toolSignature } from "./loop-detect.js";
-import { nextHealState, isTerminal } from "./self-heal.js";
+import {
+  nextHealState,
+  isTerminal,
+  healStrike,
+  healTranscriptMarker,
+  healAgentGuidance,
+} from "./self-heal.js";
+import { evaluateFinalAudit } from "./final-audit.js";
 import { checkBudget } from "./budget.js";
 import { verifyGoal } from "./goal-verifier.js";
 import { detectEcosystem } from "./verify.js";
@@ -92,6 +99,55 @@ describe("self-heal FSM", () => {
     expect(nextHealState("retry", "success")).toBe("done");
     expect(isTerminal("done")).toBe(true);
   });
+  it("maps states to Wave A 3-strike markers and guidance", () => {
+    expect(healStrike("probe")).toBe(1);
+    expect(healStrike("retry")).toBe(2);
+    expect(healStrike("fix_retry")).toBe(2);
+    expect(healStrike("handoff")).toBe(3);
+    expect(healTranscriptMarker("probe")).toBe("KYREI_FAILURE_PROBE");
+    expect(healTranscriptMarker("retry")).toBe("KYREI_FAILURE_ESCALATE");
+    expect(healTranscriptMarker("handoff")).toBe("KYREI_FAILURE_HANDOFF");
+    expect(healAgentGuidance("handoff")).toContain("KYREI_FAILURE_HANDOFF");
+  });
+});
+
+describe("final audit", () => {
+  it("is clean only when criteria, commands, and deliverables pass", () => {
+    const clean = evaluateFinalAudit({
+      criteria: [{ criterion: "tests", pass: true, evidence: "npm test exit 0" }],
+      commands: [{ name: "npm run gate", exitCode: 0 }],
+      deliverables: [{ path: "src/app.ts", present: true }],
+    });
+    expect(clean.clean).toBe(true);
+    expect(clean.gaps).toEqual([]);
+    expect(clean.transcriptBlock).toContain("KYREI_FINAL_AUDIT");
+    expect(clean.transcriptBlock).toContain("KYREI_AUDIT_COMPLETE");
+    expect(clean.transcriptBlock).toContain("KYREI_RUN_COMPLETE");
+
+    const dirty = evaluateFinalAudit({
+      criteria: [{ criterion: "tests", pass: false }],
+      commands: [{ name: "npm test", exitCode: 1 }],
+      deliverables: [{ path: "missing.ts", present: false }],
+      cleanlinessIssues: ["left TODO in patch"],
+    });
+    expect(dirty.clean).toBe(false);
+    expect(dirty.gaps.length).toBeGreaterThanOrEqual(3);
+    expect(dirty.transcriptBlock).toContain("KYREI_AUDIT_GAPS");
+    expect(dirty.transcriptBlock).not.toContain("KYREI_RUN_COMPLETE");
+  });
+
+  it("rejects empty evidence (not_observed ≠ absent / no false green)", () => {
+    const empty = evaluateFinalAudit({
+      criteria: [],
+      commands: [],
+      deliverables: [],
+    });
+    expect(empty.clean).toBe(false);
+    expect(empty.coverage).toBe(0);
+    expect(empty.gaps.some((g) => g.startsWith("no_evidence_provided"))).toBe(true);
+    expect(empty.transcriptBlock).toContain("KYREI_AUDIT_GAPS");
+    expect(empty.transcriptBlock).not.toContain("KYREI_RUN_COMPLETE");
+  });
 });
 
 describe("budget", () => {
@@ -155,9 +211,13 @@ describe("budget stop condition", () => {
 describe("heal tracker", () => {
   it("advances toward handoff on consecutive failures then resets on success", () => {
     const heal = createHealTracker();
+    expect(heal.marker).toBe("KYREI_FAILURE_PROBE");
     expect(heal.onToolOutcome(false)).toBe("retry");
+    expect(heal.marker).toBe("KYREI_FAILURE_ESCALATE");
     expect(heal.onToolOutcome(false)).toBe("fix_retry");
     expect(heal.onToolOutcome(false)).toBe("handoff");
+    expect(heal.marker).toBe("KYREI_FAILURE_HANDOFF");
+    expect(heal.guidance).toContain("HANDOFF");
     expect(heal.onToolOutcome(true)).toBe("done");
   });
 });

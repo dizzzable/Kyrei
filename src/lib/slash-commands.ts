@@ -20,7 +20,7 @@ export type ChatTranslationKey = Extract<keyof typeof enChat, string>;
 export type ChatTranslator = Translator<ChatTranslationKey>;
 
 /** Local client action a command resolves to (one handler per id). */
-export type SlashActionId = "new" | "help" | "theme" | "settings";
+export type SlashActionId = "new" | "help" | "theme" | "settings" | "mode";
 export type SlashCommandId = SlashActionId | SlashPickerId;
 
 /** A command fulfilled by opening an overlay picker. */
@@ -81,6 +81,15 @@ export const SLASH_COMMAND_REGISTRY: readonly SlashCommandSpec[] = [
     args: true,
   },
   { id: "settings", name: "/settings", descriptionKey: "chat.slash.settings.description", surface: action("settings") },
+  {
+    id: "mode",
+    name: "/mode",
+    descriptionKey: "chat.slash.mode.description",
+    argKey: "chat.slash.mode.arg",
+    aliases: ["/coding-mode", "/phase"],
+    surface: action("mode"),
+    args: true,
+  },
 ];
 
 const SPEC_BY_NAME = new Map<string, SlashCommandSpec>(SLASH_COMMAND_REGISTRY.map((spec) => [spec.name, spec]));

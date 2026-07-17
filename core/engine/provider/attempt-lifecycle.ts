@@ -3,7 +3,7 @@ import type {
   ProviderAttemptOutcome,
   ProviderAttemptTarget,
 } from "../types.js";
-import { isRetryable, retryAfterMsOf, statusOf } from "./errors.js";
+import { classifyProviderFailure, isRetryable, retryAfterMsOf, statusOf } from "./errors.js";
 
 /** One private provider identity bound to the gateway-owned admission hook. */
 export interface ProviderAttemptBinding {
@@ -54,9 +54,10 @@ function failedOutcome(
 ): ProviderAttemptOutcome {
   const statusCode = statusOf(error);
   const retryAfterMs = retryAfterMsOf(error);
+  const interruptedOutcome = interrupted || isAbortError(error);
   return {
     ...target,
-    outcome: interrupted || isAbortError(error)
+    outcome: interruptedOutcome
       ? "interrupted"
       : isRetryable(error)
         ? "retryable-error"
@@ -64,6 +65,8 @@ function failedOutcome(
     phase: "stream",
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    // Interrupted aborts must not train the account pool (user cancel / session stop).
+    ...(!interruptedOutcome ? { failureClass: classifyProviderFailure(error) } : {}),
   };
 }
 

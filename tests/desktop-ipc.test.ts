@@ -69,6 +69,119 @@ describe("desktop IPC", () => {
     expect(ipcMain.handlers.size).toBe(0);
   });
 
+  it("opens only allowlisted Kyrei release URLs in the system browser", async () => {
+    const ipcMain = new FakeIpcMain();
+    const openExternal = vi.fn(async () => undefined);
+    const registration = registerDesktopIpc({
+      ipcMain,
+      dialog: { showOpenDialog: vi.fn() },
+      shell: { openExternal },
+      defaultCwd: "C:\\Users\\example",
+      terminalManager: {
+        onEvent: () => () => {},
+        closeAll: vi.fn(),
+        closeRenderer: vi.fn(),
+        list: vi.fn(),
+        createManual: vi.fn(),
+        runAgentCommand: vi.fn(),
+        write: vi.fn(),
+        rename: vi.fn(),
+        close: vi.fn(),
+      },
+    });
+    const sender = new FakeSender(7);
+    const open = ipcMain.handlers.get(DESKTOP_CHANNELS.openExternal)!;
+
+    await expect(open({ sender }, "https://github.com/dizzzable/Kyrei/releases/tag/v0.4.2"))
+      .resolves.toEqual({ ok: true });
+    expect(openExternal).toHaveBeenCalledWith("https://github.com/dizzzable/Kyrei/releases/tag/v0.4.2");
+
+    await expect(open({ sender }, "https://evil.example/malware.exe"))
+      .rejects.toThrow("external_url_not_allowed");
+    expect(openExternal).toHaveBeenCalledTimes(1);
+
+    // Custom device-flow host allowed only when it exactly matches session verification URI.
+    await expect(open(
+      { sender },
+      "https://oauth.my-company.example/device",
+      { sessionVerificationUri: "https://oauth.my-company.example/device" },
+    )).resolves.toEqual({ ok: true });
+    expect(openExternal).toHaveBeenCalledWith("https://oauth.my-company.example/device");
+
+    await expect(open(
+      { sender },
+      "https://phish.example/x",
+      { sessionVerificationUri: "https://oauth.my-company.example/device" },
+    )).rejects.toThrow("external_url_not_allowed");
+
+    await registration.dispose();
+  });
+
+  it("exposes update check/download/install through desktop IPC", async () => {
+    const ipcMain = new FakeIpcMain();
+    const appUpdater = {
+      getStatus: vi.fn(() => ({
+        phase: "idle",
+        currentVersion: "0.4.2",
+        canAutoInstall: true,
+        packaged: true,
+        portable: false,
+        platform: "win32",
+      })),
+      check: vi.fn(async () => ({
+        phase: "available",
+        currentVersion: "0.4.2",
+        latestVersion: "0.4.3",
+        canAutoInstall: true,
+        packaged: true,
+        portable: false,
+        platform: "win32",
+      })),
+      download: vi.fn(async () => ({
+        phase: "downloaded",
+        currentVersion: "0.4.2",
+        latestVersion: "0.4.3",
+        canAutoInstall: true,
+        packaged: true,
+        portable: false,
+        platform: "win32",
+        percent: 100,
+      })),
+      install: vi.fn(() => ({ ok: true })),
+    };
+    const registration = registerDesktopIpc({
+      ipcMain,
+      dialog: { showOpenDialog: vi.fn() },
+      shell: { openExternal: vi.fn() },
+      defaultCwd: "C:\\Users\\example",
+      appUpdater,
+      terminalManager: {
+        onEvent: () => () => {},
+        closeAll: vi.fn(),
+        closeRenderer: vi.fn(),
+        list: vi.fn(),
+        createManual: vi.fn(),
+        runAgentCommand: vi.fn(),
+        write: vi.fn(),
+        rename: vi.fn(),
+        close: vi.fn(),
+      },
+    });
+    const sender = new FakeSender(9);
+
+    await expect(ipcMain.handlers.get(DESKTOP_CHANNELS.updateGetStatus)!({ sender }))
+      .resolves.toMatchObject({ phase: "idle", canAutoInstall: true });
+    await expect(ipcMain.handlers.get(DESKTOP_CHANNELS.updateCheck)!({ sender }))
+      .resolves.toMatchObject({ phase: "available", latestVersion: "0.4.3" });
+    await expect(ipcMain.handlers.get(DESKTOP_CHANNELS.updateDownload)!({ sender }))
+      .resolves.toMatchObject({ phase: "downloaded" });
+    await expect(ipcMain.handlers.get(DESKTOP_CHANNELS.updateInstall)!({ sender }))
+      .resolves.toEqual({ ok: true });
+    expect(appUpdater.install).toHaveBeenCalled();
+
+    await registration.dispose();
+  });
+
   it("pins terminal operations and events to the invoking renderer", async () => {
     const ipcMain = new FakeIpcMain();
     let emit: ((event: Record<string, unknown>) => void) | undefined;

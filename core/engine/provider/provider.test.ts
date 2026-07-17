@@ -1,5 +1,16 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { isAuthFailure, isRetryable, isRateLimit, isToolUnsupported, isServerError, retryAfterMsOf } from "./errors.js";
+import {
+  classifyProviderFailure,
+  isAuthFailure,
+  isDefiniteAuthFailure,
+  isNetworkError,
+  isRetryable,
+  isRateLimit,
+  isSoftAuthFailure,
+  isToolUnsupported,
+  isServerError,
+  retryAfterMsOf,
+} from "./errors.js";
 import { resolve, isLocalBaseURL, registerModel } from "./registry.js";
 import { KeyPool } from "./keys.js";
 import { openStream, type StreamLike } from "./open-stream.js";
@@ -31,11 +42,32 @@ describe("buildProviderOptions (reasoning/effort)", () => {
   it("explicit effort wins over fast", () => {
     expect(buildProviderOptions("openai-chat", { effort: "high", fast: true })).toEqual({ kyrei: { reasoningEffort: "high" } });
   });
-  it("skips providerOptions for unsupported protocols", () => {
-    expect(buildProviderOptions("anthropic-messages", { effort: "high" })).toBeUndefined();
-    expect(buildProviderOptions("google-generative-ai", { effort: "high" })).toBeUndefined();
-    expect(buildProviderOptions("amazon-bedrock", { effort: "high" })).toBeUndefined();
-    expect(buildProviderOptions("google-vertex", { effort: "high" })).toBeUndefined();
+  it("maps thinking for Anthropic, Google, Vertex, and Bedrock", () => {
+    expect(buildProviderOptions("anthropic-messages", { effort: "high" })).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 16_000 } },
+    });
+    expect(buildProviderOptions("google-generative-ai", { effort: "medium" })).toEqual({
+      google: {
+        thinkingConfig: {
+          thinkingLevel: "medium",
+          thinkingBudget: 4_096,
+          includeThoughts: true,
+        },
+      },
+    });
+    expect(buildProviderOptions("google-vertex", { effort: "low" })).toMatchObject({
+      google: { thinkingConfig: { thinkingLevel: "low", includeThoughts: true } },
+      vertex: { thinkingConfig: { thinkingLevel: "low", includeThoughts: true } },
+    });
+    expect(buildProviderOptions("amazon-bedrock", { effort: "high" })).toMatchObject({
+      bedrock: {
+        reasoningConfig: {
+          type: "enabled",
+          maxReasoningEffort: "high",
+          budgetTokens: 16_000,
+        },
+      },
+    });
   });
 });
 
@@ -177,6 +209,20 @@ describe("errors classification", () => {
     expect(isAuthFailure({ statusCode: 401 })).toBe(true);
     expect(isAuthFailure({ status: 403 })).toBe(true);
     expect(isAuthFailure({ statusCode: 400 })).toBe(false);
+  });
+  it("separates network noise from definite vs soft auth for anti-false-ban", () => {
+    expect(isNetworkError({ code: "ECONNRESET", message: "socket hang up" })).toBe(true);
+    expect(isNetworkError({ message: "fetch failed" })).toBe(true);
+    expect(isNetworkError({ statusCode: 503, message: "network" })).toBe(false);
+    expect(classifyProviderFailure({ code: "ETIMEDOUT" })).toBe("network");
+    expect(isDefiniteAuthFailure({ statusCode: 401 })).toBe(true);
+    expect(isDefiniteAuthFailure({ statusCode: 403, message: "Invalid API key" })).toBe(true);
+    expect(isSoftAuthFailure({ statusCode: 403, message: "cloudflare ray id blocked" })).toBe(true);
+    expect(isDefiniteAuthFailure({ statusCode: 403, message: "cloudflare ray id blocked" })).toBe(false);
+    expect(isRetryable({ statusCode: 403, message: "edge blocked" })).toBe(true);
+    expect(classifyProviderFailure({ statusCode: 403 })).toBe("auth_soft");
+    expect(classifyProviderFailure({ statusCode: 401 })).toBe("auth_definite");
+    expect(classifyProviderFailure({ statusCode: 429 })).toBe("rate_limit");
   });
   it("tool unsupported detection", () => {
     expect(isToolUnsupported({ statusCode: 400, message: "tools are not supported" })).toBe(true);

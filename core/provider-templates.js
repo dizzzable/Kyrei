@@ -6,7 +6,23 @@
  * transport value. Per-resource providers remain editable and require input.
  */
 
-export const PROVIDER_TEMPLATES_VERSION = 1;
+export const PROVIDER_TEMPLATES_VERSION = 3;
+
+/** Shared blurb for OpenAI-compatible catalogues (OmniRoute-class APIs). */
+const OPENAI_COMPAT_DESC = "settings.providers.templates.openaiCompatible.description";
+
+/** Quick factory for OpenAI-compatible chat providers (expandable market catalog). */
+function openaiCompat(id, name, baseURL, docsURL = "", extra = {}) {
+  return template({
+    id,
+    name,
+    descriptionKey: OPENAI_COMPAT_DESC,
+    docsURL,
+    protocol: "openai-chat",
+    baseURL,
+    ...extra,
+  });
+}
 
 function template(value) {
   return Object.freeze({
@@ -228,12 +244,78 @@ export const PROVIDER_TEMPLATES = Object.freeze([
   }),
   template({
     id: "xai",
-    name: "xAI",
+    name: "xAI (Grok)",
     descriptionKey: "settings.providers.templates.xai.description",
     docsURL: "https://console.x.ai/",
     protocol: "openai-chat",
     baseURL: "https://api.x.ai/v1",
   }),
+  // ── Market catalogue (OpenAI-compatible). Unknown vendors = Custom (first-class). ──
+  openaiCompat("groq", "Groq", "https://api.groq.com/openai/v1", "https://console.groq.com/keys"),
+  openaiCompat("together", "Together AI", "https://api.together.xyz/v1", "https://api.together.xyz/"),
+  openaiCompat("fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", "https://fireworks.ai/account/api-keys"),
+  openaiCompat("mistral", "Mistral AI", "https://api.mistral.ai/v1", "https://console.mistral.ai/"),
+  openaiCompat("cohere", "Cohere", "https://api.cohere.ai/compatibility/v1", "https://dashboard.cohere.com/api-keys"),
+  openaiCompat("perplexity", "Perplexity", "https://api.perplexity.ai", "https://www.perplexity.ai/settings/api"),
+  openaiCompat("cerebras", "Cerebras", "https://api.cerebras.ai/v1", "https://cloud.cerebras.ai/"),
+  openaiCompat("sambanova", "SambaNova", "https://api.sambanova.ai/v1", "https://cloud.sambanova.ai/"),
+  openaiCompat("deepinfra", "DeepInfra", "https://api.deepinfra.com/v1/openai", "https://deepinfra.com/dash/api_keys"),
+  openaiCompat("siliconflow", "SiliconFlow", "https://api.siliconflow.cn/v1", "https://cloud.siliconflow.cn/"),
+  openaiCompat("hyperbolic", "Hyperbolic", "https://api.hyperbolic.xyz/v1", "https://app.hyperbolic.xyz/"),
+  openaiCompat("nebius", "Nebius AI", "https://api.studio.nebius.ai/v1", "https://studio.nebius.com/"),
+  openaiCompat("friendli", "Friendli", "https://api.friendli.ai/serverless/v1", "https://friendli.ai/"),
+  openaiCompat("lambda", "Lambda Labs", "https://api.lambdalabs.com/v1", "https://cloud.lambdalabs.com/"),
+  openaiCompat("cloudflare", "Cloudflare Workers AI", "", "https://developers.cloudflare.com/workers-ai/", { requiresBaseURL: true }),
+  openaiCompat("github-models", "GitHub Models", "https://models.inference.ai.azure.com", "https://github.com/marketplace/models"),
+  openaiCompat("azure-openai", "Azure OpenAI", "", "https://portal.azure.com/", { requiresBaseURL: true }),
+  openaiCompat("aimlapi", "AI/ML API", "https://api.aimlapi.com/v1", "https://aimlapi.com/"),
+  openaiCompat("chutes", "Chutes", "https://llm.chutes.ai/v1", "https://chutes.ai/"),
+  openaiCompat("fal", "Fal AI", "https://fal.run/openrouter/router/v1", "https://fal.ai/dashboard/keys"),
+  openaiCompat("lepton", "Lepton AI", "https://llama3-1-8b.lepton.run/api/v1", "https://www.lepton.ai/"),
+  openaiCompat("anyscale", "Anyscale", "https://api.endpoints.anyscale.com/v1", "https://docs.anyscale.com/"),
+  openaiCompat("requesty", "Requesty", "https://router.requesty.ai/v1", "https://www.requesty.ai/"),
+  openaiCompat("portkey", "Portkey", "https://api.portkey.ai/v1", "https://portkey.ai/"),
+  openaiCompat("helicone", "Helicone", "https://oai.helicone.ai/v1", "https://www.helicone.ai/"),
+  openaiCompat("baseten", "Baseten", "https://bridge.baseten.co/v1", "https://www.baseten.co/"),
+  openaiCompat("replicate", "Replicate", "https://openai-proxy.replicate.com/v1", "https://replicate.com/"),
+  openaiCompat("voyage", "Voyage AI", "https://api.voyageai.com/v1", "https://www.voyageai.com/"),
+  openaiCompat("jina", "Jina AI", "https://api.jina.ai/v1", "https://jina.ai/"),
+  openaiCompat("baichuan", "Baichuan", "https://api.baichuan-ai.com/v1", "https://platform.baichuan-ai.com/"),
+  openaiCompat("baidu", "Baidu Qianfan", "https://qianfan.baidubce.com/v2", "https://cloud.baidu.com/product/wenxinworkshop"),
+  openaiCompat("tencent", "Tencent Hunyuan", "https://hunyuan.tencentcloudapi.com", "https://cloud.tencent.com/product/hunyuan"),
+  openaiCompat("bytedance", "ByteDance Doubao", "https://ark.cn-beijing.volces.com/api/v3", "https://www.volcengine.com/"),
+  openaiCompat("sensenova", "SenseNova", "https://api.sensenova.cn/compatible-mode/v1", "https://www.sensetime.com/"),
+  openaiCompat("modelscope", "ModelScope", "https://api-inference.modelscope.cn/v1", "https://www.modelscope.cn/"),
+  openaiCompat("qiniu", "Qiniu AI", "https://api.qnaigc.com/v1", "https://www.qiniu.com/"),
+  openaiCompat("inflection", "Inflection", "https://api.inflection.ai/v1", "https://inflection.ai/"),
+  openaiCompat("ai21", "AI21 Labs", "https://api.ai21.com/studio/v1", "https://www.ai21.com/"),
+  openaiCompat("writer", "Writer", "https://api.writer.com/v1", "https://writer.com/"),
+  openaiCompat("snowflake", "Snowflake Cortex", "", "https://docs.snowflake.com/en/user-guide/snowflake-cortex/", { requiresBaseURL: true }),
+  openaiCompat("databricks", "Databricks Mosaic", "", "https://docs.databricks.com/en/machine-learning/foundation-models/", { requiresBaseURL: true }),
+  openaiCompat("oracle", "Oracle Generative AI", "", "https://docs.oracle.com/en-us/iaas/Content/generative-ai/", { requiresBaseURL: true }),
+  openaiCompat("ibm", "IBM watsonx", "", "https://www.ibm.com/products/watsonx-ai", { requiresBaseURL: true }),
+  openaiCompat("scaleway", "Scaleway Generative", "https://api.scaleway.ai/v1", "https://www.scaleway.com/en/generative-apis/"),
+  openaiCompat("ovh", "OVHcloud AI Endpoints", "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1", "https://endpoints.ai.cloud.ovh.net/"),
+  openaiCompat("coreweave", "CoreWeave", "", "https://docs.coreweave.com/", { requiresBaseURL: true }),
+  openaiCompat("crusoe", "Crusoe", "", "https://crusoe.ai/", { requiresBaseURL: true }),
+  openaiCompat("modal", "Modal", "", "https://modal.com/", { requiresBaseURL: true }),
+  openaiCompat("runpod", "RunPod", "https://api.runpod.ai/v2", "https://www.runpod.io/"),
+  openaiCompat("vast", "Vast.ai", "", "https://vast.ai/", { requiresBaseURL: true }),
+  openaiCompat("poe", "Poe API", "https://api.poe.com/v1", "https://poe.com/api_key"),
+  openaiCompat("phind", "Phind", "https://api.phind.com/v1", "https://www.phind.com/"),
+  openaiCompat("codeium", "Windsurf / Codeium", "", "https://codeium.com/", { requiresBaseURL: true }),
+  openaiCompat("continue", "Continue.dev proxy", "http://127.0.0.1:65432/v1", "https://continue.dev/", { requiresApiKey: false }),
+  openaiCompat("vllm", "vLLM (local/remote)", "http://127.0.0.1:8000/v1", "https://docs.vllm.ai/", { requiresApiKey: false }),
+  openaiCompat("sglang", "SGLang", "http://127.0.0.1:30000/v1", "https://github.com/sgl-project/sglang", { requiresApiKey: false }),
+  openaiCompat("llama-cpp", "llama.cpp server", "http://127.0.0.1:8080/v1", "https://github.com/ggerganov/llama.cpp", { requiresApiKey: false }),
+  openaiCompat("litellm", "LiteLLM proxy", "http://127.0.0.1:4000/v1", "https://docs.litellm.ai/"),
+  openaiCompat("one-api", "One API / New API", "http://127.0.0.1:3000/v1", "https://github.com/songquanpeng/one-api"),
+  openaiCompat("dify", "Dify", "http://127.0.0.1:5001/v1", "https://dify.ai/"),
+  openaiCompat("fastchat", "FastChat", "http://127.0.0.1:8000/v1", "https://github.com/lm-sys/FastChat", { requiresApiKey: false }),
+  openaiCompat("tabbyapi", "TabbyAPI", "http://127.0.0.1:5000/v1", "https://github.com/theroyallab/tabbyAPI", { requiresApiKey: false }),
+  openaiCompat("localai", "LocalAI", "http://127.0.0.1:8080/v1", "https://localai.io/", { requiresApiKey: false }),
+  openaiCompat("jan", "Jan", "http://127.0.0.1:1337/v1", "https://jan.ai/", { requiresApiKey: false }),
+  openaiCompat("gpt4all", "GPT4All", "http://127.0.0.1:4891/v1", "https://www.nomic.ai/gpt4all", { requiresApiKey: false }),
   template({
     id: "ollama",
     name: "Ollama",
@@ -252,9 +334,10 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     baseURL: "http://127.0.0.1:1234/v1",
     requiresApiKey: false,
   }),
+  // FIRST-CLASS escape hatch: any future / niche / contracted vendor.
   template({
     id: "custom",
-    name: "Custom provider",
+    name: "Custom / any OpenAI-compatible",
     descriptionKey: "settings.providers.templates.custom.description",
     docsURL: "",
     protocol: "openai-chat",

@@ -24,6 +24,7 @@ import { actionForCombo } from "@/store/keybinds";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
 import { executableModelParams } from "@/lib/model-capabilities";
 import { getStored, setStored } from "@/lib/persist";
+import { detectCodingModeSwitch, parseCodingModeArg, type CodingMode } from "@/lib/coding-mode";
 import { getSlashCommands } from "@/lib/slash-commands";
 import { cancelSpeech, speak } from "@/lib/speech";
 import {
@@ -89,6 +90,11 @@ export function App() {
   const sessionMutationRevisionRef = useRef(0);
   const sessionMutationsInFlightRef = useRef(0);
   const sessionModelPendingIdsRef = useRef(new Set<string>());
+  /** Keep latest sessions/config for subscribe handlers (effect deps stay narrow). */
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const configRef = useRef(config);
+  configRef.current = config;
   const selectedSessionViewRef = useRef({ id: currentId, revision: 0 });
   if (selectedSessionViewRef.current.id !== currentId) {
     selectedSessionViewRef.current = {
@@ -466,6 +472,47 @@ export function App() {
           const pendingId = pendingIdRef.current;
           if (pendingId) {
             setMessages((current) => current.map((message) => message.id === pendingId ? { ...message, pending: false } : message));
+          }
+          // When UI mode is Auto, adopt the phase the model declared
+          // (Effective phase: / MODE_SWITCH:) so the next turn matches tools/prompt/model.
+          if (currentId && typeof payload.text === "string" && payload.text) {
+            const detected = detectCodingModeSwitch(payload.text);
+            if (detected && detected !== "auto") {
+              const session = sessionsRef.current.find((s) => s.id === currentId);
+              const engineMode = isRecord(configRef.current?.engine)
+                ? configRef.current.engine.codingMode
+                : "auto";
+              const activeMode = session?.codingMode ?? engineMode ?? "auto";
+              const uiIsAuto = activeMode === "auto" || activeMode === "balanced" || !activeMode;
+              if (uiIsAuto) {
+                const assignments = configRef.current?.modelAssignments;
+                const pick = assignments && isRecord(assignments)
+                  ? (assignments as Record<string, { providerId?: string; modelId?: string } | undefined>)[detected]
+                  : undefined;
+                void (async () => {
+                  try {
+                    await gateway.setSessionCodingMode(currentId, detected);
+                    if (pick?.providerId && pick?.modelId) {
+                      await gateway.setSessionModel(currentId, pick.providerId, pick.modelId);
+                    }
+                    if (!alive) return;
+                    setSessions((prev) => prev.map((s) => (
+                      s.id === currentId
+                        ? {
+                            ...s,
+                            codingMode: detected,
+                            ...(pick?.providerId && pick?.modelId
+                              ? { providerId: pick.providerId, modelId: pick.modelId }
+                              : {}),
+                          }
+                        : s
+                    )));
+                  } catch {
+                    /* soft: mode switch is best-effort */
+                  }
+                })();
+              }
+            }
           }
           // Gateway publishes this frame only after the assistant draft is
           // flushed. Hydrate that canonical version before releasing queued
@@ -892,6 +939,46 @@ export function App() {
     }
   }, [beginSessionMutation, sessions, leaveSessionIfCurrent, describeError, finishSessionMutation]);
 
+  const applyCodingMode = useCallback(async (mode: CodingMode) => {
+    if (!config) return;
+    const role = mode === "build" || mode === "polish" || mode === "plan" || mode === "deepreep" ? mode : null;
+    const assignments = config.modelAssignments;
+    const pick = role && assignments
+      ? (assignments as Record<string, { providerId?: string; modelId?: string } | undefined>)[role]
+      : undefined;
+
+    // Prefer session-scoped mode so each chat can differ; still update engine as default for new sessions.
+    const engine = { ...(config.engine ?? {}), codingMode: mode };
+    setConfig({ ...config, engine });
+    if (currentId) {
+      setSessions((list) => list.map((s) => (s.id === currentId ? { ...s, codingMode: mode } : s)));
+    }
+    try {
+      if (currentId) {
+        await gateway.setSessionCodingMode(currentId, mode);
+      }
+      const nextPatch: Parameters<typeof gateway.setConfig>[0] = { engine };
+      if (pick?.providerId && pick?.modelId) {
+        nextPatch.activeProviderId = pick.providerId;
+        nextPatch.activeModelId = pick.modelId;
+        if (currentId) {
+          await gateway.setSessionModel(currentId, pick.providerId, pick.modelId);
+          setSessions((list) => list.map((s) => (
+            s.id === currentId
+              ? { ...s, codingMode: mode, providerId: pick.providerId, modelId: pick.modelId }
+              : s
+          )));
+        }
+      }
+      const next = await gateway.setConfig(nextPatch);
+      setConfig(next);
+    } catch {
+      setConfig(config);
+      // Soft reload sessions on failure
+      void gateway.listSessions().then(setSessions).catch(() => undefined);
+    }
+  }, [config, currentId]);
+
   const runCommand = useCallback((name: string, argument?: string) => {
     switch (name) {
       case "new":
@@ -910,13 +997,26 @@ export function App() {
         if (argument && THEMES.some((theme) => theme.id === argument)) applyTheme(argument as ThemeId);
         else { setSettingsSection("appearance"); setSettingsOpen(true); }
         break;
+      case "mode": {
+        const parsed = parseCodingModeArg(argument);
+        if (parsed) void applyCodingMode(parsed);
+        else {
+          const help = `**${t("chat.mode.pickerTitle")}:** auto | plan | build | polish | deepreep\n\`${t("chat.slash.mode.arg")}\``;
+          setMessages((current) => [...current, {
+            id: `mode-help-${Date.now()}`,
+            role: "assistant",
+            parts: [{ type: "text", text: help }],
+          }]);
+        }
+        break;
+      }
       case "help": {
         const help = `**${t("shell.help.title")}:**\n${slashCommands.map((command) => `- \`${command.command}${command.arg ? ` ${command.arg}` : ""}\` — ${command.desc}`).join("\n")}`;
         setMessages((current) => [...current, { id: `help-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: help }] }]);
         break;
       }
     }
-  }, [newSession, slashCommands, t]);
+  }, [newSession, slashCommands, t, applyCodingMode]);
 
   const renameSession = useCallback((id: string, title: string) => {
     beginSessionMutation();
@@ -1157,6 +1257,19 @@ export function App() {
           const engine = { ...(config.engine ?? {}), executionMode: mode };
           setConfig({ ...config, engine });
           gateway.setConfig({ engine }).then(setConfig).catch(() => setConfig(config));
+        }}
+        codingMode={(() => {
+          const sessionMode = currentSession?.codingMode;
+          if (sessionMode === "plan" || sessionMode === "build" || sessionMode === "polish"
+            || sessionMode === "deepreep" || sessionMode === "auto") {
+            return sessionMode;
+          }
+          const raw = isRecord(config?.engine) ? config.engine.codingMode : "auto";
+          if (raw === "plan" || raw === "build" || raw === "polish" || raw === "deepreep") return raw;
+          return "auto";
+        })()}
+        onCodingModeChange={(mode) => {
+          void applyCodingMode(mode);
         }}
         onViewChanges={() => void openSessionChanges()}
         onSend={send}

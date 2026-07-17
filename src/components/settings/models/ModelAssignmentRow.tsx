@@ -20,9 +20,26 @@ interface ModelAssignmentRowProps {
   providers: ProviderProfile[];
   busy?: boolean;
   onChange: (assignment: ModelRef | undefined) => void;
+  /** i18n keys; default worker assignment copy. */
+  labelKey?: string;
+  badgeKey?: string;
+  descriptionKey?: string;
+  dialogTitleKey?: string;
+  dialogDescriptionKey?: string;
 }
 
-export function ModelAssignmentRow({ main, assignment, providers, busy, onChange }: ModelAssignmentRowProps) {
+export function ModelAssignmentRow({
+  main,
+  assignment,
+  providers,
+  busy,
+  onChange,
+  labelKey = "settings.model.worker.label",
+  badgeKey = "settings.model.worker.badge",
+  descriptionKey = "settings.model.worker.description",
+  dialogTitleKey = "settings.model.worker.dialogTitle",
+  dialogDescriptionKey = "settings.model.worker.dialogDescription",
+}: ModelAssignmentRowProps) {
   const { t } = useI18n();
   const resolved = resolveModelAssignment(assignment, main);
   const provider = providers.find((candidate) => candidate.id === resolved.ref.providerId);
@@ -54,10 +71,10 @@ export function ModelAssignmentRow({ main, assignment, providers, busy, onChange
         <span className="grid size-8 shrink-0 place-items-center rounded-md border border-border-soft text-muted"><Bot className="size-3.5" aria-hidden /></span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
-            <span className="text-[12px] font-medium text-foreground">{t("settings.model.worker.label")}</span>
-            <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-muted">{t("settings.model.worker.badge")}</span>
+            <span className="text-[12px] font-medium text-foreground">{t(labelKey as never)}</span>
+            <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-muted">{t(badgeKey as never)}</span>
           </span>
-          <span className="mt-0.5 block text-[10px] leading-4 text-muted">{t("settings.model.worker.description")}</span>
+          <span className="mt-0.5 block text-[10px] leading-4 text-muted">{t(descriptionKey as never)}</span>
           <span className="mt-1 block truncate font-mono text-[9.5px] text-secondary">
             {resolved.inherited ? `${t("settings.model.inherited")} · ` : ""}{provider?.name ?? resolved.ref.providerId} / {model?.name ?? resolved.ref.modelId}
           </span>
@@ -75,8 +92,8 @@ export function ModelAssignmentRow({ main, assignment, providers, busy, onChange
       <Dialog open={open} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
         <DialogContent className="w-[min(92vw,30rem)] border border-border">
           <DialogHeader>
-            <DialogTitle>{t("settings.model.worker.dialogTitle")}</DialogTitle>
-            <DialogDescription>{t("settings.model.worker.dialogDescription")}</DialogDescription>
+            <DialogTitle>{t(dialogTitleKey as never)}</DialogTitle>
+            <DialogDescription>{t(dialogDescriptionKey as never)}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1">

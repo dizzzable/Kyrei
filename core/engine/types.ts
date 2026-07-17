@@ -344,6 +344,15 @@ export interface EngineConfig {
    */
   personalityPresetId: string;
   /**
+   * Coding workflow mode (prompt contract; optional per-mode modelAssignments).
+   * - auto: agent picks effective phase each turn
+   * - plan: non-mutating planning
+   * - build: implement / greenfield
+   * - polish: audit / bug-hunt
+   * - deepreep: deep research (code+web) + human/team orchestration
+   */
+  codingMode: "auto" | "plan" | "build" | "polish" | "deepreep";
+  /**
    * IANA timezone (e.g. `Europe/Moscow`) injected into the system prompt so
    * the model can reason about local times. Empty = omit.
    */
@@ -438,6 +447,17 @@ export interface EngineConfig {
        */
       modelSource: "worker" | "session" | "default";
     };
+    /**
+     * Wave C3: optional external markdown vault roots (Tolaria-adjacent).
+     * Opt-in absolute directories indexed into memory_search; never system policy.
+     */
+    vault: {
+      enabled: boolean;
+      paths: string[];
+      maxFiles: number;
+      maxFileChars: number;
+      maxDepth: number;
+    };
   };
   /** Plan-as-files support (.kyrei/plan/ROADMAP.md, STATE.json, phase-N.md) */
   planning: { enabled: boolean };
@@ -520,6 +540,28 @@ export interface EngineConfig {
       /** Clip each skill body before the LLM call. */
       maxSkillChars: number;
     };
+    /**
+     * Wave C1: skill sleep from trajectories (proposal-only).
+     * Manual API always works when enabled; never auto-applies SKILL.md.
+     */
+    sleep: {
+      enabled: boolean;
+      maxTrajectories: number;
+      maxProposals: number;
+      minFailureCluster: number;
+    };
+  };
+  /**
+   * Soft/hard spend caps evaluated against the durable usage ledger (gateway).
+   * Soft → warn; hard → block new turns until the window resets.
+   */
+  usageBudget: {
+    enabled: boolean;
+    window: "day" | "month";
+    softCostUsd: number | null;
+    hardCostUsd: number | null;
+    softTokens: number | null;
+    hardTokens: number | null;
   };
 }
 
@@ -558,6 +600,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   apiMaxRetries: 2,
   personality: "",
   personalityPresetId: "none",
+  codingMode: "auto",
   timezone: "",
   defaultReasoningEffort: "",
   imageInputMode: "auto",
@@ -597,6 +640,13 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       useLlm: true,
       modelSource: "worker",
     },
+    vault: {
+      enabled: false,
+      paths: [],
+      maxFiles: 200,
+      maxFileChars: 12_000,
+      maxDepth: 6,
+    },
   },
   /** Local plan-as-files under .kyrei/plan — on by default (no external deps). */
   planning: { enabled: true },
@@ -634,6 +684,20 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       maxLlmSkills: 6,
       maxSkillChars: 6_000,
     },
+    sleep: {
+      enabled: true,
+      maxTrajectories: 40,
+      maxProposals: 24,
+      minFailureCluster: 2,
+    },
+  },
+  usageBudget: {
+    enabled: false,
+    window: "day",
+    softCostUsd: null,
+    hardCostUsd: null,
+    softTokens: null,
+    hardTokens: null,
   },
 };
 
@@ -737,12 +801,27 @@ export type ProviderAttemptOutcomeKind =
   | "interrupted"
   | "success";
 
+/**
+ * Account-pool failure class (no secrets / bodies). Used so flaky network and
+ * soft 403 never permanently park a seat the way a real 401 ban would.
+ */
+export type ProviderFailureClass =
+  | "network"
+  | "rate_limit"
+  | "server"
+  | "auth_definite"
+  | "auth_soft"
+  | "client"
+  | "unknown";
+
 /** Safe per-attempt telemetry. It intentionally carries no endpoint or credential fields. */
 export interface ProviderAttemptOutcome extends ProviderAttemptTarget {
   outcome: ProviderAttemptOutcomeKind;
   phase: ProviderAttemptPhase;
   statusCode?: number;
   retryAfterMs?: number;
+  /** Classification for anti-false-ban cooldowns (never a raw error message). */
+  failureClass?: ProviderFailureClass;
 }
 
 /**
@@ -851,6 +930,17 @@ export interface RunKyreiChatOpts {
   fallbackProviders?: RuntimeProviderTarget[];
   /** Optional just-in-time account capacity and health lifecycle. */
   providerAttemptLifecycle?: ProviderAttemptLifecycle;
+  /**
+   * Subscription shield: pacing + soft TLS/header hygiene for expensive seats.
+   * Gateway-owned; never accepted raw from the renderer chat payload.
+   */
+  subscriptionShield?: {
+    enabled?: boolean;
+    mode?: "off" | "standard" | "stealth";
+    minIntervalMs?: number;
+    connectTimeoutMs?: number;
+    maxConnectionsPerOrigin?: number;
+  };
   /** Optional multi-provider team available to the acting session model. */
   team?: RuntimeTeamSpec;
   workspace?: string;
@@ -906,6 +996,8 @@ export interface RunKyreiChatResult {
     modelId: string;
     accountId?: string;
   };
+  /** Aggregated provider usage for this turn (for durable ledger / budgets). */
+  usage?: Usage;
   /** Present when goal verification ran. */
   goalVerify?: {
     satisfied: boolean;

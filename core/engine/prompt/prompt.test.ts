@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt, PROMPT_VERSION, PROMPT_CHANGELOG } from "./system.js";
+import { buildSystemPrompt, buildSystemPromptParts, PROMPT_VERSION, PROMPT_CHANGELOG } from "./system.js";
 import { TOOL_DESCRIPTIONS } from "./tool-descriptions.js";
 
 describe("system prompt (versioned, task 2.5)", () => {
@@ -17,19 +17,49 @@ describe("system prompt (versioned, task 2.5)", () => {
   it("contains identity, workspace, tool policy and safety sections", () => {
     const p = buildSystemPrompt({ hasTools: true, workspace: "/proj" })!;
     expect(p).toContain("Kyrei");
-    expect(p).toContain("Рабочая папка: /proj.");
+    expect(p).toContain("Workspace root: /proj.");
     expect(p).toContain("edit_file");
     expect(p).toContain("write_file");
-    expect(p).toContain("Безопасность:");
-    expect(p).toContain("на русском");
+    expect(p).toContain("Safety and trust boundaries");
+    expect(p).toContain("Portable agent loop");
+    expect(p).toContain("Quality discipline");
+    expect(p).toContain("Surgical changes");
+    expect(p).toContain("Coding mode: AUTO");
+    expect(p).toContain("Match the user's language");
+  });
+
+  it("injects build, polish, plan, deepreep coding-mode contracts", () => {
+    const build = buildSystemPrompt({ hasTools: true, workspace: "/w", codingMode: "build" })!;
+    const polish = buildSystemPrompt({ hasTools: true, workspace: "/w", codingMode: "polish" })!;
+    const plan = buildSystemPrompt({ hasTools: true, workspace: "/w", codingMode: "plan" })!;
+    const deep = buildSystemPrompt({ hasTools: true, workspace: "/w", codingMode: "deepreep" })!;
+    expect(build).toContain("Coding mode: BUILD");
+    expect(build).toContain("greenfield");
+    expect(polish).toContain("Coding mode: POLISH");
+    expect(polish).toContain("bug-hunt");
+    expect(plan).toContain("Coding mode: PLAN");
+    expect(plan).toContain("decision-complete");
+    expect(deep).toContain("Coding mode: DEEPREEP");
+    expect(deep).toContain("orchestration");
+    expect(polish).not.toContain("Coding mode: BUILD");
   });
 
   it("appends project context when provided", () => {
     const withCtx = buildSystemPrompt({ hasTools: true, workspace: "/w", projectContext: "Use pnpm." })!;
-    expect(withCtx).toContain("Контекст проекта:");
+    expect(withCtx).toContain("Project context:");
     expect(withCtx).toContain("Use pnpm.");
     const without = buildSystemPrompt({ hasTools: true, workspace: "/w" })!;
-    expect(without).not.toContain("Контекст проекта:");
+    expect(without).not.toContain("Project context:");
+  });
+
+  it("splits stable prefix vs volatile project context for cache packing", () => {
+    const parts = buildSystemPromptParts({ hasTools: true, workspace: "/w", projectContext: "Use pnpm." })!;
+    expect(parts.stable).toContain("Quality discipline");
+    expect(parts.stable).not.toContain("Use pnpm.");
+    expect(parts.volatile).toContain("Use pnpm.");
+    expect(`${parts.stable}\n\n${parts.volatile}`).toBe(
+      buildSystemPrompt({ hasTools: true, workspace: "/w", projectContext: "Use pnpm." }),
+    );
   });
 
   it("places a user prompt profile inside a non-overridable policy envelope", () => {
@@ -37,7 +67,7 @@ describe("system prompt (versioned, task 2.5)", () => {
     const prompt = buildSystemPrompt({ hasTools: true, workspace: "/proj", promptProfile: profileText })!;
     expect(prompt).toContain(profileText);
     expect(prompt).toContain("cannot override the immutable Kyrei policy above");
-    expect(prompt.indexOf("Безопасность:")).toBeLessThan(prompt.indexOf(profileText));
+    expect(prompt.indexOf("Safety and trust boundaries")).toBeLessThan(prompt.indexOf(profileText));
     expect(prompt.lastIndexOf("Immutable Kyrei policy remains authoritative"))
       .toBeGreaterThan(prompt.indexOf(profileText));
     expect(prompt).not.toContain("\n</prompt_profile>\n");
@@ -45,7 +75,7 @@ describe("system prompt (versioned, task 2.5)", () => {
 
   it("keeps the immutable policy around prompt profiles in tool-free chat mode", () => {
     const prompt = buildSystemPrompt({ hasTools: false, promptProfile: "Act as a reviewer." })!;
-    expect(prompt.indexOf("Безопасность:")).toBeLessThan(prompt.indexOf("Act as a reviewer."));
+    expect(prompt.indexOf("Safety and trust boundaries")).toBeLessThan(prompt.indexOf("Act as a reviewer."));
     expect(prompt.endsWith("workspace boundaries.")).toBe(true);
   });
 
@@ -71,16 +101,21 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(decisions).toContain("record_decision");
     expect(decisions).toContain("query_decisions");
     expect(decisions).toContain("durable architectural");
-    expect(decisions).toContain("единый контракт");
+    expect(decisions).toContain("Память проекта");
 
     const planning = buildSystemPrompt({ hasTools: true, hasPlanningTools: true, workspace: "/w" })!;
     expect(planning).toContain("plan_read");
     expect(planning).toContain("plan_write_roadmap");
     expect(planning).toContain(".kyrei/plan/");
+    expect(planning).toContain("run_claim");
+    expect(planning).toContain("run_final_audit");
+    expect(planning).toContain(".kyrei/run/");
+    expect(planning).toContain("Long-horizon run protocol");
+    expect(planning).toContain("KYREI_FINAL_AUDIT");
 
     const search = buildSystemPrompt({ hasTools: true, hasMemorySearch: true, workspace: "/w" })!;
     expect(search).toContain("memory_search");
-    expect(search).toContain("decisions → plan");
+    expect(search).toContain("decisions → plan/run");
 
     const writes = buildSystemPrompt({ hasTools: true, hasMemoryWriteTools: true, workspace: "/w" })!;
     expect(writes).toContain("memory_write_notes");

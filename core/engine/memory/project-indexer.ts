@@ -13,6 +13,7 @@ import type { MemoryDoc, MemoryStore, VectorStore } from "../data/ports.js";
 import { createLtmBridge } from "./ltm-bridge.js";
 import { createPlanStore } from "../orchestration/plan.js";
 import { getEmbedAdapter, embedText, isZeroVector } from "./embed-adapter.js";
+import { indexVaultIntoMemory, normalizeVaultConfig } from "./vault.js";
 
 export interface ReindexProjectMemoryOptions {
   workspace: string;
@@ -25,6 +26,8 @@ export interface ReindexProjectMemoryOptions {
   maxHandoffs?: number;
   /** Cap decisions projected. */
   maxDecisions?: number;
+  /** Wave C3: optional external markdown vault roots. */
+  vault?: import("./vault.js").VaultConfig;
 }
 
 export interface ReindexProjectMemoryResult {
@@ -319,6 +322,28 @@ export async function reindexProjectMemory(
       }
     } catch {
       /* ltm optional */
+    }
+  }
+
+  // Wave C3: external markdown vault (opt-in paths).
+  {
+    const vaultCfg = normalizeVaultConfig(opts.vault);
+    if (vaultCfg.enabled && vaultCfg.paths.length) {
+      try {
+        const vaultResult = await indexVaultIntoMemory({
+          vault: vaultCfg,
+          memory,
+          ...(vectors ? { vectors } : {}),
+          workspaceTag: workspace,
+        });
+        if (vaultResult.upserted) {
+          upserted += vaultResult.upserted;
+          vectorsUpserted += vaultResult.vectorsUpserted;
+          sources.push("vault");
+        }
+      } catch (error) {
+        console.warn("[kyrei memory-index] vault projection failed:", error);
+      }
     }
   }
 

@@ -22,6 +22,7 @@ const SAFE_FAILURE_KEYS = new Set([
   "retryAfter",
   "retryAfterMs",
   "authRequired",
+  "failureClass",
   "disabled",
   "quotaExhausted",
   "entitlementDenied",
@@ -551,7 +552,11 @@ export class KiroOrganizationBroker {
     const record = this._leaseRecord(lease);
     const safeOptions = safeFailureOptions(options);
     const statusCode = Number(safeOptions.statusCode ?? safeOptions.status ?? 0);
-    const authenticationFailure = safeOptions.authRequired === true || statusCode === 401 || statusCode === 403;
+    // Soft 403 (CDN/WAF) must not wipe verification on first blip — pool multi-strike handles it.
+    // Hard 401 / explicit authRequired still revoke credentials immediately.
+    const authenticationFailure = safeOptions.authRequired === true
+      || safeOptions.failureClass === "auth_definite"
+      || statusCode === 401;
     const entitlementFailure = safeOptions.quotaExhausted === true || safeOptions.entitlementDenied === true;
     if (entitlementFailure) {
       const reasonCode = safeOptions.quotaExhausted === true ? "quota_exhausted" : "entitlement_denied";

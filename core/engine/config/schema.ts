@@ -184,6 +184,14 @@ const MemoryCuratorConfigSchema = z.object({
   ),
 });
 
+const VaultConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.vault.enabled),
+  paths: z.array(z.string().min(1).max(500)).max(8).default(DEFAULT_ENGINE_CONFIG.memory.vault.paths),
+  maxFiles: z.number().int().min(10).max(2_000).default(DEFAULT_ENGINE_CONFIG.memory.vault.maxFiles),
+  maxFileChars: z.number().int().min(1_000).max(100_000).default(DEFAULT_ENGINE_CONFIG.memory.vault.maxFileChars),
+  maxDepth: z.number().int().min(1).max(12).default(DEFAULT_ENGINE_CONFIG.memory.vault.maxDepth),
+});
+
 const MemoryConfigSchema = z.object({
   gbrain: GBrainConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.gbrain),
   ltm: LtmConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.ltm),
@@ -191,6 +199,7 @@ const MemoryConfigSchema = z.object({
   index: MemoryIndexConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.index),
   sessionMirror: SessionMirrorConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.sessionMirror),
   curator: MemoryCuratorConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.curator),
+  vault: VaultConfigSchema.default(DEFAULT_ENGINE_CONFIG.memory.vault),
 });
 
 const PlanningConfigSchema = z.object({
@@ -275,8 +284,16 @@ const SkillsCuratorConfigSchema = z.object({
   ),
 });
 
+const SkillsSleepConfigSchema = z.object({
+  enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.skills.sleep.enabled),
+  maxTrajectories: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.skills.sleep.maxTrajectories),
+  maxProposals: z.number().int().min(1).max(100).default(DEFAULT_ENGINE_CONFIG.skills.sleep.maxProposals),
+  minFailureCluster: z.number().int().min(1).max(20).default(DEFAULT_ENGINE_CONFIG.skills.sleep.minFailureCluster),
+});
+
 const SkillsConfigSchema = z.object({
   curator: SkillsCuratorConfigSchema.default(DEFAULT_ENGINE_CONFIG.skills.curator),
+  sleep: SkillsSleepConfigSchema.default(DEFAULT_ENGINE_CONFIG.skills.sleep),
 });
 
 const DelegationConfigSchema = z.object({
@@ -324,6 +341,10 @@ export const EngineConfigSchema = z.object({
   apiMaxRetries: z.number().int().min(0).max(10).default(DEFAULT_ENGINE_CONFIG.apiMaxRetries),
   personality: z.string().max(4000).default(DEFAULT_ENGINE_CONFIG.personality),
   personalityPresetId: z.string().max(64).default(DEFAULT_ENGINE_CONFIG.personalityPresetId),
+  codingMode: z.preprocess(
+    (value) => (value === "balanced" ? "auto" : value),
+    z.enum(["auto", "plan", "build", "polish", "deepreep"]).default(DEFAULT_ENGINE_CONFIG.codingMode),
+  ),
   timezone: z.string().max(80).default(DEFAULT_ENGINE_CONFIG.timezone),
   defaultReasoningEffort: ReasoningEffortSchema.default(DEFAULT_ENGINE_CONFIG.defaultReasoningEffort || ""),
   imageInputMode: z.enum(["auto", "native", "text"]).default(DEFAULT_ENGINE_CONFIG.imageInputMode),
@@ -338,6 +359,14 @@ export const EngineConfigSchema = z.object({
   messaging: MessagingConfigSchema.default(DEFAULT_ENGINE_CONFIG.messaging),
   mcp: McpConfigSchema.default(DEFAULT_ENGINE_CONFIG.mcp),
   skills: SkillsConfigSchema.default(DEFAULT_ENGINE_CONFIG.skills),
+  usageBudget: z.object({
+    enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.usageBudget.enabled),
+    window: z.enum(["day", "month"]).default(DEFAULT_ENGINE_CONFIG.usageBudget.window),
+    softCostUsd: z.number().positive().max(1_000_000).nullable().default(null),
+    hardCostUsd: z.number().positive().max(1_000_000).nullable().default(null),
+    softTokens: z.number().int().positive().max(1e12).nullable().default(null),
+    hardTokens: z.number().int().positive().max(1e12).nullable().default(null),
+  }).default(DEFAULT_ENGINE_CONFIG.usageBudget),
 });
 
 export interface ResolveResult {

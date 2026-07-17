@@ -10,6 +10,12 @@ const desktopPlatform = (() => {
 const CHANNELS = Object.freeze({
   workspaceChoose: "kyrei:workspace:choose",
   workspaceValidate: "kyrei:workspace:validate",
+  openExternal: "kyrei:shell:openExternal",
+  updateGetStatus: "kyrei:update:getStatus",
+  updateCheck: "kyrei:update:check",
+  updateDownload: "kyrei:update:download",
+  updateInstall: "kyrei:update:install",
+  updateEvent: "kyrei:update:event",
   terminalList: "kyrei:terminal:list",
   terminalCreate: "kyrei:terminal:create",
   terminalWrite: "kyrei:terminal:write",
@@ -20,6 +26,9 @@ const CHANNELS = Object.freeze({
 let nextTerminalSubscription = 1;
 const terminalSubscriptions = new Map();
 const MAX_TERMINAL_SUBSCRIPTIONS = 64;
+let nextUpdateSubscription = 1;
+const updateSubscriptions = new Map();
+const MAX_UPDATE_SUBSCRIPTIONS = 32;
 
 const dispatchTerminalEvent = (_event, value) => {
   for (const callback of terminalSubscriptions.values()) {
@@ -27,6 +36,16 @@ const dispatchTerminalEvent = (_event, value) => {
       callback(value);
     } catch {
       // One renderer component must not starve other terminal subscribers.
+    }
+  }
+};
+
+const dispatchUpdateEvent = (_event, value) => {
+  for (const callback of updateSubscriptions.values()) {
+    try {
+      callback(value);
+    } catch {
+      /* ignore */
     }
   }
 };
@@ -47,6 +66,32 @@ contextBridge.exposeInMainWorld("kyrei", {
   workspace: {
     choose: (locale) => ipcRenderer.invoke(CHANNELS.workspaceChoose, locale),
     validatePath: (path) => ipcRenderer.invoke(CHANNELS.workspaceValidate, path),
+  },
+  shell: {
+    openExternal: (url, options) => ipcRenderer.invoke(CHANNELS.openExternal, url, options),
+  },
+  update: {
+    getStatus: () => ipcRenderer.invoke(CHANNELS.updateGetStatus),
+    check: () => ipcRenderer.invoke(CHANNELS.updateCheck),
+    download: () => ipcRenderer.invoke(CHANNELS.updateDownload),
+    install: () => ipcRenderer.invoke(CHANNELS.updateInstall),
+    subscribe: (callback) => {
+      if (typeof callback !== "function" || updateSubscriptions.size >= MAX_UPDATE_SUBSCRIPTIONS) return "";
+      const id = `update-${nextUpdateSubscription++}`;
+      if (updateSubscriptions.size === 0) {
+        ipcRenderer.on(CHANNELS.updateEvent, dispatchUpdateEvent);
+      }
+      updateSubscriptions.set(id, callback);
+      return id;
+    },
+    unsubscribe: (id) => {
+      if (!updateSubscriptions.has(id)) return false;
+      updateSubscriptions.delete(id);
+      if (updateSubscriptions.size === 0) {
+        ipcRenderer.removeListener(CHANNELS.updateEvent, dispatchUpdateEvent);
+      }
+      return true;
+    },
   },
   terminal: {
     list: (ownerId) => ipcRenderer.invoke(CHANNELS.terminalList, ownerId),

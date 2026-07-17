@@ -8,6 +8,23 @@
  */
 
 import { normalizeOrchestration } from "./team-config.js";
+import {
+  ensureBuiltinPromptProfiles,
+  ensureBuiltinTeamOrchestration,
+} from "./team-defaults.js";
+import { normalizeAccessControl, publicAccessControl } from "./access-tokens.js";
+import { normalizeProxyConfig } from "./openai-compat.js";
+import { normalizeCapacityConfig } from "./capacity-router.js";
+import { normalizeExperimentalConfig } from "./experimental-features.js";
+import {
+  isBrowserSubscriptionAllowed,
+  normalizeBrowserSubscriptionPublicConfig,
+  normalizeBrowserSubscriptionSecrets,
+  normalizeProviderCredentialSource,
+  resolveBrowserSubscriptionCredentials,
+} from "./browser-subscription-auth.js";
+
+export { resolveBrowserSubscriptionCredentials } from "./browser-subscription-auth.js";
 import { normalizePipelines } from "./pipeline-config.js";
 import {
   PROVIDER_ACCOUNT_POOL_STRATEGIES,
@@ -445,7 +462,7 @@ function normalizeHeaders(value, { strict = false } = {}) {
   return headers;
 }
 
-export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID) {
+export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID, options = {}) {
   const source = object(value);
   const id = normalizeId(source.id, fallbackId);
   const protocol = normalizeProviderProtocol(source.protocol);
@@ -453,6 +470,12 @@ export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID) {
   const headers = normalizeHeaders(source.headers);
   const models = normalizeModels(source.models, source.model, { providerId: id, protocol, baseURL });
   const name = text(source.name, id === DEFAULT_PROVIDER_ID ? "OpenAI-compatible" : id);
+  const credentialSource = normalizeProviderCredentialSource(source.credentialSource, {
+    featureEnabled: options.browserSubscriptionAllowed === true,
+  });
+  const browserSubscriptionSessionId = credentialSource === "browser-subscription"
+    ? text(source.browserSubscriptionSessionId, 40).toLowerCase()
+    : "";
   return {
     id,
     name,
@@ -463,6 +486,10 @@ export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID) {
     enabled: source.enabled !== false,
     requiresApiKey: typeof source.requiresApiKey === "boolean" ? source.requiresApiKey : !isLocalProviderUrl(baseURL),
     accountPool: normalizeProviderAccountPool(source.accountPool ?? source.pool, models),
+    credentialSource,
+    ...(browserSubscriptionSessionId && /^bs_[a-z0-9]{8,32}$/.test(browserSubscriptionSessionId)
+      ? { browserSubscriptionSessionId }
+      : {}),
   };
 }
 
@@ -512,6 +539,13 @@ export function validateProviderInput(value, { creating = false, providerId, ver
     verifyLiveCapabilities,
   });
   const headers = normalizeHeaders(source.headers, { strict: true });
+  // credentialSource is finalized in normalizeGatewayConfig against the experimental gate.
+  const credentialSource = source.credentialSource === "browser-subscription"
+    ? "browser-subscription"
+    : "api-key";
+  const browserSubscriptionSessionId = typeof source.browserSubscriptionSessionId === "string"
+    ? source.browserSubscriptionSessionId.trim().toLowerCase()
+    : "";
   return {
     id,
     name,
@@ -519,6 +553,10 @@ export function validateProviderInput(value, { creating = false, providerId, ver
     baseURL,
     ...(Object.keys(headers).length ? { headers } : {}),
     models,
+    credentialSource,
+    ...(browserSubscriptionSessionId && /^bs_[a-z0-9]{8,32}$/.test(browserSubscriptionSessionId)
+      ? { browserSubscriptionSessionId }
+      : {}),
     enabled: source.enabled !== false,
     requiresApiKey: typeof source.requiresApiKey === "boolean" ? source.requiresApiKey : !isLocalProviderUrl(baseURL),
     accountPool: normalizeProviderAccountPool(source.accountPool ?? source.pool, models),
@@ -555,40 +593,84 @@ export function normalizeGatewayConfig(value) {
       ? requestedModel
       : activeProvider.models[0].id
     : "";
-  const workerSource = object(object(source.modelAssignments).worker);
-  const workerProvider = unique.find((provider) => provider.id === text(workerSource.providerId) && provider.enabled);
-  const workerModelId = text(workerSource.modelId);
-  const worker = workerProvider?.models.some((model) => model.id === workerModelId)
-    ? { providerId: workerProvider.id, modelId: workerModelId }
-    : null;
-  const fallbackRows = Array.isArray(object(source.modelAssignments).fallbacks)
-    ? object(source.modelAssignments).fallbacks
+  const assignmentsSource = object(source.modelAssignments);
+  /** Resolve optional role model assignment; drop if provider/model missing. */
+  const roleAssignment = (raw) => {
+    const row = object(raw);
+    const providerId = text(row.providerId);
+    const modelId = text(row.modelId);
+    if (!providerId || !modelId) return null;
+    const provider = unique.find((item) => item.id === providerId && item.enabled);
+    if (!provider?.models.some((model) => model.id === modelId)) return null;
+    return { providerId, modelId };
+  };
+  const worker = roleAssignment(assignmentsSource.worker);
+  const build = roleAssignment(assignmentsSource.build);
+  const polish = roleAssignment(assignmentsSource.polish);
+  const plan = roleAssignment(assignmentsSource.plan);
+  const deepreep = roleAssignment(assignmentsSource.deepreep);
+  const fallbackRows = Array.isArray(assignmentsSource.fallbacks)
+    ? assignmentsSource.fallbacks
     : [];
   const fallbackKeys = new Set();
   const fallbacks = [];
   for (const row of fallbackRows.slice(0, MAX_MODEL_FALLBACKS)) {
-    const candidate = object(row);
-    const providerId = text(candidate.providerId);
-    const modelId = text(candidate.modelId);
-    const provider = unique.find((item) => item.id === providerId && item.enabled);
-    if (!provider?.models.some((model) => model.id === modelId)) continue;
-    const key = `${providerId}\0${modelId}`;
+    const candidate = roleAssignment(row);
+    if (!candidate) continue;
+    const key = `${candidate.providerId}\0${candidate.modelId}`;
     if (fallbackKeys.has(key)) continue;
     fallbackKeys.add(key);
-    fallbacks.push({ providerId, modelId });
+    fallbacks.push(candidate);
   }
-  const orchestration = normalizeOrchestration(source.orchestration, unique);
+  // OOB: seed coding team + prompt profiles only when the user has none yet.
+  // Team mode stays single until explicitly enabled; profiles remain editable.
+  let orchestration = normalizeOrchestration(source.orchestration, unique);
+  orchestration = normalizeOrchestration(
+    ensureBuiltinTeamOrchestration(orchestration, unique, {
+      providerId: activeProvider?.id ?? "",
+      modelId: activeModelId,
+    }),
+    unique,
+  );
+  const engine = ensureBuiltinPromptProfiles(object(source.engine));
+  const accessControl = normalizeAccessControl(source.accessControl);
+  const proxy = normalizeProxyConfig(source.proxy);
+  const capacity = normalizeCapacityConfig(source.capacity);
+  // Employee-token mode keeps experimental / at-your-own-risk methods sealed.
+  const experimental = normalizeExperimentalConfig(source.experimental, {
+    companyLocked: accessControl.requireToken === true,
+  });
+  const experimentalConfig = { experimental, accessControl };
+  const browserSubscriptionAllowed = isBrowserSubscriptionAllowed(experimentalConfig);
+  // Re-normalize providers so credentialSource cannot stick without the gate.
+  const providersNormalized = unique.map((provider) => normalizeProvider(provider, provider.id, {
+    browserSubscriptionAllowed,
+  }));
+  // Keep session metadata even when the gate is closed so operators can revoke.
+  const browserSubscription = normalizeBrowserSubscriptionPublicConfig(source.browserSubscription);
   return {
     version: 3,
     activeProviderId: activeProvider?.id ?? "",
     activeModelId,
-    providers: unique,
-    modelAssignments: { ...(worker ? { worker } : {}), fallbacks },
+    providers: providersNormalized,
+    modelAssignments: {
+      ...(worker ? { worker } : {}),
+      ...(build ? { build } : {}),
+      ...(polish ? { polish } : {}),
+      ...(plan ? { plan } : {}),
+      ...(deepreep ? { deepreep } : {}),
+      fallbacks,
+    },
     orchestration,
     pipelines: normalizePipelines(source.pipelines, orchestration.profiles),
     kiroOrganization: normalizeKiroOrganizationConfig(source.kiroOrganization ?? {}),
     workspace: typeof source.workspace === "string" ? source.workspace : "",
-    engine: object(source.engine),
+    engine,
+    accessControl,
+    proxy,
+    capacity,
+    experimental,
+    browserSubscription,
   };
 }
 
@@ -644,6 +726,16 @@ export function normalizeProviderSecrets(value) {
   }
   const messagingSource = object(source.messaging);
   const messagingToken = secretText(messagingSource.webhookToken, 256);
+  // Access-token hashes only (SHA-256 hex). Never store plaintext tokens.
+  const accessTokenHashes = {};
+  for (const [id, hash] of Object.entries(object(source.accessTokenHashes))) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) continue;
+    if (typeof hash !== "string" || !/^[a-f0-9]{64}$/i.test(hash)) continue;
+    accessTokenHashes[id] = hash.toLowerCase();
+  }
+  const browserSubscription = normalizeBrowserSubscriptionSecrets(source.browserSubscription);
+  const hasBrowserSecrets = Object.keys(browserSubscription.sessions).length > 0
+    || Object.keys(browserSubscription.profiles).length > 0;
   return {
     version: 3,
     providers,
@@ -652,6 +744,8 @@ export function normalizeProviderSecrets(value) {
     ...(messagingToken
       ? { messaging: { webhookToken: messagingToken } }
       : {}),
+    ...(Object.keys(accessTokenHashes).length ? { accessTokenHashes } : {}),
+    ...(hasBrowserSecrets ? { browserSubscription } : {}),
     kiroOrganization: serializeKiroOrganizationSecrets(
       normalizeKiroOrganizationSecrets(source.kiroOrganization),
     ),
@@ -718,10 +812,34 @@ export function collectProviderCredentialValues(secretState, providers = []) {
   for (const secret of normalizeKiroOrganizationSecrets(object(secretState).kiroOrganization).values()) {
     if (typeof secret.apiKey === "string" && secret.apiKey.length > 0) values.push(secret.apiKey);
   }
+  const browserVault = normalizeBrowserSubscriptionSecrets(object(secretState).browserSubscription);
+  for (const material of Object.values(browserVault.sessions)) {
+    for (const field of ["accessToken", "refreshToken", "deviceCode", "clientSecret"]) {
+      if (typeof material[field] === "string" && material[field].length > 0) {
+        values.push(material[field]);
+      }
+    }
+  }
+  for (const material of Object.values(browserVault.profiles)) {
+    if (typeof material.clientSecret === "string" && material.clientSecret.length > 0) {
+      values.push(material.clientSecret);
+    }
+  }
+  const messagingToken = secretText(object(object(secretState).messaging).webhookToken, 256);
+  if (messagingToken) values.push(messagingToken);
   return values;
 }
 
-export function hasStoredProviderCredentials(provider, secretValue) {
+/**
+ * @param {object} provider
+ * @param {unknown} secretValue account/provider secret row OR full secrets when resolving browser-subscription
+ * @param {{ config?: object, secrets?: object }} [context]
+ */
+export function hasStoredProviderCredentials(provider, secretValue, context = {}) {
+  if (provider?.credentialSource === "browser-subscription") {
+    if (!context.config || !context.secrets) return false;
+    return Boolean(resolveBrowserSubscriptionCredentials(context.config, context.secrets, provider));
+  }
   if (!provider.requiresApiKey) return true;
   const secret = normalizeProviderSecret(secretValue);
   switch (provider.protocol) {
@@ -734,17 +852,18 @@ export function hasStoredProviderCredentials(provider, secretValue) {
   }
 }
 
-export function readyProviderAccounts(provider, secretState) {
+export function readyProviderAccounts(provider, secretState, config) {
   const pool = normalizeProviderAccountPool(provider.accountPool, provider.models);
   const members = pool.enabled ? pool.members : pool.members.filter((member) => member.id === "primary");
   return members.filter((member) => member.enabled && hasStoredProviderCredentials(
     provider,
     getProviderAccountCredentials(secretState, provider.id, member.id),
+    { config, secrets: secretState },
   ));
 }
 
-export function hasReadyProviderCredentials(provider, secretState) {
-  return readyProviderAccounts(provider, secretState).length > 0;
+export function hasReadyProviderCredentials(provider, secretState, config) {
+  return readyProviderAccounts(provider, secretState, config).length > 0;
 }
 
 export function getActiveProvider(config) {
@@ -765,20 +884,27 @@ export function publicGatewayConfig(config, secrets) {
         return {
           ...member,
           primary: member.id === "primary",
-          hasStoredCredentials: Object.keys(credentials).length > 0,
-          ready: hasStoredProviderCredentials(provider, credentials),
+          hasStoredCredentials: Object.keys(credentials).length > 0
+            || (provider.credentialSource === "browser-subscription"
+              && hasStoredProviderCredentials(provider, credentials, { config, secrets })),
+          ready: hasStoredProviderCredentials(provider, credentials, { config, secrets }),
         };
       }),
     },
-    hasKey: hasReadyProviderCredentials(provider, secrets),
-    hasStoredCredentials: Object.keys(getProviderAccountCredentials(secrets, provider.id)).length > 0,
+    hasKey: hasReadyProviderCredentials(provider, secrets, config),
+    hasStoredCredentials: Object.keys(getProviderAccountCredentials(secrets, provider.id)).length > 0
+      || (provider.credentialSource === "browser-subscription"
+        && hasStoredProviderCredentials(provider, {}, { config, secrets })),
+    ...(provider.credentialSource === "browser-subscription"
+      ? { credentialSource: "browser-subscription" }
+      : {}),
   }));
   const messaging = object(object(config.engine).messaging);
   return {
     provider: active?.baseURL ?? "",
     model: config.activeModelId ?? "",
     workspace: config.workspace ?? "",
-    hasKey: active ? hasReadyProviderCredentials(active, secrets) : false,
+    hasKey: active ? hasReadyProviderCredentials(active, secrets, config) : false,
     activeProviderId: active?.id ?? "",
     activeProviderName: active?.name ?? "",
     activeModelId: config.activeModelId ?? "",
@@ -787,6 +913,15 @@ export function publicGatewayConfig(config, secrets) {
     orchestration,
     pipelines: normalizePipelines(config.pipelines, orchestration.profiles),
     engine: object(config.engine),
+    accessControl: publicAccessControl(config.accessControl),
+    proxy: normalizeProxyConfig(config.proxy),
+    capacity: normalizeCapacityConfig(config.capacity),
+    experimental: normalizeExperimentalConfig(config.experimental, {
+      companyLocked: config.accessControl?.requireToken === true,
+    }),
+    browserSubscription: normalizeBrowserSubscriptionPublicConfig(config.browserSubscription, {
+      profileSecrets: normalizeBrowserSubscriptionSecrets(secrets.browserSubscription).profiles,
+    }),
     messaging: {
       enabled: messaging.enabled === true,
       autoRun: messaging.autoRun === true,

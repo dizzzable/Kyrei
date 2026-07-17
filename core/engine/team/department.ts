@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { codingModeForPipelineStage, normalizeCodingMode } from "../coding-mode.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { redact } from "../security/secrets.js";
 import type {
@@ -237,7 +238,15 @@ function departmentMetrics(
  * must contain a structured Team artifact before it can cross this boundary.
  */
 export async function runTeamDepartment(options: RunTeamDepartmentOptions): Promise<TeamDepartmentResult> {
-  const { config, warnings } = resolveEngineConfig(options.config);
+  // Gateway may already set codingMode from stage id+name+kind; otherwise map stageId.
+  const stageMode = options.config?.codingMode != null
+    ? normalizeCodingMode(options.config.codingMode)
+    : codingModeForPipelineStage({ id: options.stageId });
+  const { config, warnings } = resolveEngineConfig({
+    ...options.config,
+    // Pipeline department stage forces a coding phase (research→deepreep, etc.).
+    codingMode: stageMode,
+  });
   if (warnings.length) console.warn("[kyrei v2] pipeline Team config:", warnings.join("; "));
   const emit = options.emit ?? (() => undefined);
   const sensitiveValues = options.sensitiveValues ?? [];

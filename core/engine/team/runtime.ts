@@ -10,7 +10,8 @@ import type {
   RuntimeTeamRole,
   RuntimeTeamSpec,
 } from "../types.js";
-import { buildModel, buildProviderOptions, hasProviderCredentials } from "../provider/build.js";
+import type { ModelParams } from "../types.js";
+import { buildModel, buildProviderOptions, hasProviderCredentials, resolveTurnModelParams } from "../provider/build.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { buildTools } from "../tools/index.js";
 import { buildWebTools } from "../tools/web.js";
@@ -19,6 +20,7 @@ import { buildPlanningTools } from "../tools/planning.js";
 import { buildOpenVikingTools } from "../tools/openviking.js";
 import { buildMemorySearchTools } from "../tools/memory-search.js";
 import { buildSkillTools } from "../tools/skills.js";
+import { codingModePrompt, normalizeCodingMode } from "../coding-mode.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createAuditLog } from "../security/audit.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
@@ -64,6 +66,11 @@ export interface CreateTeamRoleExecutorsOptions {
   readonly vectorStore?: VectorStore;
   readonly indexBackend?: string;
   readonly globalMemoryDir?: string;
+  /**
+   * Turn-level model params (effort/reasoning). Resolved with engine defaults
+   * so Team roles inherit the same thinking policy as main when supported.
+   */
+  readonly modelParams?: ModelParams;
 }
 
 /** Pure capability clamp used by pipeline departments before any tool is built. */
@@ -252,6 +259,7 @@ export async function createTeamRoleExecutors(
         skills: assignedSkills,
         workspace: canReadWorkspace && workspaceReady ? options.workspace : undefined,
         projectContext: canReadWorkspace ? projectContext : undefined,
+        codingModeHint: codingModePrompt(normalizeCodingMode(options.config.codingMode)),
         maxDepth: options.spec.limits.maxDepth,
         maxSteps: options.spec.limits.maxStepsPerAgent,
         maxRetries: options.config.apiMaxRetries,
@@ -268,7 +276,11 @@ export async function createTeamRoleExecutors(
           10_000_000,
         ),
         cost: entry.cost,
-        providerOptions: buildProviderOptions(target.protocol, undefined),
+        // Inherit turn/default effort so Anthropic/Google/OpenAI thinking works on roles.
+        providerOptions: buildProviderOptions(
+          target.protocol,
+          resolveTurnModelParams(options.modelParams, options.config.defaultReasoningEffort),
+        ),
         emit: options.emit,
         ...(options.providerAttemptLifecycle
           ? {

@@ -226,6 +226,69 @@ describe("ProviderAccountPoolRouter", () => {
     expect(router.reportSuccess("primary")?.status).toBe("ready");
   });
 
+  it("never parks a seat as auth-required on pure network / transport noise", () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const router = new ProviderAccountPoolRouter({
+      config: pool([{ id: "primary" }, { id: "spare" }]),
+      now: () => now,
+      networkCooldownMs: 1_000,
+    });
+
+    const first = router.reportFailure("primary", {
+      failureClass: "network",
+      retryable: true,
+    })!;
+    expect(first).toMatchObject({
+      status: "cooldown",
+      lastFailureClass: "network",
+      softAuthStrikes: 0,
+    });
+    expect(first.cooldownUntil).toBe(now + 1_000);
+    expect(router.orderedCandidates().map((entry) => entry.id)).toEqual(["spare"]);
+
+    now += 1_000;
+    expect(router.getMember("primary")?.status).toBe("ready");
+    expect(router.reportSuccess("primary")?.status).toBe("ready");
+  });
+
+  it("treats soft 403 as multi-strike cooldown instead of an instant ban", () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const router = new ProviderAccountPoolRouter({
+      config: pool([{ id: "primary" }]),
+      now: () => now,
+      baseCooldownMs: 1_000,
+      authSoftStrikesRequired: 3,
+    });
+
+    const first = router.reportFailure("primary", { statusCode: 403 })!;
+    expect(first).toMatchObject({
+      status: "cooldown",
+      softAuthStrikes: 1,
+      lastFailureClass: "auth_soft",
+    });
+    now = first.cooldownUntil;
+    expect(router.getMember("primary")?.status).toBe("ready");
+
+    const second = router.reportFailure("primary", { failureClass: "auth_soft", statusCode: 403 })!;
+    expect(second).toMatchObject({ status: "cooldown", softAuthStrikes: 2 });
+    now = second.cooldownUntil;
+
+    // Intervening network blip resets soft-auth accumulation (anti-false-ban).
+    router.reportFailure("primary", { failureClass: "network", retryable: true });
+    expect(router.getMember("primary")).toMatchObject({
+      status: "cooldown",
+      softAuthStrikes: 0,
+      lastFailureClass: "network",
+    });
+    now = router.getMember("primary")!.cooldownUntil;
+
+    router.reportFailure("primary", { statusCode: 403 });
+    now = router.getMember("primary")!.cooldownUntil;
+    router.reportFailure("primary", { statusCode: 403 });
+    now = router.getMember("primary")!.cooldownUntil;
+    expect(router.reportFailure("primary", { statusCode: 403 })?.status).toBe("auth-required");
+  });
+
   it("moves a soft session lease after its member cools down and supports explicit exclusions", () => {
     const router = new ProviderAccountPoolRouter({
       config: pool([{ id: "one" }, { id: "two" }]),

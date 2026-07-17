@@ -18,16 +18,32 @@ import type {
   RuntimeModelLimits,
   RuntimeProviderTarget,
 } from "../types.js";
-import { buildModel, buildProviderOptions, hasProviderCredentials } from "../provider/build.js";
+import {
+  buildModel,
+  buildProviderOptions,
+  hasProviderCredentials,
+  resolveTurnModelParams,
+} from "../provider/build.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { KeyPool } from "../provider/keys.js";
+import {
+  normalizeSubscriptionShield,
+  shouldHideEngineIdentity,
+  wrapFetchWithSubscriptionShield,
+} from "../provider/subscription-shield.js";
 import {
   openStream,
   streamAttemptsFromError,
   type ProviderStreamAttemptOutcome,
   type StreamLike,
 } from "../provider/open-stream.js";
+import {
+  effectiveCodingModeFromMessages,
+  filterToolsForCodingMode,
+  isPlanModeBlockedTool,
+  normalizeCodingMode,
+} from "../coding-mode.js";
 import { buildTools, type ToolMeta } from "../tools/index.js";
 import { buildWebTools } from "../tools/web.js";
 import { buildGBrainTools } from "../tools/gbrain.js";
@@ -46,6 +62,7 @@ import {
 } from "../team/index.js";
 import { isWorkspaceDir } from "../security/jail.js";
 import { createCcrStore, makeRetrieveTool } from "../context/ccr.js";
+import { createReadMemo } from "../context/read-memo.js";
 import { assembleSystemContext } from "../memory/layers.js";
 import { MemoryIndexSession } from "../memory/index-session.js";
 import { snippetsFromModelMessages } from "../memory/session-project.js";
@@ -58,7 +75,8 @@ import {
 } from "../reliability/runtime.js";
 import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/file-review.js";
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
-import { buildSystemPrompt } from "./system-prompt.js";
+import { buildSystemPromptParts } from "./system-prompt.js";
+import { packSystemForCache } from "../prompt/cache-packing.js";
 import { resolvePersonalityText } from "../personality-catalog.js";
 import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
 import { makePrepareStep } from "./prepare-step.js";
@@ -178,6 +196,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     });
   };
   const ccr = workspaceReady ? createCcrStore(join(opts.workspace!, ".kyrei", "ccr")) : null;
+  /** Wave B4: turn-scoped path@hash memo for repeated read_file. */
+  const readMemo = createReadMemo();
   const audit = opts.auditLogPath ? createAuditLog(opts.auditLogPath) : undefined;
 
   // Configure process embedder (lexical default; optional HTTP neural endpoint).
@@ -217,6 +237,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         },
         ltmEnabled: Boolean(cfg.memory.ltm?.enabled),
         planningEnabled: Boolean(cfg.planning?.enabled),
+        ...(cfg.memory.vault?.enabled ? { vault: cfg.memory.vault } : {}),
       });
       await memoryIndex.reindexNow();
     } catch (indexErr) {
@@ -255,10 +276,24 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     }
   };
 
+  // Subscription shield: pace + soft TLS/header hygiene for expensive seats.
+  // Gateway-owned config only — never taken from renderer chat payload.
+  const subscriptionShield = normalizeSubscriptionShield(opts.subscriptionShield);
+  const hideEngineIdentity = shouldHideEngineIdentity(subscriptionShield);
+  const providerFetchFor = (paceKey?: string, baseFetch?: typeof fetch): typeof fetch | undefined => {
+    const shieldFetch = wrapFetchWithSubscriptionShield({
+      config: subscriptionShield,
+      paceKey: paceKey || opts.providerAccountId || "primary",
+      ...(baseFetch ? { baseFetch } : {}),
+    });
+    return shieldFetch ?? baseFetch;
+  };
+
   // Clean-context reviewer (Requirements §11.3) reuses the primary provider's
   // credentials/endpoint — no separate account is provisioned for it. It is
   // an isolated *call* (fresh messages, no tools, no history), not a
   // separate identity, so it never needs its own credential surface.
+  const reviewFetch = providerFetchFor(opts.providerAccountId || "primary");
   const reviewModel = cfg.review?.cleanContext
     ? buildModel({
         protocol: opts.providerProtocol,
@@ -267,6 +302,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         credentials: providerCredentials,
         model: opts.model,
         headers: opts.providerHeaders,
+        identifyEngine: !hideEngineIdentity,
+        ...(reviewFetch ? { fetch: reviewFetch } : {}),
       })
     : undefined;
   const workspaceTools = workspaceReady
@@ -283,6 +320,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         onLtmEvent,
         ...(cfg.memory.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm") } : {}),
         ...(reviewModel ? { reviewModel } : {}),
+        readMemo,
+        smartCompress: true,
       })
     : undefined;
   const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};
@@ -328,6 +367,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(memoryIndex?.vectorStore ? { vectorStore: memoryIndex.vectorStore } : {}),
         ...(sessionMirrorStores ? { sessionStore: sessionMirrorStores.sessions } : {}),
         ...(sessionSnippets.length ? { sessionSnippets } : {}),
+        ...(cfg.memory.vault?.enabled ? { vault: cfg.memory.vault } : {}),
       })
     : {};
   const memoryWriteTools = workspaceReady
@@ -373,7 +413,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     ...mcpTools,
     ...skillTools,
   };
-  const tools = Object.keys(baseToolSet).length ? baseToolSet : undefined;
+  // Plan mode hard-gates mutating tools (edit/write/shell/MCP write surfaces).
+  const filteredToolSet = filterToolsForCodingMode(
+    baseToolSet as Record<string, unknown>,
+    normalizeCodingMode(cfg.codingMode),
+  ) as ToolSet | undefined;
+  const tools = filteredToolSet && Object.keys(filteredToolSet).length ? filteredToolSet : undefined;
   // MCP is intentionally not available to read-only children (external process surface).
   const childTools = selectReadOnlyChildTools(
     workspaceTools,
@@ -404,6 +449,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     }
   }
 
+  // Effort for Team is resolved inside createTeamRoleExecutors from cfg + modelParams.
   const teamExecutors = opts.team
     ? await createTeamRoleExecutors({
         spec: opts.team,
@@ -423,6 +469,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(memoryIndex?.vectorStore ? { vectorStore: memoryIndex.vectorStore } : {}),
         indexBackend: memoryIndex?.backendLabel ?? "off",
         ...(opts.globalMemoryDir ? { globalMemoryDir: opts.globalMemoryDir } : {}),
+        modelParams: opts.modelParams,
       })
     : [];
   const teamTools = opts.team
@@ -434,13 +481,14 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         maxResultChars: cfg.maxToolOutput,
       })
     : {};
-  const instructions = buildSystemPrompt({
+  const systemParts = buildSystemPromptParts({
     workspace: opts.workspace,
     hasTools,
     personality: resolvePersonalityText({
       personality: cfg.personality,
       personalityPresetId: cfg.personalityPresetId,
     }),
+    codingMode: cfg.codingMode,
     timezone: cfg.timezone,
     promptProfile: cfg.promptProfiles.find((profile) => profile.id === cfg.activePromptProfileId)?.systemPrompt,
     projectContext,
@@ -470,6 +518,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         }
       : undefined,
   });
+  // Wave B2: pack stable system prefix for prompt-cache (Anthropic breakpoints).
+  // Protocol is known at stream start; pack per-candidate inside start().
 
   // Candidate models: primary, gateway-resolved provider fallbacks, then the
   // legacy provider-local model list. Each qualified target carries its own
@@ -542,6 +592,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     phase: attempt.phase,
     ...(attempt.statusCode !== undefined ? { statusCode: attempt.statusCode } : {}),
     ...(attempt.retryAfterMs !== undefined ? { retryAfterMs: attempt.retryAfterMs } : {}),
+    ...(attempt.failureClass !== undefined ? { failureClass: attempt.failureClass } : {}),
   });
   const publicAttempts = (attempts: ProviderStreamAttemptOutcome[] | undefined): ProviderAttemptOutcome[] => (
     Array.isArray(attempts) ? attempts.map(publicAttempt) : []
@@ -572,8 +623,10 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           : {}),
       }
     : undefined;
+  // Shared turn params (effort/defaultReasoningEffort) for main, worker, and Team.
+  const turnParams = resolveTurnModelParams(opts.modelParams, cfg.defaultReasoningEffort);
   const explicitWorkerProviderOptions = explicitWorker
-    ? buildProviderOptions(explicitWorker.protocol, undefined)
+    ? buildProviderOptions(explicitWorker.protocol, turnParams)
     : undefined;
   const primaryContextWindowOverride = boundedModelOverride(
     opts.modelParams?.contextWindowOverride,
@@ -587,14 +640,6 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const start = (ci: number, useTools: boolean): StreamLike => {
     const candidate = candidates[ci] ?? candidates[0]!;
     const { entry, target, credentials } = candidate;
-    // Hermes agent.reasoning_effort: fill default when the turn did not set effort.
-    const turnParams = (() => {
-      const base = opts.modelParams ?? {};
-      const hasEffort = typeof base.effort === "string" && base.effort.trim().length > 0;
-      const def = typeof cfg.defaultReasoningEffort === "string" ? cfg.defaultReasoningEffort.trim() : "";
-      if (hasEffort || !def || def === "off") return opts.modelParams;
-      return { ...base, effort: def };
-    })();
     const providerOptions = buildProviderOptions(target.protocol, turnParams);
     // Manual limits are scoped to the selected primary model. A fallback can
     // have a different context/output contract and must use its own registry
@@ -607,6 +652,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       : target.limits?.maxOutput ?? entry.limits.maxOutput;
     // Unknown is a real state: without a verified context window Kyrei avoids
     // pretending that a generic 32k budget describes this endpoint.
+    const paceKey = target.accountId || opts.providerAccountId || `candidate-${ci}`;
+    const shieldFetch = providerFetchFor(paceKey);
+    const multiKeyFetch = ci === 0 && keyPool.isMulti()
+      ? keyPool.fetchMiddleware(shieldFetch ?? globalThis.fetch.bind(globalThis))
+      : undefined;
+    const modelFetch = multiKeyFetch ?? shieldFetch;
     const model = buildModel({
       protocol: target.protocol,
       baseURL: target.baseURL,
@@ -614,8 +665,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       credentials,
       model: entry.id,
       headers: target.headers,
-      ...(ci === 0 && keyPool.isMulti() ? { fetch: keyPool.fetchMiddleware() } : {}),
+      identifyEngine: !hideEngineIdentity,
+      ...(modelFetch ? { fetch: modelFetch } : {}),
     });
+    const workerShieldFetch = explicitWorker
+      ? providerFetchFor(explicitWorker.accountId || "worker")
+      : undefined;
     const workerModel = explicitWorker
       ? buildModel({
           protocol: explicitWorker.protocol,
@@ -624,9 +679,11 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           credentials: workerCredentials ?? {},
           model: explicitWorker.model,
           headers: explicitWorker.headers,
+          identifyEngine: !hideEngineIdentity,
+          ...(workerShieldFetch ? { fetch: workerShieldFetch } : {}),
         })
       : model;
-    const prepareStep = ccr && contextWindow !== undefined
+    const compactionPrepareStep = ccr && contextWindow !== undefined
       ? makePrepareStep(cfg, {
           model: entry.id,
           window: contextWindow,
@@ -677,11 +734,48 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     const callTools: ToolSet | undefined = useTools && Object.keys(mergedTools).length
       ? mergedTools
       : undefined;
+    const configuredMode = normalizeCodingMode(cfg.codingMode);
+    /** Plan-safe subset used when auto declares Effective phase: plan mid-turn. */
+    const planActiveToolNames = callTools
+      ? (Object.keys(
+        filterToolsForCodingMode(callTools as Record<string, unknown>, "plan") ?? {},
+      ) as Array<keyof ToolSet & string>)
+      : [];
+    // Mid-turn: when UI mode is auto and the model declared plan, narrow tools
+    // for subsequent steps. Also runs compaction prepareStep when present.
+    const prepareStep = callTools
+      ? async (stepOpts: {
+          messages: ModelMessage[];
+          steps?: ReadonlyArray<{ usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; promptTokens?: number } }>;
+          stepNumber?: number;
+        }) => {
+          const compacted = compactionPrepareStep
+            ? await compactionPrepareStep(stepOpts)
+            : undefined;
+          const messages = compacted?.messages ?? stepOpts.messages;
+          const effective = effectiveCodingModeFromMessages(messages, configuredMode);
+          if (effective === "plan" && planActiveToolNames.length) {
+            return {
+              ...(compacted ?? {}),
+              messages,
+              activeTools: planActiveToolNames,
+            };
+          }
+          return compacted;
+        }
+      : compactionPrepareStep;
     let guardStopReason: GuardStopReason | undefined;
+    // Wave B2: Anthropic gets system messages with cacheControl on the stable
+    // prefix; other protocols keep a single instructions string (stable first).
+    const packedSystem = packSystemForCache(systemParts, target.protocol);
+    const historyMessages = prepareMessagesForModel((opts.messages ?? []) as ModelMessage[]);
+    const streamMessages = packedSystem.systemMessages?.length
+      ? [...packedSystem.systemMessages, ...historyMessages]
+      : historyMessages;
     const result = streamText({
       model,
-      ...(instructions ? { instructions } : {}),
-      messages: prepareMessagesForModel((opts.messages ?? []) as ModelMessage[]),
+      ...(packedSystem.instructions ? { instructions: packedSystem.instructions } : {}),
+      messages: streamMessages,
       ...(callTools
         ? {
             tools: callTools,
@@ -696,6 +790,11 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
               toolCall: { toolCallId: string; toolName: string; input: unknown };
               messages: import("ai").ModelMessage[];
             }) => {
+              // Hard-deny mutating tools when plan is configured or auto declared plan.
+              const effective = effectiveCodingModeFromMessages(messages, configuredMode);
+              if (effective === "plan" && isPlanModeBlockedTool(toolCall.toolName)) {
+                return { type: "denied" as const, reason: "plan_mode_blocks_mutating_tools" };
+              }
               // AI SDK validates the stored request HMAC before invoking this
               // callback. Correlate that durable receipt before evaluating the
               // *current* policy so ask→allow/deny changes cannot bypass or
@@ -831,7 +930,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       opts.emit({
         type: "message.delta",
         payload: {
-          text: `\n\n[heal-handoff] consecutive tool failures — handoff written: ${healHandoffPath}`,
+          text: `\n\nKYREI_FAILURE_HANDOFF\n[heal-handoff] consecutive tool failures (3-strike) — handoff written: ${healHandoffPath}\nStop thrashing identical retries; human takes the wheel.`,
         },
       });
     } catch (error) {
@@ -854,6 +953,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           ? { apiKey: selected.target.apiKey }
           : {}),
       };
+      const judgeFetch = providerFetchFor(selected.target.accountId || opts.providerAccountId || "judge");
       const judge = createModelGoalJudge(
         buildModel({
           protocol: selected.target.protocol,
@@ -862,6 +962,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           credentials: judgeCredentials,
           model: selected.entry.id,
           headers: selected.target.headers,
+          identifyEngine: !hideEngineIdentity,
+          ...(judgeFetch ? { fetch: judgeFetch } : {}),
         }),
         {
           abortSignal: opts.abortSignal,
@@ -928,6 +1030,16 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       /* ignore */
     }
   }
+  const usageFromBridge = bridged.usage;
+  const costUsd = usageFromBridge
+    && (usageFromBridge.inputTokens !== undefined || usageFromBridge.outputTokens !== undefined)
+    ? ((usageFromBridge.inputTokens ?? 0) * selected.entry.cost.inputPerM
+      + (usageFromBridge.outputTokens ?? 0) * selected.entry.cost.outputPerM) / 1_000_000
+    : undefined;
+  const usage = usageFromBridge
+    ? { ...usageFromBridge, ...(costUsd !== undefined ? { costUsd } : {}) }
+    : undefined;
+
   return {
     text: bridged.text,
     parts,
@@ -939,6 +1051,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       modelId: selected.entry.id,
       ...(selected.target.accountId ? { accountId: selected.target.accountId } : {}),
     },
+    ...(usage ? { usage } : {}),
     ...(goalVerify ? { goalVerify } : {}),
     ...(healHandoffPath ? { healHandoffPath } : {}),
     ...(fileReview ? { fileReview } : {}),

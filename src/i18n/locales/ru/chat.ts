@@ -2,6 +2,19 @@ import type { LocaleFor } from "../../types";
 import type { enChat } from "../en/chat";
 
 export const ruChat = {
+  "chat.mode.pickerTitle": "Режим агента",
+  "chat.mode.auto": "Auto",
+  "chat.mode.auto.hint": "Агент сам выбирает plan / build / polish / deepreep на ход",
+  "chat.mode.plan": "Plan",
+  "chat.mode.plan.hint": "Исследование и полный план; лучше без правок кода",
+  "chat.mode.build": "Build",
+  "chat.mode.build.hint": "Реализация фич и рабочий путь",
+  "chat.mode.polish": "Polish",
+  "chat.mode.polish.hint": "Аудит, баги, укрепление существующего кода",
+  "chat.mode.deepreep": "Deepreep",
+  "chat.mode.deepreep.hint": "Глубокое исследование в коде + вебе; с вами и командой",
+  "chat.slash.mode.description": "Режим агента (auto, plan, build, polish, deepreep)",
+  "chat.slash.mode.arg": "auto|plan|build|polish|deepreep",
   "chat.composer.placeholder": "Сообщение для Kyrei…",
   "chat.composer.connecting": "Подключение…",
   "chat.composer.addContext": "Добавить контекст",

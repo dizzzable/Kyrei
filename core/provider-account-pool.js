@@ -5,15 +5,42 @@
  * Credential lookup remains the responsibility of the gateway secret store.
  */
 
-export const PROVIDER_ACCOUNT_POOL_STRATEGIES = ["balanced", "round-robin", "fill-first"];
+/** spare-first = fill-first (burn active, keep reserve accounts until needed). */
+export const PROVIDER_ACCOUNT_POOL_STRATEGIES = [
+  "balanced",
+  "round-robin",
+  "fill-first",
+  "spare-first",
+  "least-used",
+];
 export const PROVIDER_ACCOUNT_STATUSES = ["ready", "cooldown", "auth-required", "disabled"];
 
+/**
+ * Failure classes aligned with engine classifyProviderFailure.
+ * Network / soft-auth never permanently park a seat on first blip (OmniRoute / codex-lb style).
+ */
+export const PROVIDER_FAILURE_CLASSES = [
+  "network",
+  "rate_limit",
+  "server",
+  "auth_definite",
+  "auth_soft",
+  "client",
+  "unknown",
+];
+
 const DEFAULT_BASE_COOLDOWN_MS = 1_000;
+/** Short park for pure transport noise — unstable Wi‑Fi must not look like a ban. */
+const DEFAULT_NETWORK_COOLDOWN_MS = 1_500;
 // Providers commonly publish hourly/daily reset windows. Match the engine's
 // bounded Retry-After parser so a valid long cooldown is not truncated to 5m.
 const DEFAULT_MAX_COOLDOWN_MS = 24 * 60 * 60_000;
 const DEFAULT_SESSION_LEASE_TTL_MS = 24 * 60 * 60_000;
 const DEFAULT_MAX_SESSION_LEASES = 10_000;
+/** Soft 403 (WAF/CDN) needs consecutive strikes before auth-required. */
+const DEFAULT_AUTH_SOFT_STRIKES = 3;
+/** Definite 401 / invalid-key text: still one clear signal is enough. */
+const DEFAULT_AUTH_DEFINITE_STRIKES = 1;
 const MAX_MEMBERS = 256;
 const MAX_NAME_LENGTH = 120;
 const MAX_MEMBER_MODELS = 2_000;
@@ -39,6 +66,8 @@ function normalizeAccountId(value, fallback) {
 }
 
 function normalizeStrategy(value) {
+  if (value === "spare-first") return "fill-first";
+  if (value === "least-used") return "least-used";
   return PROVIDER_ACCOUNT_POOL_STRATEGIES.includes(value) ? value : "balanced";
 }
 
@@ -145,14 +174,45 @@ function accountIdFrom(value) {
   return typeof value?.accountId === "string" ? value.accountId : "";
 }
 
+/** Normalize optional failure class from engine/gateway (drop unknown values). */
+export function normalizeFailureClass(value) {
+  return PROVIDER_FAILURE_CLASSES.includes(value) ? value : "";
+}
+
+/**
+ * Derive failure class when the engine did not attach one (legacy callers / tests).
+ * Prefer engine classifyProviderFailure — this is a statusCode-only fallback.
+ */
+export function inferFailureClass(options = {}) {
+  const explicit = normalizeFailureClass(options.failureClass);
+  if (explicit) return explicit;
+  if (options.authRequired === true) return "auth_definite";
+  if (options.disabled === true) return "client";
+  const statusCode = Number.isFinite(Number(options.statusCode ?? options.status))
+    ? Number(options.statusCode ?? options.status)
+    : 0;
+  if (statusCode === 401) return "auth_definite";
+  if (statusCode === 403) return "auth_soft";
+  if (statusCode === 429) return "rate_limit";
+  if (statusCode === 408 || statusCode === 425) return "network";
+  if (statusCode >= 500) return "server";
+  if (!statusCode && options.retryable === true) return "network";
+  if (statusCode >= 400 && statusCode < 500) return "client";
+  if (options.retryable === true) return "network";
+  return "unknown";
+}
+
 export class ProviderAccountPoolRouter {
   constructor({
     config,
     now = () => Date.now(),
     baseCooldownMs = DEFAULT_BASE_COOLDOWN_MS,
     maxCooldownMs = DEFAULT_MAX_COOLDOWN_MS,
+    networkCooldownMs = DEFAULT_NETWORK_COOLDOWN_MS,
     sessionLeaseTtlMs = DEFAULT_SESSION_LEASE_TTL_MS,
     maxSessionLeases = DEFAULT_MAX_SESSION_LEASES,
+    authSoftStrikesRequired = DEFAULT_AUTH_SOFT_STRIKES,
+    authDefiniteStrikesRequired = DEFAULT_AUTH_DEFINITE_STRIKES,
   } = {}) {
     if (typeof now !== "function") throw new Error("provider_account_pool_now_invalid");
     const normalized = normalizeProviderAccountPool(config);
@@ -161,15 +221,21 @@ export class ProviderAccountPoolRouter {
     this.sessionAffinity = normalized.sessionAffinity;
     this.now = now;
     this.baseCooldownMs = integer(baseCooldownMs, DEFAULT_BASE_COOLDOWN_MS, 100, 60_000);
+    this.networkCooldownMs = integer(networkCooldownMs, DEFAULT_NETWORK_COOLDOWN_MS, 100, 30_000);
     this.maxCooldownMs = integer(maxCooldownMs, DEFAULT_MAX_COOLDOWN_MS, this.baseCooldownMs, 24 * 60 * 60_000);
     this.sessionLeaseTtlMs = integer(sessionLeaseTtlMs, DEFAULT_SESSION_LEASE_TTL_MS, 60_000, 30 * 24 * 60 * 60_000);
     this.maxSessionLeases = integer(maxSessionLeases, DEFAULT_MAX_SESSION_LEASES, 1, 100_000);
+    this.authSoftStrikesRequired = integer(authSoftStrikesRequired, DEFAULT_AUTH_SOFT_STRIKES, 1, 10);
+    this.authDefiniteStrikesRequired = integer(authDefiniteStrikesRequired, DEFAULT_AUTH_DEFINITE_STRIKES, 1, 10);
     this.states = normalized.members.map((member, order) => ({
       member: { ...member },
       order,
       authRequired: member.status === "auth-required",
       cooldownUntil: member.status === "cooldown" ? member.cooldownUntil : 0,
       failures: 0,
+      softAuthStrikes: 0,
+      definiteAuthStrikes: 0,
+      lastFailureClass: "",
       inflight: 0,
       lastUsedAt: 0,
     }));
@@ -206,6 +272,9 @@ export class ProviderAccountPoolRouter {
       inflight: state.inflight,
       lastUsedAt: state.lastUsedAt,
       failures: state.failures,
+      softAuthStrikes: state.softAuthStrikes,
+      definiteAuthStrikes: state.definiteAuthStrikes,
+      ...(state.lastFailureClass ? { lastFailureClass: state.lastFailureClass } : {}),
       ...(Object.hasOwn(state.member, "modelIds") ? { modelIds: [...state.member.modelIds] } : {}),
     };
   }
@@ -320,6 +389,13 @@ export class ProviderAccountPoolRouter {
       || left.member.id.localeCompare(right.member.id));
   }
 
+  leastUsedStates(states) {
+    return [...states].sort((left, right) => (left.lastUsedAt || 0) - (right.lastUsedAt || 0)
+      || left.member.priority - right.member.priority
+      || left.order - right.order
+      || left.member.id.localeCompare(right.member.id));
+  }
+
   orderedCandidates({ sessionId, preferredAccountId, excludeAccountIds, modelId } = {}) {
     if (!this.enabled) return [];
     const now = this.currentTime();
@@ -342,7 +418,9 @@ export class ProviderAccountPoolRouter {
       ? this.roundRobinStates(remaining)
       : this.strategy === "fill-first"
         ? this.fillFirstStates(remaining)
-        : this.balancedStates(remaining);
+        : this.strategy === "least-used"
+          ? this.leastUsedStates(remaining)
+          : this.balancedStates(remaining);
     return [...(affinity ? [affinity] : []), ...ordered].map((state) => this.publicState(state, now));
   }
 
@@ -387,11 +465,41 @@ export class ProviderAccountPoolRouter {
     if (!state) return null;
     const now = this.currentTime();
     state.failures = 0;
+    state.softAuthStrikes = 0;
+    state.definiteAuthStrikes = 0;
+    state.lastFailureClass = "";
     state.authRequired = false;
     state.cooldownUntil = 0;
     state.lastUsedAt = now;
     if (state.member.enabled) this.rememberSession(sessionId, accountId, now);
     return this.publicState(state, now);
+  }
+
+  /**
+   * Apply a cooldown without elevating auth-required.
+   * Network uses a short base so blips recover quickly; 429/5xx use exponential + Retry-After.
+   */
+  applyCooldown(state, now, { failureClass, options = {} } = {}) {
+    const statusCode = Number.isFinite(Number(options.statusCode ?? options.status))
+      ? Number(options.statusCode ?? options.status)
+      : 0;
+    const explicitMs = Number.isFinite(Number(options.retryAfterMs))
+      ? Math.max(0, Math.floor(Number(options.retryAfterMs)))
+      : 0;
+    const retryAfterMs = parseRetryAfterMs(options.retryAfter, now);
+    const networkish = failureClass === "network" || statusCode === 408 || statusCode === 425;
+    const base = networkish ? this.networkCooldownMs : this.baseCooldownMs;
+    const exponential = Math.min(this.maxCooldownMs, base * (2 ** Math.max(0, state.failures - 1)));
+    // Soft-auth probe windows stay short until the multi-strike threshold trips.
+    const softProbe = failureClass === "auth_soft"
+      ? Math.min(this.maxCooldownMs, this.baseCooldownMs * (2 ** Math.max(0, state.softAuthStrikes - 1)))
+      : 0;
+    const delay = Math.min(
+      this.maxCooldownMs,
+      Math.max(networkish ? this.networkCooldownMs : 0, exponential, softProbe, explicitMs, retryAfterMs),
+    );
+    state.authRequired = false;
+    state.cooldownUntil = now + Math.max(delay, networkish ? this.networkCooldownMs : this.baseCooldownMs);
   }
 
   reportFailure(account, options = {}) {
@@ -402,26 +510,50 @@ export class ProviderAccountPoolRouter {
     const statusCode = Number.isFinite(Number(options.statusCode ?? options.status))
       ? Number(options.statusCode ?? options.status)
       : 0;
+    const failureClass = inferFailureClass(options);
     state.failures = Math.min(31, state.failures + 1);
+    state.lastFailureClass = failureClass;
 
     if (options.disabled === true) {
       state.member.enabled = false;
       state.authRequired = false;
       state.cooldownUntil = 0;
-    } else if (options.authRequired === true || statusCode === 401 || statusCode === 403) {
-      state.authRequired = true;
-      state.cooldownUntil = 0;
+      state.softAuthStrikes = 0;
+      state.definiteAuthStrikes = 0;
+    } else if (options.authRequired === true || failureClass === "auth_definite") {
+      // Explicit flag or hard 401 / invalid-key: still multi-strike configurable (default 1).
+      state.softAuthStrikes = 0;
+      state.definiteAuthStrikes = Math.min(31, state.definiteAuthStrikes + 1);
+      if (state.definiteAuthStrikes >= this.authDefiniteStrikesRequired) {
+        state.authRequired = true;
+        state.cooldownUntil = 0;
+      } else {
+        this.applyCooldown(state, now, { failureClass: "auth_definite", options });
+      }
+    } else if (failureClass === "auth_soft") {
+      // Soft 403 (CDN/WAF/geo): short cooldown + consecutive strikes before auth-required.
+      state.definiteAuthStrikes = 0;
+      state.softAuthStrikes = Math.min(31, state.softAuthStrikes + 1);
+      if (state.softAuthStrikes >= this.authSoftStrikesRequired) {
+        state.authRequired = true;
+        state.cooldownUntil = 0;
+      } else {
+        this.applyCooldown(state, now, { failureClass: "auth_soft", options });
+      }
     } else {
+      // Network / rate-limit / server / client / unknown — never escalate to auth-required here.
+      // A successful request later clears strikes; a transport blip also resets soft-auth accumulation
+      // so intermittent 403+network cannot slowly "ban" a healthy seat.
+      if (failureClass === "network" || failureClass === "rate_limit" || failureClass === "server") {
+        state.softAuthStrikes = 0;
+      }
       const retryable = options.retryable === true
+        || failureClass === "network"
+        || failureClass === "rate_limit"
+        || failureClass === "server"
         || (options.retryable !== false && (!statusCode || statusCode === 408 || statusCode === 425 || statusCode === 429 || statusCode >= 500));
       if (retryable) {
-        const exponential = Math.min(this.maxCooldownMs, this.baseCooldownMs * (2 ** (state.failures - 1)));
-        const explicitMs = Number.isFinite(Number(options.retryAfterMs))
-          ? Math.max(0, Math.floor(Number(options.retryAfterMs)))
-          : 0;
-        const retryAfterMs = parseRetryAfterMs(options.retryAfter, now);
-        const delay = Math.min(this.maxCooldownMs, Math.max(exponential, explicitMs, retryAfterMs));
-        state.cooldownUntil = now + delay;
+        this.applyCooldown(state, now, { failureClass, options });
       }
     }
 

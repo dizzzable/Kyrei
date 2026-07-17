@@ -88,7 +88,11 @@ describe("provider registry config", () => {
         }),
       },
     });
-    expect(JSON.stringify(config)).not.toMatch(/script|command|calc\.exe|injected/);
+    // Injection must not survive model capability normalization (not whole-config
+    // JSON: OOB team prompts legitimately use normal English words).
+    expect(JSON.stringify(config.providers[0]?.models[0])).not.toMatch(/calc\.exe|injected/);
+    expect(config.providers[0]?.models[0]).not.toHaveProperty("script");
+    expect(config.providers[0]?.models[0]).not.toHaveProperty("command");
   });
 
   it("fills exact official metadata only for a canonical provider endpoint", () => {
@@ -599,6 +603,38 @@ describe("provider registry config", () => {
 
     config = removeProvider(config, "worker");
     expect(config.modelAssignments.worker).toBeUndefined();
+  });
+
+  it("persists coding-mode role model assignments (plan/build/polish/deepreep)", () => {
+    let config = normalizeGatewayConfig({
+      providers: [
+        {
+          id: "main",
+          name: "Main",
+          protocol: "openai-chat",
+          baseURL: "https://main.example/v1",
+          models: [{ id: "main-model" }, { id: "plan-model" }, { id: "build-model" }],
+        },
+      ],
+      activeProviderId: "main",
+      activeModelId: "main-model",
+      modelAssignments: {
+        plan: { providerId: "main", modelId: "plan-model" },
+        build: { providerId: "main", modelId: "build-model" },
+        polish: { providerId: "main", modelId: "main-model" },
+        deepreep: { providerId: "main", modelId: "plan-model" },
+      },
+    });
+    expect(config.modelAssignments).toMatchObject({
+      plan: { providerId: "main", modelId: "plan-model" },
+      build: { providerId: "main", modelId: "build-model" },
+      polish: { providerId: "main", modelId: "main-model" },
+      deepreep: { providerId: "main", modelId: "plan-model" },
+    });
+    // Round-trip must not drop role keys (regression: only worker+fallbacks survived).
+    config = normalizeGatewayConfig(config);
+    expect(config.modelAssignments.plan).toEqual({ providerId: "main", modelId: "plan-model" });
+    expect(config.modelAssignments.build).toEqual({ providerId: "main", modelId: "build-model" });
   });
 
   it("normalizes ordered provider-scoped fallback assignments without confusing model slashes", () => {

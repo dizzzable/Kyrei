@@ -3,6 +3,7 @@ import {
   assertPublicWebUrl,
   createWebBrowser,
   extractWebPage,
+  formatWebPage,
   formatWebSearchResults,
   isPrivateAddress,
   type BrowserResponse,
@@ -58,6 +59,30 @@ describe("agent web reader — extraction", () => {
     expect(page.text).not.toContain("ignore me");
     expect(page.text).not.toContain("menu");
     expect(page.links).toEqual([{ title: "Continue", url: "https://example.com/next" }]);
+  });
+
+  it("densifies main content into markdown headings (Wave B5)", () => {
+    const page = extractWebPage(
+      "https://example.com/dense",
+      [
+        "<html><head><title>API</title></head><body>",
+        "<nav class='sidebar'>noise nav</nav>",
+        "<main><h1>API Reference</h1><p>Install with npm.</p>",
+        "<h2>Auth</h2><ul><li>Use Bearer tokens</li><li>Rotate keys</li></ul>",
+        "<pre><code>curl https://api.example</code></pre>",
+        "</main><div class='cookie-banner'>accept cookies</div>",
+        "</body></html>",
+      ].join(""),
+    );
+    expect(page.text).toContain("# API Reference");
+    expect(page.text).toContain("## Auth");
+    expect(page.text).toContain("- Use Bearer tokens");
+    expect(page.text).toContain("```");
+    expect(page.text).not.toContain("accept cookies");
+    expect(page.text).not.toContain("noise nav");
+    const formatted = formatWebPage(page);
+    expect(formatted).toContain("untrusted reference material");
+    expect(formatted.length).toBeLessThan(2_000);
   });
 
   it("parses public HTML-search results without using a live network", async () => {

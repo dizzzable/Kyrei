@@ -25,11 +25,19 @@ export interface BuildModelOpts {
   model: string;
   headers?: Record<string, string>;
   fetch?: typeof fetch;
+  /**
+   * When false (subscription shield stealth), omit the custom X-Kyrei-Engine
+   * identity header so the client does not self-label as a non-browser tool.
+   */
+  identifyEngine?: boolean;
 }
 
 export function buildModel(opts: BuildModelOpts): LanguageModel {
   const baseURL = opts.baseURL.replace(/\/+$/, "");
-  const headers = { "X-Kyrei-Engine": "v2", ...(opts.headers ?? {}) };
+  const headers = {
+    ...(opts.identifyEngine === false ? {} : { "X-Kyrei-Engine": "v2" }),
+    ...(opts.headers ?? {}),
+  };
   const credentials: ProviderCredentials = {
     ...(opts.credentials ?? {}),
     ...(!opts.credentials?.apiKey && opts.apiKey ? { apiKey: opts.apiKey } : {}),
@@ -133,43 +141,169 @@ export function hasProviderCredentials(protocol: ProviderProtocol, credentials: 
   }
 }
 
+/** JSON-compatible value for AI SDK SharedV4ProviderOptions. */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/** Nested providerOptions bag accepted by AI SDK streamText/generateText. */
+export type ProviderOptionsMap = Record<string, { [key: string]: JsonValue }>;
+
+export const GOOGLE_PROVIDER_OPTIONS_KEY = "google";
+export const BEDROCK_PROVIDER_OPTIONS_KEY = "bedrock";
+
 /**
- * Translate UI model params into AI SDK `providerOptions`. The openai-compatible
- * provider maps `reasoningEffort` → `reasoning_effort` in the request body and
- * passes any non-standard keys through verbatim, so this is a safe, opt-in knob:
- * when nothing is set we emit no fields and the request is unchanged.
+ * Merge turn modelParams with engine defaultReasoningEffort when the turn did
+ * not set an explicit effort (Hermes `agent.reasoning_effort` parity).
+ */
+export function resolveTurnModelParams(
+  params: ModelParams | undefined,
+  defaultReasoningEffort?: string,
+): ModelParams | undefined {
+  const base = params ?? {};
+  const hasEffort = typeof base.effort === "string" && base.effort.trim().length > 0;
+  const def = typeof defaultReasoningEffort === "string" ? defaultReasoningEffort.trim() : "";
+  if (hasEffort || !def || def === "off" || def === "none") {
+    if (!params && !base.fast && !base.reasoning) return params;
+    return params ?? (base.fast || base.reasoning ? base : undefined);
+  }
+  return { ...base, effort: def };
+}
+
+/**
+ * Translate UI model params into AI SDK `providerOptions` for every supported
+ * protocol that can express thinking/reasoning:
+ * - openai-responses / openai-chat → reasoningEffort
+ * - anthropic-messages → thinking { type, budgetTokens }
+ * - google-generative-ai / google-vertex → thinkingConfig
+ * - amazon-bedrock → reasoningConfig
  *
- * Effort resolution: an explicit effort wins; otherwise `fast` implies minimal
- * and `reasoning` implies medium. "off"/unset disables reasoning entirely.
+ * Opt-in: when effort is off/unset, nothing is emitted (request unchanged).
+ * Effort resolution: explicit effort wins; otherwise `fast` → minimal and
+ * `reasoning` → medium.
  */
 export function buildProviderOptions(
   protocol: ProviderProtocol,
   params: ModelParams | undefined,
-): Record<string, Record<string, string>> | undefined {
+): ProviderOptionsMap | undefined {
   if (!params) return undefined;
 
-  const effort = resolveEffort(protocol, params);
+  const effort = resolveEffortLevel(params);
   if (!effort) return undefined;
 
   switch (protocol) {
     case "openai-responses":
-      return { [OPENAI_PROVIDER_OPTIONS_KEY]: { reasoningEffort: effort } };
+      return {
+        [OPENAI_PROVIDER_OPTIONS_KEY]: {
+          reasoningEffort: mapOpenAiEffort(protocol, effort),
+        },
+      };
     case "openai-chat":
-      return { [OPENAI_COMPATIBLE_PROVIDER_NAME]: { reasoningEffort: effort } };
+      return {
+        [OPENAI_COMPATIBLE_PROVIDER_NAME]: {
+          reasoningEffort: mapOpenAiEffort(protocol, effort),
+        },
+      };
+    case "anthropic-messages": {
+      // Extended thinking: budget-based enable. Adaptive exists on newer models
+      // but budgetTokens remains the portable path across Claude 4.x.
+      return {
+        [ANTHROPIC_PROVIDER_OPTIONS_KEY]: {
+          thinking: {
+            type: "enabled",
+            budgetTokens: effortToAnthropicBudget(effort),
+          },
+        },
+      };
+    }
+    case "google-generative-ai": {
+      // Gemini 3 uses thinkingLevel; Gemini 2.5 uses thinkingBudget — set both.
+      const thinkingConfig = {
+        thinkingLevel: effortToGoogleLevel(effort),
+        thinkingBudget: effortToGoogleBudget(effort),
+        includeThoughts: true,
+      };
+      return { [GOOGLE_PROVIDER_OPTIONS_KEY]: { thinkingConfig } };
+    }
+    case "google-vertex": {
+      const thinkingConfig = {
+        thinkingLevel: effortToGoogleLevel(effort),
+        thinkingBudget: effortToGoogleBudget(effort),
+        includeThoughts: true,
+      };
+      // Vertex accepts google / vertex / googleVertex option namespaces.
+      return {
+        google: { thinkingConfig },
+        vertex: { thinkingConfig },
+        googleVertex: { thinkingConfig },
+      };
+    }
+    case "amazon-bedrock": {
+      const reasoningConfig = {
+        type: "enabled",
+        maxReasoningEffort: effortToBedrockEffort(effort),
+        budgetTokens: effortToAnthropicBudget(effort),
+      };
+      return {
+        bedrock: { reasoningConfig },
+        amazonBedrock: { reasoningConfig },
+      };
+    }
     default:
       return undefined;
   }
 }
 
-function resolveEffort(protocol: ProviderProtocol, params: ModelParams): string | undefined {
+/** Canonical effort ladder used across providers. */
+export type ReasoningEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+function resolveEffortLevel(params: ModelParams): ReasoningEffortLevel | undefined {
   const raw = (params.effort || "").trim().toLowerCase();
-  if (raw && raw !== "off" && raw !== "none") {
-    if (raw === "max") return protocol === "openai-responses" ? "xhigh" : "high";
-    if (raw === "xhigh") return protocol === "openai-responses" ? "xhigh" : "high";
-    return raw;
-  }
   if (raw === "off" || raw === "none") return undefined;
+  if (raw === "minimal" || raw === "low" || raw === "medium" || raw === "high") return raw;
+  if (raw === "xhigh" || raw === "max") return "xhigh";
+  if (raw) {
+    // Unknown string: pass through only if it looks like a known level alias.
+    if (raw === "min") return "minimal";
+    return "medium";
+  }
   if (params.fast) return "minimal";
   if (params.reasoning) return "medium";
   return undefined;
+}
+
+function mapOpenAiEffort(protocol: ProviderProtocol, effort: ReasoningEffortLevel): string {
+  if (effort === "xhigh") return protocol === "openai-responses" ? "xhigh" : "high";
+  return effort;
+}
+
+/** Anthropic budget_tokens — min 1024 on most extended-thinking models. */
+function effortToAnthropicBudget(effort: ReasoningEffortLevel): number {
+  switch (effort) {
+    case "minimal": return 1_024;
+    case "low": return 2_048;
+    case "medium": return 8_000;
+    case "high": return 16_000;
+    case "xhigh": return 32_000;
+  }
+}
+
+function effortToGoogleLevel(effort: ReasoningEffortLevel): "minimal" | "low" | "medium" | "high" {
+  if (effort === "xhigh") return "high";
+  return effort;
+}
+
+/** Gemini 2.5 thinkingBudget guidance (0 disables; we never emit when off). */
+function effortToGoogleBudget(effort: ReasoningEffortLevel): number {
+  switch (effort) {
+    case "minimal": return 512;
+    case "low": return 1_024;
+    case "medium": return 4_096;
+    case "high": return 8_192;
+    case "xhigh": return 16_384;
+  }
+}
+
+function effortToBedrockEffort(effort: ReasoningEffortLevel): "low" | "medium" | "high" | "xhigh" | "max" {
+  if (effort === "minimal") return "low";
+  if (effort === "xhigh") return "xhigh";
+  return effort;
 }

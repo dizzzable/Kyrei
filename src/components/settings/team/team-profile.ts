@@ -24,8 +24,77 @@ export const DEFAULT_TEAM_LIMITS: TeamProfileLimits = {
   timeoutMs: 180_000,
 };
 
-/** New roles start read-only; explicit runtime policy may grant broader capabilities later. */
-export const DEFAULT_TEAM_CAPABILITIES: TeamCapability[] = ["workspace.read"];
+/**
+ * New roles start read-only (no write/shell). Include memory + web so OOB team
+ * research works without per-role capability babysitting.
+ */
+export const DEFAULT_TEAM_CAPABILITIES: TeamCapability[] = [
+  "workspace.read",
+  "memory.read",
+  "web",
+];
+
+/** Stable built-in ids (must match core/team-defaults.js). */
+export const BUILTIN_PROMPT_PROFILE_IDS = {
+  main: "kyrei-main",
+  researcher: "kyrei-researcher",
+  critic: "kyrei-critic",
+  architect: "kyrei-architect",
+} as const;
+
+export const BUILTIN_TEAM_PROFILE_ID = "kyrei-coding-team";
+
+/** Starter prompt bodies (English). Users can edit freely in Settings. */
+export const BUILTIN_PROMPT_PROFILES: readonly PromptProfile[] = [
+  {
+    id: BUILTIN_PROMPT_PROFILE_IDS.main,
+    name: "Main coding agent",
+    description: "Default style for the acting agent: grounded edits, verify, no thrash.",
+    systemPrompt: [
+      "You are the acting Kyrei coding agent for this workspace.",
+      "Prefer tools over guesses. Read before edit. Small verifiable steps.",
+      "When research can be parallelized, use delegate_read (or team_delegate when Team is on).",
+      "You remain responsible for synthesis, edits, and final answers.",
+      "Match the user's language. Be concise; state paths and verification.",
+    ].join(" "),
+  },
+  {
+    id: BUILTIN_PROMPT_PROFILE_IDS.researcher,
+    name: "Researcher",
+    description: "Broad code+web evidence gathering; reports sources and uncertainty.",
+    systemPrompt: [
+      "Role: researcher / scout.",
+      "Map the relevant code and external docs for the assigned goal.",
+      "Prefer project tools first (map, grep, read, memory_search), then web when external truth matters.",
+      "Treat web snippets as leads until you fetch a primary source.",
+      "Return evidence with paths/URLs, confidence, and what you did not check.",
+      "Do not implement or claim workspace changes.",
+    ].join(" "),
+  },
+  {
+    id: BUILTIN_PROMPT_PROFILE_IDS.critic,
+    name: "Critic",
+    description: "Adversarial review of claims, risks, and missing checks.",
+    systemPrompt: [
+      "Role: critic / verifier.",
+      "Challenge weak claims, contradictions, and missing tests or edge cases.",
+      "Prefer concrete counter-evidence from files or primary sources over opinion.",
+      "Flag security, correctness, and migration risks.",
+      "Do not implement fixes unless the task explicitly asks for a proposed patch artifact.",
+    ].join(" "),
+  },
+  {
+    id: BUILTIN_PROMPT_PROFILE_IDS.architect,
+    name: "Architect",
+    description: "Design options, tradeoffs, and a decision-complete plan.",
+    systemPrompt: [
+      "Role: architect / planner.",
+      "Propose 1–2 concrete approaches with tradeoffs, modules/files, and acceptance checks.",
+      "Eliminate unknowns with tools before asking the human.",
+      "Output a decision-complete plan; do not write product code unless asked for a patch artifact.",
+    ].join(" "),
+  },
+] as const;
 
 const PROMPT_PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SINGLE_LINE_CONTROL = /[\u0000-\u001f\u007f]/;
@@ -164,6 +233,66 @@ export function createTeamProfile(options: {
     roles: [createTeamRole({ name: options.initialRoleName, model: options.model })],
     limits: { ...DEFAULT_TEAM_LIMITS },
     enabled: true,
+  };
+}
+
+/**
+ * Ready-to-use coding team (researcher + critic + architect).
+ * Used when enabling Team with no profiles yet.
+ */
+export function createBuiltinCodingTeamProfile(model?: ModelRef): TeamProfile {
+  const role = (id: string, name: string, description: string, instructions: string, promptProfileId: string): TeamRoleProfile => ({
+    id,
+    name,
+    description,
+    instructions,
+    ...(model ? { model: { ...model } } : {}),
+    skillIds: [],
+    capabilities: [...DEFAULT_TEAM_CAPABILITIES],
+    canSpawn: false,
+    maxChildren: 0,
+    promptProfileId,
+  });
+  return {
+    id: BUILTIN_TEAM_PROFILE_ID,
+    name: "Coding team",
+    workflow: "supervisor",
+    limits: { ...DEFAULT_TEAM_LIMITS },
+    enabled: true,
+    roles: [
+      role(
+        "researcher",
+        "Researcher",
+        "Code and web research; returns source-backed findings.",
+        "Investigate independently. Prefer local project evidence, then web. Cite paths/URLs. List uncertainties.",
+        BUILTIN_PROMPT_PROFILE_IDS.researcher,
+      ),
+      role(
+        "critic",
+        "Critic",
+        "Reviews claims, risks, and gaps before the acting agent commits.",
+        "Stress-test conclusions and proposed plans. Demand evidence. Call out missing tests and failure modes.",
+        BUILTIN_PROMPT_PROFILE_IDS.critic,
+      ),
+      role(
+        "architect",
+        "Architect",
+        "Structures options into a decision-complete plan.",
+        "Turn research into a clear plan: approach, files, risks, acceptance criteria, ordered steps.",
+        BUILTIN_PROMPT_PROFILE_IDS.architect,
+      ),
+    ],
+  };
+}
+
+/** Merge missing built-in prompt profiles; never overwrite existing ids. */
+export function mergeBuiltinPromptProfiles(draft: PromptProfilesDraft): PromptProfilesDraft {
+  const ids = new Set(draft.promptProfiles.map((p) => p.id));
+  const extras = BUILTIN_PROMPT_PROFILES.filter((p) => !ids.has(p.id)).map((p) => ({ ...p }));
+  if (!extras.length) return draft;
+  return {
+    ...draft,
+    promptProfiles: [...draft.promptProfiles, ...extras],
   };
 }
 

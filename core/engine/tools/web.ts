@@ -28,7 +28,8 @@ export interface WebToolOptions {
 }
 
 const DEFAULT_SEARCH_LIMIT = 5;
-const DEFAULT_MAX_CHARS = 18_000;
+/** Wave B5: denser default body — same facts, fewer chrome tokens. */
+const DEFAULT_MAX_CHARS = 14_000;
 
 function decisionFor(cfg: EngineConfig, toolName: "web_search" | "web_fetch", target: string): "allow" | "ask" | "deny" {
   return decide(cfg.permissions, { tool: toolName, target });

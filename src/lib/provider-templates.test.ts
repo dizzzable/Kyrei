@@ -16,14 +16,23 @@ const templates: ProviderTemplate[] = [
 describe("provider template presentation", () => {
   it("accepts only translation keys present in Kyrei's locale catalogue", () => {
     expect(providerTemplateDescriptionKey(templates[0])).toBe("settings.providers.templates.openai.description");
-    expect(providerTemplateDescriptionKey({ ...templates[0], descriptionKey: "server.injected.raw.key" })).toBeUndefined();
-    expect(providerTemplateDescriptionKey({ ...templates[0], descriptionKey: "common.cancel" })).toBeUndefined();
+    // Invalid keys fall back to openaiCompatible for chat protocols (safe generic blurb).
+    expect(providerTemplateDescriptionKey({ ...templates[0], descriptionKey: "server.injected.raw.key" }))
+      .toBe("settings.providers.templates.openaiCompatible.description");
+    expect(providerTemplateDescriptionKey({ ...templates[0], descriptionKey: "common.cancel" }))
+      .toBe("settings.providers.templates.openaiCompatible.description");
+    expect(providerTemplateDescriptionKey({
+      id: "x",
+      name: "X",
+      protocol: "anthropic-messages",
+      descriptionKey: "server.injected.raw.key",
+    })).toBeUndefined();
   });
 
-  it("keeps Custom last while compacting a large catalogue", () => {
+  it("pins Custom first so any missing vendor is one click away", () => {
     const result = selectVisibleProviderTemplates(templates, { limit: 2 });
 
-    expect(result.items.map((template) => template.id)).toEqual(["openai", "anthropic", "custom"]);
+    expect(result.items.map((template) => template.id)).toEqual(["custom", "openai", "anthropic"]);
     expect(result.hiddenCount).toBe(1);
   });
 
@@ -33,7 +42,16 @@ describe("provider template presentation", () => {
       description: (template) => template.id === "ollama" ? "Run local models" : "",
     });
 
-    expect(result.items.map((template) => template.id)).toEqual(["ollama", "custom"]);
+    expect(result.items.map((template) => template.id)).toEqual(["custom", "ollama"]);
     expect(result.hiddenCount).toBe(0);
+  });
+
+  it("falls back to openaiCompatible blurb for catalog entries without per-vendor i18n", () => {
+    expect(providerTemplateDescriptionKey({
+      id: "groq",
+      name: "Groq",
+      protocol: "openai-chat",
+      descriptionKey: "settings.providers.templates.openaiCompatible.description",
+    })).toBe("settings.providers.templates.openaiCompatible.description");
   });
 });

@@ -7,17 +7,21 @@
 
 import type { ModelMessage } from "ai";
 import type { CcrStore } from "./ccr.js";
+import { compressToolOutput } from "./tool-compress.js";
 
 export interface PruneConfig {
   maxToolOutputChars: number;
   keepLastMessages: number;
   pruneToChars: number;
+  /** When true (default), use content-aware compress before head/tail stub. */
+  smartCompress?: boolean;
 }
 
 export const DEFAULT_PRUNE: PruneConfig = {
   maxToolOutputChars: 4000,
   keepLastMessages: 6,
   pruneToChars: 500,
+  smartCompress: true,
 };
 
 export interface SummaryProtectConfig {
@@ -39,6 +43,30 @@ function truncateWithMarker(text: string, toChars: number, hash: string): string
   const head = text.slice(0, Math.floor(toChars * 0.6));
   const tail = text.slice(text.length - Math.floor(toChars * 0.4));
   return `[tool output truncated: ${text.length} chars. Full output retrievable via retrieve("${hash}")]\n${head}\n…\n${tail}`;
+}
+
+async function pruneOneOutput(
+  text: string,
+  cfg: PruneConfig,
+  ccr: CcrStore,
+  toolName?: string,
+): Promise<string> {
+  if (cfg.smartCompress !== false) {
+    const result = await compressToolOutput(text, {
+      maxChars: Math.max(cfg.pruneToChars, Math.min(cfg.maxToolOutputChars, 2_500)),
+      ccr,
+      headRatio: 0.55,
+      ...(toolName ? { toolName } : {}),
+    });
+    if (result.compressed && result.hash) return result.text;
+    if (result.compressed) {
+      // CCR put failed — fall through to classic marker with fresh put
+    } else {
+      return result.text;
+    }
+  }
+  const hash = await ccr.put(text);
+  return truncateWithMarker(text, cfg.pruneToChars, hash);
 }
 
 function outputToString(output: unknown): string {
@@ -82,10 +110,10 @@ export async function pruneToolOutputs(
         if (p["type"] !== "tool-result") return p;
         const text = outputToString(p["output"]);
         if (text.length <= cfg.maxToolOutputChars) return p;
-        const hash = await ccr.put(text);
+        const toolName = typeof p["toolName"] === "string" ? p["toolName"] : undefined;
         prunedCount++;
         changed = true;
-        return { ...p, output: truncateWithMarker(text, cfg.pruneToChars, hash) };
+        return { ...p, output: await pruneOneOutput(text, cfg, ccr, toolName) };
       }),
     );
     out.push(changed ? ({ ...m, content: newParts } as unknown as ModelMessage) : m);

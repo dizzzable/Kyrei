@@ -75,6 +75,7 @@ async function ensureEntry(workspace: string, config: MemoryIndexConfig): Promis
 async function runReindex(entry: PoolEntry, opts: {
   ltmEnabled?: boolean;
   planningEnabled?: boolean;
+  vault?: import("./vault.js").VaultConfig;
 }): Promise<void> {
   if (entry.reindexInFlight) {
     await entry.reindexInFlight;
@@ -89,6 +90,7 @@ async function runReindex(entry: PoolEntry, opts: {
         vectors: entry.stores.vectors,
         ltmEnabled: opts.ltmEnabled,
         planningEnabled: opts.planningEnabled,
+        ...(opts.vault ? { vault: opts.vault } : {}),
       });
     } catch (error) {
       entry.dirty = true;
@@ -120,6 +122,8 @@ export interface MemoryIndexSessionOptions {
   config: MemoryIndexConfig;
   ltmEnabled?: boolean;
   planningEnabled?: boolean;
+  /** Wave C3 external vault roots (optional). */
+  vault?: import("./vault.js").VaultConfig;
 }
 
 /**
@@ -131,16 +135,27 @@ export class MemoryIndexSession {
     private readonly entry: PoolEntry | null,
     private readonly ltmEnabled: boolean,
     private readonly planningEnabled: boolean,
+    private readonly vault: import("./vault.js").VaultConfig | undefined,
     private released = false,
   ) {}
 
   static async acquire(options: MemoryIndexSessionOptions): Promise<MemoryIndexSession> {
     const enabled = options.config.enabled !== false && options.config.backend !== "off";
     if (!enabled) {
-      return new MemoryIndexSession(null, Boolean(options.ltmEnabled), Boolean(options.planningEnabled));
+      return new MemoryIndexSession(
+        null,
+        Boolean(options.ltmEnabled),
+        Boolean(options.planningEnabled),
+        options.vault,
+      );
     }
     const entry = await ensureEntry(options.workspace, options.config);
-    return new MemoryIndexSession(entry, Boolean(options.ltmEnabled), Boolean(options.planningEnabled));
+    return new MemoryIndexSession(
+      entry,
+      Boolean(options.ltmEnabled),
+      Boolean(options.planningEnabled),
+      options.vault,
+    );
   }
 
   get backendLabel(): string {
@@ -159,13 +174,18 @@ export class MemoryIndexSession {
     return Boolean(this.entry);
   }
 
+  private reindexOpts() {
+    return {
+      ltmEnabled: this.ltmEnabled,
+      planningEnabled: this.planningEnabled,
+      ...(this.vault ? { vault: this.vault } : {}),
+    };
+  }
+
   /** Full reindex now (awaited). Safe to call multiple times. */
   async reindexNow(): Promise<void> {
     if (!this.entry) return;
-    await runReindex(this.entry, {
-      ltmEnabled: this.ltmEnabled,
-      planningEnabled: this.planningEnabled,
-    });
+    await runReindex(this.entry, this.reindexOpts());
   }
 
   /**
@@ -178,10 +198,7 @@ export class MemoryIndexSession {
     this.entry.lastUsed = Date.now();
     if (this.entry.debounceTimer) clearTimeout(this.entry.debounceTimer);
     this.entry.debounceTimer = setTimeout(() => {
-      void runReindex(this.entry!, {
-        ltmEnabled: this.ltmEnabled,
-        planningEnabled: this.planningEnabled,
-      });
+      void runReindex(this.entry!, this.reindexOpts());
     }, REINDEX_DEBOUNCE_MS);
     this.entry.debounceTimer.unref?.();
   }
@@ -195,10 +212,7 @@ export class MemoryIndexSession {
       clearTimeout(this.entry.debounceTimer);
       this.entry.debounceTimer = undefined;
       if (this.entry.dirty) {
-        await runReindex(this.entry, {
-          ltmEnabled: this.ltmEnabled,
-          planningEnabled: this.planningEnabled,
-        });
+        await runReindex(this.entry, this.reindexOpts());
       }
     } else if (this.entry.reindexInFlight) {
       await this.entry.reindexInFlight.catch(() => undefined);

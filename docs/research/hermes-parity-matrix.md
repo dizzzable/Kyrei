@@ -1,8 +1,9 @@
 # Hermes → Kyrei: settings and capability parity matrix
 
-**Last refresh:** 2026-07-16  
+**Last refresh:** 2026-07-17  
 **Hermes source:** local tree under `hermes/hermes-agent` (desktop + CLI; historical audit also used commit `3b2ef789dfcf`)  
-**Kyrei baseline:** main branch as of refresh (package `0.4.2`+)  
+**Kyrei baseline:** main + v0.4.3 (quality clock Waves A–C; package `0.4.3`)  
+**Also see:** `docs/research/agent-audit-and-parity.md` (OmniRoute / Kiro / open-agent ports)  
 **Method:** code-backed review of `core/engine`, `core/gateway.js`, Settings UI, and prior audit rows  
 
 `Port` = transfer behavior closely · `Adapt` = product idea inside Kyrei local-first bounds · `Reject` = deliberately exclude  
@@ -17,7 +18,7 @@ When this file and old plans disagree, **this matrix + `.kyrei/memory/MEMORY.md`
 |---|---|---|---|
 | Import/export/reset | Whole config footer | Runtime/provider export without secrets | Port versioning/diff later |
 | Model | Main model, fallbacks, reasoning, aux roles | Unlimited profiles; `modelAssignments.worker` + fallbacks; default reasoning | Adapt full aux role map later |
-| Chat | Personality, timezone, reasoning, image mode | **Shipped:** personality catalog, timezone, show reasoning, image input mode | Keep |
+| Chat | Personality, timezone, reasoning, image mode | **Shipped:** personality catalog, **coding modes** (auto/plan/build/polish/deepreep + session override + modelAssignments), timezone, show reasoning, image input mode | Keep |
 | Appearance | Theme, zoom, translucency, tool view | Theme/import, scale, density, language, tool view | Adapt translucency optional |
 | Workspace | cwd, PTY, env, read cap | Workspace jail + read cap; no persistent PTY settings | Local PTY later |
 | Safety | once/always/deny, allowlist, checkpoints | Signed allow-once/deny; **Always allow/deny → exact rules**; protected paths; sandbox | Session-scoped TTL optional |
@@ -29,7 +30,7 @@ When this file and old plans disagree, **this matrix + `.kyrei/memory/MEMORY.md`
 | Gateway | Local/remote/cloud | Loopback local only | **Reject** remote/cloud |
 | Skills/MCP | Capabilities UI | **Shipped:** Skills settings + MCP settings | Controlled install later |
 | Sessions | Archive/restore/delete/branch | **Shipped:** soft archive, restore, delete, curate, **fork lineage** | Git worktree later |
-| About/updates | Check/apply/restart | Version in app; no auto-updater | Port after stability |
+| About/updates | Check/apply/restart | **In-app** check → confirm download → restart & install (`electron-updater` + GitHub). Portable/dev → open release page. No silent install | Code-signing polish |
 | Skills curator | Skill catalog hygiene + patches | **Opt-in** heuristic + optional LLM **proposal** patches; no silent rewrite | Keep safe defaults |
 
 ---
@@ -54,7 +55,7 @@ When this file and old plans disagree, **this matrix + `.kyrei/memory/MEMORY.md`
 | Checkpoints | Retention/history UI | Turn snapshots + revert/changes panel | History retention UI later |
 | Computer use | CUA | Missing | Opt-in far later |
 | Goals/cron/Kanban | Ralph, schedules, board | Cron **shipped**; goal verifier exists; no Kanban board | Board later |
-| Updates | Check/apply | Missing auto-updater | After core stability |
+| Updates | Check/apply | **Shipped** Settings → About: check/download/restart-install (NSIS/mac zip/AppImage); portable falls back to release page | Signing improves trust UX |
 
 ---
 

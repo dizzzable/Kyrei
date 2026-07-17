@@ -103,6 +103,11 @@ export interface SessionInfo {
   /** Session-scoped target. New sessions inherit the current Settings default. */
   providerId?: string;
   modelId?: string;
+  /**
+   * Session-scoped agent phase (auto|plan|build|polish|deepreep).
+   * Overrides engine.codingMode for this chat when set.
+   */
+  codingMode?: "auto" | "plan" | "build" | "polish" | "deepreep";
   /** Soft affinity to one credential inside the provider account pool. */
   providerAccountId?: string;
   /** Live or most recent runtime activity for this session. */
@@ -521,7 +526,55 @@ export interface ProviderCredentialsInput {
   privateKey?: string;
 }
 
-export type ProviderAccountPoolStrategy = "balanced" | "round-robin" | "fill-first";
+export type ProviderAccountPoolStrategy =
+  | "balanced"
+  | "round-robin"
+  | "fill-first"
+  | "spare-first"
+  | "least-used";
+
+/** Global capacity router (multi-account spare + family failover). */
+export type CapacityStrategy =
+  | "spare-first"
+  | "fill-first"
+  | "round-robin"
+  | "least-used"
+  | "balanced"
+  | "priority";
+
+/** Opt-in experimental capabilities behind the versioned risk disclaimer. */
+export type ExperimentalFeatureId = "browserSubscriptionAuth";
+
+export interface ExperimentalConfig {
+  unlocked: boolean;
+  acceptedAt: string | null;
+  acceptedDisclaimerVersion: string | null;
+  /** Current disclaimer version required for unlock (server-authored). */
+  disclaimerVersion: string;
+  /** When accessControl.requireToken is on, gate is sealed. */
+  companyLocked: boolean;
+  features: Partial<Record<ExperimentalFeatureId, boolean>>;
+}
+
+/** Transport hygiene for expensive API seats (Capacity → Subscription shield). */
+export type SubscriptionShieldMode = "off" | "standard" | "stealth";
+
+export interface SubscriptionShieldConfig {
+  enabled: boolean;
+  mode: SubscriptionShieldMode;
+  minIntervalMs?: number;
+  connectTimeoutMs?: number;
+  maxConnectionsPerOrigin?: number;
+}
+
+export interface CapacityConfig {
+  enabled: boolean;
+  strategy: CapacityStrategy;
+  preferSpare: boolean;
+  crossProviderFamily: boolean;
+  /** Default ON: pacing + soft TLS/header protection for paid keys. */
+  subscriptionShield?: SubscriptionShieldConfig;
+}
 export type ProviderAccountStatus = "ready" | "cooldown" | "auth-required" | "disabled";
 
 /** Secret-free metadata for one credential in a provider account pool. */
@@ -582,6 +635,12 @@ export interface ProviderProfile {
   hasKey: boolean;
   hasStoredCredentials?: boolean;
   accountPool?: ProviderAccountPool;
+  /**
+   * api-key (default) or browser-subscription (experimental gate required).
+   * Tokens for browser-subscription live only in the secrets vault.
+   */
+  credentialSource?: "api-key" | "browser-subscription";
+  browserSubscriptionSessionId?: string;
 }
 
 /** Secret-free provider template returned by the local gateway. */
@@ -692,6 +751,14 @@ export interface AppConfig {
   providers: ProviderProfile[];
   modelAssignments?: {
     worker?: ModelRef;
+    /** Preferred model when codingMode is build (greenfield / implement). */
+    build?: ModelRef;
+    /** Preferred model when codingMode is polish (audit / bug-hunt). */
+    polish?: ModelRef;
+    /** Preferred model when codingMode is plan. */
+    plan?: ModelRef;
+    /** Preferred model when codingMode is deepreep (deep research). */
+    deepreep?: ModelRef;
     fallbacks?: ModelRef[];
   };
   /** Public, secret-free multi-model team profiles. */
@@ -700,6 +767,64 @@ export interface AppConfig {
   pipelines?: PipelinesConfig;
   /** Non-secret engine tuning (permissions/roles/budgets); shown in Advanced. */
   engine?: Record<string, unknown>;
+  /**
+   * Employee access principals (public metadata only; token hashes stay in secrets).
+   * Used for chargeback tagging and optional require-token mode.
+   */
+  accessControl?: {
+    requireToken: boolean;
+    principals: Array<{
+      id: string;
+      label: string;
+      prefix: string;
+      enabled: boolean;
+      createdAt: string;
+      lastUsedAt?: string;
+      softCostUsd: number | null;
+      hardCostUsd: number | null;
+      softTokens: number | null;
+      hardTokens: number | null;
+      budgetWindow: "day" | "month";
+    }>;
+  };
+  /** OpenAI-compatible /v1 proxy + optional LAN bind. */
+  proxy?: {
+    enabled: boolean;
+    listenLan: boolean;
+    requireAccessToken: boolean;
+  };
+  /** Multi-account spare + cross-provider family failover. */
+  capacity?: CapacityConfig;
+  /**
+   * Experimental / at-your-own-risk gate (browser-subscription auth, etc.).
+   * Default sealed; company requireToken forces closed.
+   */
+  experimental?: ExperimentalConfig;
+  /** Public browser-subscription session + device-flow profile metadata (no tokens). */
+  browserSubscription?: {
+    version?: number;
+    sessions: Array<{
+      id: string;
+      vendorId: string;
+      label: string;
+      status: string;
+      providerId?: string | null;
+      hasStoredToken?: boolean;
+      updatedAt?: string;
+    }>;
+    profiles?: Array<{
+      id: string;
+      label: string;
+      vendorId?: string;
+      clientId: string;
+      deviceAuthorizationEndpoint: string;
+      tokenEndpoint: string;
+      scope?: string;
+      hasClientSecret?: boolean;
+      updatedAt?: string;
+    }>;
+    activeProfileId?: string;
+  };
   /** Public messaging webhook status (token never exposed). */
   messaging?: {
     enabled: boolean;

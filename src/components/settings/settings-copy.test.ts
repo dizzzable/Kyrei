@@ -134,6 +134,20 @@ describe("settings localized rendering", () => {
     expect(russian).toContain("Skills для этой задачи");
   });
 
+  it("renders update controls on About", async () => {
+    const english = await renderSettings("en", "about");
+    const russian = await renderSettings("ru", "about");
+
+    expect(english).toContain("Updates");
+    expect(english).toContain("Check for updates");
+    expect(english).toContain("All releases");
+    expect(english).toContain("download and install from here after confirming");
+    expect(russian).toContain("Обновления");
+    expect(russian).toContain("Проверить обновления");
+    expect(russian).toContain("Все релизы");
+    expect(russian).toContain("скачать и установить отсюда после подтверждения");
+  });
+
   it("renders the guided persistent permission editor in both locales", async () => {
     const english = await renderSettings("en", "workspace");
     const russian = await renderSettings("ru", "workspace");

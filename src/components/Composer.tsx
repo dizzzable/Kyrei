@@ -18,6 +18,8 @@ import {
 } from "@/store/composer-draft";
 import { createRecognizer, isSpeechRecognitionSupported, isSpeechSynthesisSupported, type Recognizer } from "@/lib/speech";
 import { ModelPill } from "./composer/ModelPill";
+import { ModePill } from "./composer/ModePill";
+import type { CodingMode } from "@/lib/coding-mode";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,6 +57,9 @@ interface ComposerProps {
   /** Kiro-style execution mode: autopilot vs supervised file review. */
   executionMode?: "autopilot" | "supervised";
   onExecutionModeChange?: (mode: "autopilot" | "supervised") => void;
+  /** Agent workflow mode: auto / plan / build / polish / deepreep. */
+  codingMode?: CodingMode;
+  onCodingModeChange?: (mode: CodingMode) => void;
   /** View all agent file changes and optional revert-all. */
   onViewChanges?: () => void;
   onStop: () => void;
@@ -84,6 +89,8 @@ export function Composer({
   onModelChange,
   skillsSelectable = true,
   executionMode = "autopilot",
+  codingMode = "auto",
+  onCodingModeChange,
   onExecutionModeChange,
   onViewChanges,
 }: ComposerProps) {
@@ -717,6 +724,13 @@ export function Composer({
               </button>
             )}
             <ModelPill disabled={disabled} model={model} provider={provider} providers={providers} onModelChange={onModelChange} />
+            {onCodingModeChange && (
+              <ModePill
+                mode={codingMode}
+                disabled={disabled}
+                onChange={onCodingModeChange}
+              />
+            )}
             {onExecutionModeChange && (
               <button
                 type="button"

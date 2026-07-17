@@ -8,7 +8,11 @@ import type { EngineConfig } from "../types.js";
 import { cleanupIncomplete } from "./cleanup.js";
 import { checkBudget, type BudgetLimits, type BudgetUsage } from "./budget.js";
 import { verifyGoal, type GoalJudge, type GoalVerdict } from "./goal-verifier.js";
-import type { HealState } from "./self-heal.js";
+import {
+  healAgentGuidance,
+  healTranscriptMarker,
+  type HealState,
+} from "./self-heal.js";
 
 /** Sanitize history so the next model request cannot see dangling tool pairs. */
 export function prepareMessagesForModel(messages: readonly ModelMessage[]): ModelMessage[] {
@@ -105,6 +109,7 @@ export async function maybeVerifyTurnGoal(opts: {
 
 /**
  * Track consecutive tool failures for soft self-heal signaling.
+ * Wave A: states map to transcript markers (probe / escalate / handoff).
  * @param maxFailures consecutive hard failures before handoff (Hermes hard_stop_after.exact_failure)
  */
 export function createHealTracker(maxFailures = 3) {
@@ -114,6 +119,14 @@ export function createHealTracker(maxFailures = 3) {
   return {
     get state() {
       return state;
+    },
+    /** KYREI_FAILURE_* marker for the current state. */
+    get marker() {
+      return healTranscriptMarker(state);
+    },
+    /** Short model guidance for the current heal stage. */
+    get guidance() {
+      return healAgentGuidance(state);
     },
     onToolOutcome(ok: boolean): HealState {
       if (ok) {
@@ -128,7 +141,8 @@ export function createHealTracker(maxFailures = 3) {
         state = "handoff";
         return state;
       }
-      // Preserve named intermediate states for logging/tests when limit ≥ 3.
+      // Wave A 3-strike ↔ markers: strike1 retry→ESCALATE, strike2 fix_retry→ESCALATE,
+      // strike3 handoff→HANDOFF. Initial idle state is "probe" (KYREI_FAILURE_PROBE).
       if (failures === 1) state = "retry";
       else state = "fix_retry";
       return state;

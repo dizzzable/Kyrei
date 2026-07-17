@@ -76,6 +76,7 @@ export { listModels } from "./provider/registry.js";
 export type { ModelEntry } from "./provider/registry.js";
 export { buildModel, buildProviderOptions } from "./provider/build.js";
 export { createPlanStore } from "./orchestration/plan.js";
+export type { PlanPhase, PlanState } from "./orchestration/plan.js";
 export { reviewDiff, runReadSwarm } from "./orchestration/reviewer.js";
 export {
   prepareMessagesForModel,
@@ -102,12 +103,50 @@ export { verifyGoal } from "./reliability/goal-verifier.js";
 export type { GoalJudge, GoalVerdict } from "./reliability/goal-verifier.js";
 export { checkBudget } from "./reliability/budget.js";
 export type { BudgetLimits, BudgetUsage, BudgetBreach } from "./reliability/budget.js";
-export { nextHealState, isTerminal } from "./reliability/self-heal.js";
+export {
+  nextHealState,
+  isTerminal,
+  healStrike,
+  healTranscriptMarker,
+  healAgentGuidance,
+} from "./reliability/self-heal.js";
 export type { HealState, HealOutcome } from "./reliability/self-heal.js";
+export { evaluateFinalAudit } from "./reliability/final-audit.js";
+export type { FinalAuditInput, FinalAuditResult } from "./reliability/final-audit.js";
+export {
+  claimRunId,
+  createRunStore,
+  formatPhaseVerifyTable,
+  defaultPhaseTemplate,
+  protocolMarkdown,
+  RUN_MARKERS,
+} from "./orchestration/run-kit.js";
+export type { RunState, RunStatus, RunStrike, RunStore, PhaseVerifyRow } from "./orchestration/run-kit.js";
 export { createLogger } from "./observability/logger.js";
 export type { Logger, LogLevel } from "./observability/logger.js";
-export { buildSystemPrompt, PROMPT_VERSION, PROMPT_CHANGELOG } from "./prompt/system.js";
+export {
+  buildSystemPrompt,
+  buildSystemPromptParts,
+  PROMPT_VERSION,
+  PROMPT_CHANGELOG,
+} from "./prompt/system.js";
+export type { SystemPromptParts } from "./prompt/system.js";
+export {
+  packSystemForCache,
+  joinSystemParts,
+  mergeProviderOptions,
+  ROLE_ROUTING_DEFAULTS,
+} from "./prompt/cache-packing.js";
+export type { PackedPrompt } from "./prompt/cache-packing.js";
 export { TOOL_DESCRIPTIONS } from "./prompt/tool-descriptions.js";
+export {
+  compressToolOutput,
+  compressToolOutputSync,
+  detectToolContentKind,
+} from "./context/tool-compress.js";
+export type { ToolContentKind, CompressResult } from "./context/tool-compress.js";
+export { createReadMemo, contentFingerprint } from "./context/read-memo.js";
+export type { ReadMemo, ReadMemoEntry } from "./context/read-memo.js";
 export { resolveEngineConfig, EngineConfigSchema } from "./config/schema.js";
 export {
   BUILTIN_PERSONALITY_PRESETS,
@@ -116,6 +155,24 @@ export {
   matchPersonalityPresetId,
 } from "./personality-catalog.js";
 export type { PersonalityPreset } from "./personality-catalog.js";
+export {
+  CODING_MODE_IDS,
+  CODING_MODE_PROMPTS,
+  codingModeForPipelineStage,
+  codingModePrompt,
+  detectCodingModeSwitch,
+  effectiveCodingModeFromMessages,
+  filterToolsForCodingMode,
+  isCodingMode,
+  isPlanModeBlockedTool,
+  normalizeCodingMode,
+  PLAN_MODE_BLOCKED_TOOLS,
+  suggestedReasoningEffort,
+  codingModePrefersReadOnly,
+  codingModeAssignmentRole,
+  textFromMessageContent,
+} from "./coding-mode.js";
+export type { CodingMode } from "./coding-mode.js";
 export {
   coerceImageInputMode,
   decideImagePresentation,
@@ -149,6 +206,14 @@ export type { McpConfig, McpServerConfig, McpToolInfo, McpCallResult } from "./m
 export { DEFAULT_MCP_CONFIG } from "./mcp/types.js";
 export { reindexProjectMemory } from "./memory/project-indexer.js";
 export type { ReindexProjectMemoryOptions, ReindexProjectMemoryResult } from "./memory/project-indexer.js";
+export {
+  normalizeVaultConfig,
+  scanVaultFiles,
+  searchVaultFiles,
+  indexVaultIntoMemory,
+  DEFAULT_VAULT_CONFIG,
+} from "./memory/vault.js";
+export type { VaultConfig, VaultFile } from "./memory/vault.js";
 export { openMemoryIndex, closeMemoryIndex } from "./memory/index-backend.js";
 export type { MemoryIndexConfig, MemoryIndexBackend, OpenMemoryIndexResult } from "./memory/index-backend.js";
 export { MemoryIndexSession, flushMemoryIndexPoolForTests, memoryIndexPoolSizeForTests } from "./memory/index-session.js";

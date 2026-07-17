@@ -1,6 +1,19 @@
 import type { MessageCatalog } from "../../types";
 
 export const enChat = {
+  "chat.mode.pickerTitle": "Agent mode",
+  "chat.mode.auto": "Auto",
+  "chat.mode.auto.hint": "Agent picks plan / build / polish / deepreep each turn",
+  "chat.mode.plan": "Plan",
+  "chat.mode.plan.hint": "Research and decision-complete plan; prefer no code edits",
+  "chat.mode.build": "Build",
+  "chat.mode.build.hint": "Implement features and ship a working path",
+  "chat.mode.polish": "Polish",
+  "chat.mode.polish.hint": "Audit, bug-hunt, harden existing code",
+  "chat.mode.deepreep": "Deepreep",
+  "chat.mode.deepreep.hint": "Deep research in code + web; collaborate and orchestrate teams",
+  "chat.slash.mode.description": "Set agent mode (auto, plan, build, polish, deepreep)",
+  "chat.slash.mode.arg": "auto|plan|build|polish|deepreep",
   "chat.composer.placeholder": "Message Kyrei…",
   "chat.composer.connecting": "Connecting…",
   "chat.composer.addContext": "Add context",

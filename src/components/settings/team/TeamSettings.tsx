@@ -10,10 +10,12 @@ import { PromptProfilesEditor } from "./PromptProfilesEditor";
 import {
   boundedInteger,
   cloneTeamOrchestration,
+  createBuiltinCodingTeamProfile,
   createTeamProfile,
   createTeamRole,
   defaultTeamModel,
   isPromptProfilesDraftValid,
+  mergeBuiltinPromptProfiles,
   promptProfilesFromEngine,
   reconcileTeamPromptAssignments,
   teamModeForWorkflow,
@@ -138,15 +140,16 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
   };
 
   const toggleTeam = (enabled: boolean) => {
+    // Ensure starter prompts exist when enabling Team for the first time.
+    if (enabled) {
+      setPromptDraft((current) => mergeBuiltinPromptProfiles(current));
+    }
     changeDraft((current) => {
       let profiles = current.profiles;
       let profile = profiles.find((candidate) => candidate.id === current.activeProfileId) ?? profiles[0];
       if (enabled && !profile) {
-        profile = createTeamProfile({
-          name: t("settings.team.defaultProfile", { count: 1 }),
-          initialRoleName: t("settings.team.defaultRole", { count: 1 }),
-          model: defaultTeamModel(config.providers, mainModel),
-        });
+        // OOB: full coding team (researcher / critic / architect), not a blank role.
+        profile = createBuiltinCodingTeamProfile(defaultTeamModel(config.providers, mainModel));
         profiles = [profile];
       } else if (enabled && profile) {
         profiles = profiles.map((candidate) => candidate.id === profile?.id

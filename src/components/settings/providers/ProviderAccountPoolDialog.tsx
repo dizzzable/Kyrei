@@ -73,7 +73,13 @@ const ACCOUNT_ERRORS: Record<string, TranslationKey> = {
   secret_storage_unavailable: "settings.providers.error.secretStorageUnavailable",
 };
 
-const STRATEGIES: readonly ProviderAccountPoolStrategy[] = ["balanced", "round-robin", "fill-first"];
+const STRATEGIES: readonly ProviderAccountPoolStrategy[] = [
+  "spare-first",
+  "fill-first",
+  "round-robin",
+  "least-used",
+  "balanced",
+];
 
 function accountRequestError(reason: unknown): TranslationKey {
   if (reason instanceof GatewayRequestError && reason.code === "capability_unavailable") {

@@ -62,7 +62,7 @@ export interface ReadOnlyChildRunnerOptions {
   /** Defensive optionality keeps internal callers bounded during config migrations. */
   timeoutMs?: number;
   cost: ModelCost;
-  providerOptions?: Record<string, Record<string, string>>;
+  providerOptions?: import("../provider/build.js").ProviderOptionsMap;
   workspace?: string;
   skills?: ReadonlyArray<Pick<RuntimeSkill, "id" | "name" | "description">>;
   providerAttempt?: ProviderAttemptBinding;

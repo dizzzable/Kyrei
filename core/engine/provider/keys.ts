@@ -58,13 +58,16 @@ export class KeyPool {
     if (s) s.failures = 0;
   }
 
-  /** fetch middleware for @ai-sdk/openai-compatible: injects Authorization, tracks cooldown. */
-  fetchMiddleware(): typeof fetch {
+  /**
+   * fetch middleware for @ai-sdk/openai-compatible: injects Authorization, tracks cooldown.
+   * Optional baseFetch lets subscription-shield wrap the underlying transport.
+   */
+  fetchMiddleware(baseFetch: typeof fetch = globalThis.fetch.bind(globalThis)): typeof fetch {
     return (async (input: any, init: any = {}) => {
       const state = this.pick();
       const headers = new Headers(init.headers ?? {});
       if (state?.key) headers.set("Authorization", `Bearer ${state.key}`);
-      const res = await fetch(input, { ...init, headers });
+      const res = await baseFetch(input, { ...init, headers });
       if (state) {
         if (res.ok) this.reward(state.key);
         else this.penalize(state.key, res.status);

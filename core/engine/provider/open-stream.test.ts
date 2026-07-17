@@ -147,7 +147,14 @@ describe("openStream adapter contract", () => {
 
     expect(acquired).toEqual([0, 1]);
     expect(opened.attempts).toEqual([
-      { candidateIndex: 0, outcome: "retryable-error", phase: "probe", statusCode: 503, retryAfterMs: 2_000 },
+      {
+        candidateIndex: 0,
+        outcome: "retryable-error",
+        phase: "probe",
+        statusCode: 503,
+        retryAfterMs: 2_000,
+        failureClass: "server",
+      },
       { candidateIndex: 1, outcome: "success", phase: "stream" },
     ]);
     expect(released).toEqual([
@@ -184,7 +191,13 @@ describe("openStream adapter contract", () => {
     expect(opened.candidateIndex).toBe(1);
     expect(parts).toContainEqual({ type: "text-delta", text: "healthy account" });
     expect(opened.attempts).toEqual([
-      { candidateIndex: 0, outcome: "terminal-error", phase: "probe", statusCode: 401 },
+      {
+        candidateIndex: 0,
+        outcome: "terminal-error",
+        phase: "probe",
+        statusCode: 401,
+        failureClass: "auth_definite",
+      },
       { candidateIndex: 1, outcome: "success", phase: "stream" },
     ]);
     expect(released).toEqual([
@@ -203,7 +216,13 @@ describe("openStream adapter contract", () => {
 
     expect(parts).toHaveLength(2);
     expect(opened.attempts).toEqual([
-      { candidateIndex: 0, outcome: "terminal-error", phase: "probe", statusCode: 401 },
+      {
+        candidateIndex: 0,
+        outcome: "terminal-error",
+        phase: "probe",
+        statusCode: 401,
+        failureClass: "auth_definite",
+      },
     ]);
   });
 

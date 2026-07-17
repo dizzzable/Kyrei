@@ -12,6 +12,7 @@ import { createLtmBridge } from "../memory/ltm-bridge.js";
 import { createPlanStore } from "../orchestration/plan.js";
 import { embedText, isZeroVector } from "../memory/embed-adapter.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
+import { normalizeVaultConfig, searchVaultFiles, type VaultConfig } from "../memory/vault.js";
 
 export interface MemorySearchOptions {
   workspace: string;
@@ -32,10 +33,12 @@ export interface MemorySearchOptions {
    * require index projection. Gateway JSON chat remains SoT.
    */
   sessionSnippets?: ReadonlyArray<{ role: string; text: string }>;
+  /** Wave C3: external markdown vault (opt-in). */
+  vault?: VaultConfig;
 }
 
 interface Hit {
-  source: "decision" | "plan" | "memory" | "handoff" | "ltm_recall" | "ltm_event" | "index" | "vector" | "session";
+  source: "decision" | "plan" | "memory" | "handoff" | "ltm_recall" | "ltm_event" | "index" | "vector" | "session" | "vault";
   score: number;
   title: string;
   snippet: string;
@@ -373,6 +376,21 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
           if (options.vectorStore) {
             tasks.push(searchVectors(options.vectorStore, options.memoryStore, query, hits, lim));
           }
+          const vaultCfg = normalizeVaultConfig(options.vault);
+          if (vaultCfg.enabled && vaultCfg.paths.length) {
+            tasks.push((async () => {
+              const vaultHits = await searchVaultFiles(vaultCfg, query, lim);
+              for (const v of vaultHits) {
+                hits.push({
+                  source: "vault",
+                  score: v.score,
+                  title: v.title,
+                  snippet: clip(v.snippet, 280),
+                  path: v.path,
+                });
+              }
+            })());
+          }
           await Promise.all(tasks);
 
           const top = dedupeHits(hits).slice(0, lim);
@@ -382,6 +400,7 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
             options.sessionStore ? "session-mirror FTS" : null,
             options.memoryStore ? "FTS" : null,
             options.vectorStore ? "vector" : null,
+            vaultCfg.enabled ? "vault" : null,
           ]
             .filter(Boolean)
             .join(" + ");

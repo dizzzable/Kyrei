@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
@@ -57,6 +57,7 @@
     "ai": "7.0.26",
     "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
+    "electron-updater": "^6.8.9",
     "fast-glob": "^3.3.3",
     "gpt-tokenizer": "3.4.0",
     "hast-util-from-html-isomorphic": "^2.0.0",
@@ -105,6 +106,13 @@
     },
     "appId": "com.kyrei.agent",
     "productName": "Kyrei",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "dizzzable",
+        "repo": "Kyrei"
+      }
+    ],
     "files": [
       "electron/**/*",
       "core/**/*",

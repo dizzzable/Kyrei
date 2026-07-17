@@ -62,6 +62,16 @@ export function SkillsSettings({
   const [curatorBusy, setCuratorBusy] = useState(false);
   const [curatorMsg, setCuratorMsg] = useState<string | null>(null);
   const [curatorProposals, setCuratorProposals] = useState<SkillsCuratorPreview[]>([]);
+  const [packs, setPacks] = useState<Array<{
+    id: string;
+    name: string;
+    description: string;
+    enabled: boolean;
+    available: boolean;
+    skillCount: number;
+  }>>([]);
+  const [packBusy, setPackBusy] = useState<string | null>(null);
+  const [vaultDraft, setVaultDraft] = useState("");
 
   const curatorEnabled = Boolean(getEngineField?.("skills.curator.enabled", false));
   const curatorApplyMode = String(getEngineField?.("skills.curator.applyMode", "propose") || "propose") === "apply_safe"
@@ -103,11 +113,26 @@ export function SkillsSettings({
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const refreshPacks = useCallback(async () => {
+    try {
+      const next = await gateway.listSkillPacks();
+      setPacks(next.packs ?? []);
+    } catch {
+      setPacks([]);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); void refreshPacks(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (curatorEnabled) void refreshCuratorProposals();
   }, [curatorEnabled, refreshCuratorProposals]);
+
+  useEffect(() => {
+    const vault = getEngineField?.("memory.vault", null) as { paths?: string[] } | null;
+    const paths = Array.isArray(vault?.paths) ? vault.paths : [];
+    setVaultDraft(paths.join("\n"));
+  }, [getEngineField]);
 
   useEffect(() => {
     setConfirmDelete(false);
@@ -144,6 +169,54 @@ export function SkillsSettings({
     } finally {
       setCuratorBusy(false);
     }
+  };
+
+  const runSkillSleep = async () => {
+    setCuratorBusy(true);
+    setCuratorMsg(null);
+    setError(null);
+    try {
+      const result = await gateway.runSkillSleep({ force: true });
+      if (!result.ok) {
+        setError(result.error || t("settings.skills.operationFailed"));
+      } else {
+        setCuratorMsg(result.summary || t("settings.skills.sleep.ok", {
+          count: Array.isArray(result.proposals) ? result.proposals.length : 0,
+        }));
+        await refreshCuratorProposals();
+      }
+    } catch {
+      setError(t("settings.skills.operationFailed"));
+    } finally {
+      setCuratorBusy(false);
+    }
+  };
+
+  const togglePack = async (packId: string, enabled: boolean) => {
+    setPackBusy(packId);
+    setError(null);
+    try {
+      if (enabled) await gateway.enableSkillPack(packId);
+      else await gateway.disableSkillPack(packId);
+      await refreshPacks();
+      await refresh();
+    } catch {
+      setError(t("settings.skills.operationFailed"));
+    } finally {
+      setPackBusy(null);
+    }
+  };
+
+  const saveVaultPaths = () => {
+    if (!setEngineField) return;
+    const paths = vaultDraft
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    setEngineField("memory.vault.paths", paths, true);
+    setEngineField("memory.vault.enabled", paths.length > 0, true);
+    setCuratorMsg(t("settings.skills.vault.saved", { count: paths.length }));
   };
 
   const applyCuratorFile = async (fileName: string) => {
@@ -289,6 +362,88 @@ export function SkillsSettings({
         </ol>
       </section>
 
+      <section aria-labelledby="skills-packs-title" className="rounded-lg border border-border-soft bg-elevated/35 p-3">
+        <div className="flex items-start gap-2.5">
+          <span className="grid size-7 shrink-0 place-items-center rounded-md border border-border-soft bg-bg/60 text-primary">
+            <FolderOpen className="size-3.5" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <h4 id="skills-packs-title" className="text-[11px] font-semibold text-secondary">
+              {t("settings.skills.packs.title")}
+            </h4>
+            <p className="mt-0.5 text-[10px] leading-4 text-muted">{t("settings.skills.packs.hint")}</p>
+          </div>
+        </div>
+        <ul className="mt-3 space-y-2">
+          {packs.length === 0 ? (
+            <li className="text-[10px] text-faint">{t("settings.skills.packs.empty")}</li>
+          ) : (
+            packs.map((pack) => (
+              <li
+                key={pack.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border-soft bg-bg/40 px-2.5 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="text-[11px] font-medium text-secondary">{pack.name}</div>
+                  <p className="mt-0.5 text-[9.5px] leading-4 text-muted">{pack.description}</p>
+                  <p className="mt-0.5 text-[9px] text-faint">
+                    {pack.skillCount} · {pack.available ? pack.id : t("settings.skills.packs.unavailable")}
+                  </p>
+                </div>
+                <Switch
+                  checked={pack.enabled}
+                  size="xs"
+                  disabled={!pack.available || packBusy === pack.id}
+                  aria-label={pack.name}
+                  onCheckedChange={(value) => void togglePack(pack.id, value)}
+                />
+              </li>
+            ))
+          )}
+        </ul>
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-soft pt-3">
+          <Button size="sm" variant="outline" onClick={() => void runSkillSleep()} disabled={curatorBusy}>
+            <Sparkles className="size-3.5" />
+            {t("settings.skills.sleep.run")}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => void refreshCuratorProposals()} disabled={curatorBusy}>
+            {t("settings.skills.curator.refreshProposals")}
+          </Button>
+          <span className="text-[9.5px] leading-4 text-faint">{t("settings.skills.sleep.hint")}</span>
+        </div>
+        {curatorMsg && (
+          <div className="mt-2 rounded-md border border-success/25 bg-success/8 px-3 py-2 text-[10px] text-secondary">
+            {curatorMsg}
+          </div>
+        )}
+      </section>
+
+      {getEngineField && setEngineField && (
+        <section aria-labelledby="skills-vault-title" className="rounded-lg border border-border-soft bg-elevated/35 p-3">
+          <div className="flex items-start gap-2.5">
+            <span className="grid size-7 shrink-0 place-items-center rounded-md border border-border-soft bg-bg/60 text-primary">
+              <FileText className="size-3.5" aria-hidden />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h4 id="skills-vault-title" className="text-[11px] font-semibold text-secondary">
+                {t("settings.skills.vault.title")}
+              </h4>
+              <p className="mt-0.5 text-[10px] leading-4 text-muted">{t("settings.skills.vault.hint")}</p>
+              <Textarea
+                className="mt-2 min-h-[72px] font-mono text-[10px]"
+                value={vaultDraft}
+                placeholder={t("settings.skills.vault.placeholder")}
+                onChange={(event) => setVaultDraft(event.target.value)}
+              />
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={saveVaultPaths}>{t("settings.skills.vault.save")}</Button>
+                <span className="text-[9.5px] text-faint">{t("settings.skills.vault.pathsHint")}</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       {getEngineField && setEngineField && (
         <section aria-labelledby="skills-curator-title" className="rounded-lg border border-border-soft bg-elevated/35 p-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -392,7 +547,11 @@ export function SkillsSettings({
                 <Button size="sm" variant="outline" onClick={() => void refreshCuratorProposals()} disabled={curatorBusy}>
                   {t("settings.skills.curator.refreshProposals")}
                 </Button>
+                <Button size="sm" variant="outline" onClick={() => void runSkillSleep()} disabled={curatorBusy}>
+                  {t("settings.skills.sleep.run")}
+                </Button>
               </div>
+              <p className="text-[9.5px] leading-4 text-faint">{t("settings.skills.sleep.hint")}</p>
 
               {curatorMsg && (
                 <div className="rounded-md border border-success/25 bg-success/8 px-3 py-2 text-[10px] text-secondary">

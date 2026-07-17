@@ -106,7 +106,7 @@ describe("localized command registry", () => {
     const english = getSlashCommands(en);
     const russian = getSlashCommands(ru);
 
-    expect(english.map((command) => command.id)).toEqual(["new", "help", "theme", "settings"]);
+    expect(english.map((command) => command.id)).toEqual(["new", "help", "theme", "settings", "mode"]);
     expect(english[0]).toMatchObject({
       id: "new",
       name: "new",

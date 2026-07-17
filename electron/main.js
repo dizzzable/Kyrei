@@ -1,7 +1,9 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, shell } from "electron";
+import electronUpdater from "electron-updater";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../core/gateway.js";
+import { createAppUpdater } from "./app-updater.js";
 import { registerDesktopIpc } from "./desktop-ipc.js";
 import { installDesktopViewportGuard } from "./desktop-viewport-guard.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
@@ -162,13 +164,31 @@ if (ownsSingleInstance) app.whenReady().then(async () => {
       commandRunner,
       ...(secretsCodec ? { secretsCodec } : {}),
     });
+    // download/install are user-driven from Settings → About (never silent).
+    // Resolve autoUpdater lazily inside Electron (CJS export; needs app ready).
+    const { autoUpdater } = electronUpdater;
+    const updateBroadcast = { send: /** @type {null | ((status: object) => void)} */ (null) };
+    const appUpdater = createAppUpdater({
+      app,
+      autoUpdater,
+      onStatus: (status) => {
+        try {
+          updateBroadcast.send?.(status);
+        } catch {
+          /* renderer may be gone during quit */
+        }
+      },
+    });
     desktopCapabilities = registerDesktopIpc({
       ipcMain,
       dialog,
+      shell,
       defaultCwd: app.getPath("home"),
       getWindow: (webContents) => BrowserWindow.fromWebContents(webContents),
       terminalManager,
+      appUpdater,
     });
+    updateBroadcast.send = (status) => desktopCapabilities?.broadcastUpdate?.(status);
     await createWindow(gateway.port, gateway.token);
   } catch (error) {
     dialog.showErrorBox("Kyrei", error.message);

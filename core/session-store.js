@@ -167,10 +167,19 @@ function normalizeSessionRecord(value) {
     forkedFromMessageId: rawForkMsg,
     forkedAt: rawForkedAt,
     lineageKind: rawLineageKind,
+    codingMode: rawCodingMode,
     ...rest
   } = source;
   const providerId = boundedTarget(rawProviderId, 64);
   const modelId = boundedTarget(rawModelId, 512);
+  const codingMode = rawCodingMode === "auto"
+    || rawCodingMode === "plan"
+    || rawCodingMode === "build"
+    || rawCodingMode === "polish"
+    || rawCodingMode === "deepreep"
+    || rawCodingMode === "balanced"
+    ? (rawCodingMode === "balanced" ? "auto" : rawCodingMode)
+    : undefined;
   const providerAccountId = boundedTarget(rawProviderAccountId, 64);
   const archived = source.archived === true;
   const archivedAt = typeof source.archivedAt === "string" && Number.isFinite(Date.parse(source.archivedAt))
@@ -194,6 +203,7 @@ function normalizeSessionRecord(value) {
     forkedFromMessageId: _f,
     forkedAt: _fa,
     lineageKind: _lk,
+    codingMode: _cm,
     ...cleanRest
   } = rest;
   return {
@@ -215,6 +225,7 @@ function normalizeSessionRecord(value) {
     ...(forkedFromMessageId ? { forkedFromMessageId } : {}),
     ...(forkedAt ? { forkedAt } : {}),
     ...(lineageKind ? { lineageKind } : {}),
+    ...(codingMode ? { codingMode } : {}),
   };
 }
 const LEGACY_UNTITLED_TITLES = new Set(["Новый диалог", "New chat", "New session"]);
@@ -381,6 +392,7 @@ export class SessionStore {
       ...(parent.providerId ? { providerId: parent.providerId } : {}),
       ...(parent.modelId ? { modelId: parent.modelId } : {}),
       ...(parent.providerAccountId ? { providerAccountId: parent.providerAccountId } : {}),
+      ...(parent.codingMode ? { codingMode: parent.codingMode } : {}),
       archived: false,
       parentSessionId: parent.id,
       rootSessionId,

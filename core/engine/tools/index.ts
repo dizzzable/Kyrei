@@ -31,6 +31,8 @@ import { renderFileDiff } from "../apply/diff.js";
 import { createSnapshotStore } from "../apply/snapshot.js";
 import { detectEcosystem } from "../reliability/verify.js";
 import { buildProjectIntelTools } from "./project-intel.js";
+import { compressToolOutputSync } from "../context/tool-compress.js";
+import type { ReadMemo } from "../context/read-memo.js";
 
 export interface ToolMeta {
   inlineDiff?: string;
@@ -70,6 +72,13 @@ export interface BuildToolsOptions {
    * the reviewer never sees conversation history and needs no reasoning depth.
    */
   reviewModel?: LanguageModel;
+  /**
+   * Wave B4: turn-scoped read memo (path@hash). Repeated identical read_file
+   * returns a short stub instead of re-shipping the full body.
+   */
+  readMemo?: ReadMemo;
+  /** Wave B1: content-aware tool-output compression before hard clip. Default on. */
+  smartCompress?: boolean;
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -92,6 +101,23 @@ function clip(text: unknown, limit: number): string {
   const s = String(text ?? "");
   if (s.length <= limit) return s;
   return `${s.slice(0, limit)}\n… [вывод обрезан, ${s.length} символов]`;
+}
+
+function smartClip(
+  text: unknown,
+  limit: number,
+  opts: { toolName?: string; target?: string; enabled?: boolean } = {},
+): string {
+  const s = String(text ?? "");
+  if (s.length <= limit) return s;
+  if (opts.enabled === false) return clip(s, limit);
+  // Only pay for shape detection when clearly over budget.
+  if (s.length < limit * 1.15) return clip(s, limit);
+  return compressToolOutputSync(s, {
+    maxChars: limit,
+    ...(opts.toolName ? { toolName: opts.toolName } : {}),
+    ...(opts.target ? { target: opts.target } : {}),
+  }).text;
 }
 
 /** Compact LCS-based line diff (' ' context, '-' removed, '+' added). */
@@ -255,10 +281,17 @@ function runRg(args: string[], cwd: string, signal?: AbortSignal): Promise<strin
 
 export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<string, ToolMeta>, optionsOrSignal?: BuildToolsOptions | AbortSignal): ToolSet {
   const options = normalizeBuildOptions(optionsOrSignal);
-  const safeClip = (value: unknown, limit: number): string => clip(
-    redact(String(value ?? ""), options.sensitiveValues),
-    limit,
-  );
+  const smart = options.smartCompress !== false;
+  const safeClip = (
+    value: unknown,
+    limit: number,
+    meta?: { toolName?: string; target?: string },
+  ): string =>
+    smartClip(redact(String(value ?? ""), options.sensitiveValues), limit, {
+      enabled: smart,
+      ...(meta?.toolName ? { toolName: meta.toolName } : {}),
+      ...(meta?.target ? { target: meta.target } : {}),
+    });
   const abortSignal = options.abortSignal;
   const snapshots = createSnapshotStore(workspace);
   const sandbox = createSandbox(cfg.sandbox);
@@ -355,7 +388,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
         metadata,
         durationS: (Date.now() - started) / 1000,
       });
-      return safeClip(result, cfg.maxToolOutput);
+      return safeClip(result, cfg.maxToolOutput, { toolName });
     } catch (error) {
       await audit(toolName, toolCallId, {
         decision: approvalId ? "allow" : decision,
@@ -392,8 +425,18 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
           .join("\n")
       : "(пусто)", cfg.maxToolOutput);
   };
-  const execReadFile = async (path: string): Promise<string> =>
-    safeClip(await readFile(await validateWorkspaceTarget(workspace, path), "utf8"), cfg.fileReadMaxChars);
+  const execReadFile = async (path: string): Promise<string> => {
+    const abs = await validateWorkspaceTarget(workspace, path);
+    const raw = await readFile(abs, "utf8");
+    const rel = relative(workspace, abs).replaceAll("\\", "/") || path.replace(/\\/g, "/");
+    let body = raw;
+    if (options.readMemo) {
+      const memo = options.readMemo.note(rel, raw);
+      if (memo.hit) return memo.text;
+      body = memo.text;
+    }
+    return safeClip(body, cfg.fileReadMaxChars, { toolName: "read_file", target: rel });
+  };
   const execGrep = async (a: { query: string; path?: string; glob?: string; maxResults?: number }): Promise<string> => {
     const base = await validateWorkspaceTarget(workspace, a.path || ".");
     const args = ["--json", "--line-number", "-m", String(a.maxResults ?? 100), "--smart-case"];
@@ -520,6 +563,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             }
           }
           options.onMemoryMutated?.();
+          options.readMemo?.invalidate(rel.replaceAll("\\", "/"));
           return previous === null ? `Файл создан: ${rel} (${next.length} символов)` : `Файл обновлён: ${rel}`;
         });
       },
@@ -573,6 +617,9 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
               }
             }
             options.onMemoryMutated?.();
+            for (const f of report.files) {
+              options.readMemo?.invalidate(f.rel.replaceAll("\\", "/"));
+            }
             // reviewer: clean-context LLM review if enabled. Sees ONLY the diff
             // (no conversation history). Multi-file patches fan out via runReadSwarm
             // (one leaf review per file), single-file uses reviewDiff.
@@ -629,7 +676,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             cwd: workspace,
           }, { required: cfg.sandbox === "strict-required" });
           const out = await runAuthorizedCommand(sb.command, cfg.commandTimeoutMs, toolCallId);
-          return safeClip(out, cfg.maxToolOutput);
+          return safeClip(out, cfg.maxToolOutput, { toolName: "run_command" });
         });
       },
     }),

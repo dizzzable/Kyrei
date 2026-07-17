@@ -121,8 +121,13 @@ describe("gateway Team orchestration", () => {
       body: JSON.stringify({ orchestration: requested }),
     })).rejects.toThrow("provider_credentials_required");
 
+    // Fresh config seeds the OOB coding team, but stays in single mode until enabled.
     expect(await request("/api/config")).toMatchObject({
-      orchestration: { defaultMode: "single", activeProfileId: "", profiles: [] },
+      orchestration: {
+        defaultMode: "single",
+        activeProfileId: "kyrei-coding-team",
+        profiles: [expect.objectContaining({ id: "kyrei-coding-team", enabled: true })],
+      },
     });
 
     const workerKey = "worker-runtime-credential";

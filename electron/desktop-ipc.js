@@ -1,9 +1,16 @@
 import { TerminalSessionManager } from "./terminal-session-manager.js";
+import { openDesktopExternalUrl } from "./open-external-url.js";
 import { validateWorkspacePath } from "./workspace-path.js";
 
 export const DESKTOP_CHANNELS = Object.freeze({
   workspaceChoose: "kyrei:workspace:choose",
   workspaceValidate: "kyrei:workspace:validate",
+  openExternal: "kyrei:shell:openExternal",
+  updateGetStatus: "kyrei:update:getStatus",
+  updateCheck: "kyrei:update:check",
+  updateDownload: "kyrei:update:download",
+  updateInstall: "kyrei:update:install",
+  updateEvent: "kyrei:update:event",
   terminalList: "kyrei:terminal:list",
   terminalCreate: "kyrei:terminal:create",
   terminalWrite: "kyrei:terminal:write",
@@ -11,6 +18,11 @@ export const DESKTOP_CHANNELS = Object.freeze({
   terminalClose: "kyrei:terminal:close",
   terminalEvent: "kyrei:terminal:event",
 });
+
+const PUSH_CHANNELS = new Set([
+  DESKTOP_CHANNELS.terminalEvent,
+  DESKTOP_CHANNELS.updateEvent,
+]);
 
 /**
  * Register the narrow desktop capability surface used by the sandboxed
@@ -20,15 +32,17 @@ export const DESKTOP_CHANNELS = Object.freeze({
 export function registerDesktopIpc({
   ipcMain,
   dialog,
+  shell,
   getWindow,
   defaultCwd,
   terminalManager = new TerminalSessionManager({ defaultCwd }),
+  appUpdater = null,
 } = {}) {
   if (!ipcMain?.handle || !ipcMain?.removeHandler) throw new Error("desktop_ipc_main_required");
   if (!dialog?.showOpenDialog) throw new Error("desktop_ipc_dialog_required");
 
   const senders = new Map();
-  const channels = Object.values(DESKTOP_CHANNELS).filter((channel) => channel !== DESKTOP_CHANNELS.terminalEvent);
+  const channels = Object.values(DESKTOP_CHANNELS).filter((channel) => !PUSH_CHANNELS.has(channel));
 
   const rememberSender = (sender) => {
     if (!sender || !Number.isSafeInteger(sender.id) || sender.id < 1) throw new Error("desktop_ipc_sender_invalid");
@@ -41,6 +55,20 @@ export function registerDesktopIpc({
       });
     }
     return sender.id;
+  };
+
+  const broadcastUpdate = (status) => {
+    for (const [id, sender] of senders) {
+      if (!sender || (typeof sender.isDestroyed === "function" && sender.isDestroyed())) {
+        senders.delete(id);
+        continue;
+      }
+      try {
+        sender.send(DESKTOP_CHANNELS.updateEvent, status);
+      } catch {
+        senders.delete(id);
+      }
+    }
   };
 
   const handle = (channel, callback) => {
@@ -71,6 +99,57 @@ export function registerDesktopIpc({
   handle(DESKTOP_CHANNELS.workspaceValidate, async (_context, value) => ({
     path: await validateWorkspacePath(value),
   }));
+
+  handle(DESKTOP_CHANNELS.openExternal, async (_context, url, options) => {
+    const sessionVerificationUri = options
+      && typeof options === "object"
+      && typeof options.sessionVerificationUri === "string"
+      ? options.sessionVerificationUri
+      : undefined;
+    await openDesktopExternalUrl(shell, url, {
+      ...(sessionVerificationUri ? { sessionVerificationUri } : {}),
+    });
+    return { ok: true };
+  });
+
+  const disabledStatus = () => ({
+    phase: "disabled",
+    currentVersion: "0.0.0",
+    canAutoInstall: false,
+    reason: "updater_unavailable",
+    packaged: false,
+    portable: false,
+    platform: process.platform,
+  });
+
+  handle(DESKTOP_CHANNELS.updateGetStatus, () => (
+    appUpdater && typeof appUpdater.getStatus === "function"
+      ? appUpdater.getStatus()
+      : disabledStatus()
+  ));
+
+  handle(DESKTOP_CHANNELS.updateCheck, async () => {
+    if (!appUpdater || typeof appUpdater.check !== "function") return disabledStatus();
+    const status = await appUpdater.check();
+    broadcastUpdate(status);
+    return status;
+  });
+
+  handle(DESKTOP_CHANNELS.updateDownload, async () => {
+    if (!appUpdater || typeof appUpdater.download !== "function") {
+      throw new Error("update_auto_install_unavailable");
+    }
+    const status = await appUpdater.download();
+    broadcastUpdate(status);
+    return status;
+  });
+
+  handle(DESKTOP_CHANNELS.updateInstall, () => {
+    if (!appUpdater || typeof appUpdater.install !== "function") {
+      throw new Error("update_auto_install_unavailable");
+    }
+    return appUpdater.install();
+  });
 
   handle(DESKTOP_CHANNELS.terminalList, ({ rendererId }, ownerId) => (
     terminalManager.list(rendererId, ownerId)
@@ -110,6 +189,7 @@ export function registerDesktopIpc({
 
   return {
     terminalManager,
+    broadcastUpdate,
     async dispose() {
       disposeTerminalListener();
       for (const channel of channels) ipcMain.removeHandler(channel);

@@ -96,7 +96,8 @@ describe("CCR (Property 6: reversible compression)", () => {
     expect(prunedCount).toBe(1);
     const toolMsg = pruned[1] as unknown as { content: Array<{ output: string }> };
     const out = toolMsg.content[0]!.output;
-    expect(out).toContain("truncated");
+    // Wave B1 smart compress still archives full body under a sha256 hash.
+    expect(out).toMatch(/tool-compress|truncated/);
     const hash = out.match(/sha256:[0-9a-f]{64}/)?.[0];
     expect(hash).toBeTruthy();
     expect(await store.get(hash!)).toBe(big); // original recoverable

@@ -397,6 +397,7 @@ describe("read-only child runner", () => {
       phase: "stream",
       statusCode: 429,
       retryAfterMs: 2_000,
+      failureClass: "rate_limit",
     });
   });
 
@@ -591,6 +592,7 @@ describe("read-only child runner", () => {
       modelId: "worker-model",
       outcome: "terminal-error",
       phase: "stream",
+      failureClass: "unknown",
     });
   });
 });

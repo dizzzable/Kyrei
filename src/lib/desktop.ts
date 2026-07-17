@@ -29,12 +29,52 @@ export type TerminalSessionEvent =
   | { type: "output"; sessionId: string; stream: TerminalStream; text: string; updatedAt: string }
   | { type: "closed"; sessionId: string; ownerId: string };
 
+export type DesktopUpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "not-available"
+  | "downloading"
+  | "downloaded"
+  | "error"
+  | "disabled";
+
+export interface DesktopUpdateStatus {
+  phase: DesktopUpdatePhase;
+  currentVersion: string;
+  latestVersion?: string;
+  releaseName?: string;
+  percent?: number;
+  transferred?: number;
+  total?: number;
+  error?: string;
+  canAutoInstall: boolean;
+  reason?: string;
+  packaged: boolean;
+  portable: boolean;
+  platform: string;
+}
+
 interface KyreiDesktopBridge {
   platform?: DesktopPlatform;
   getPathForFile?: (file: File) => string;
   workspace?: {
     choose: (locale: "en" | "ru") => Promise<{ canceled: boolean; path: string }>;
     validatePath: (path: string) => Promise<{ path: string }>;
+  };
+  shell?: {
+    openExternal: (
+      url: string,
+      options?: { sessionVerificationUri?: string },
+    ) => Promise<{ ok: boolean }>;
+  };
+  update?: {
+    getStatus: () => Promise<DesktopUpdateStatus>;
+    check: () => Promise<DesktopUpdateStatus>;
+    download: () => Promise<DesktopUpdateStatus>;
+    install: () => Promise<{ ok: boolean }>;
+    subscribe: (callback: (status: DesktopUpdateStatus) => void) => string;
+    unsubscribe: (id: string) => boolean;
   };
   terminal?: {
     list: (ownerId: string) => Promise<TerminalSessionSnapshot[]>;
@@ -77,6 +117,45 @@ export const desktopWorkspace = {
 
 export const desktopRuntime = {
   platform: (): DesktopPlatform => bridge()?.platform ?? "unknown",
+};
+
+export const desktopShell = {
+  available: () => Boolean(bridge()?.shell?.openExternal),
+  openExternal: async (url: string, options?: { sessionVerificationUri?: string }) => {
+    const api = bridge()?.shell;
+    if (!api?.openExternal) throw unavailable();
+    return api.openExternal(url, options);
+  },
+};
+
+export const desktopUpdate = {
+  available: () => Boolean(bridge()?.update?.getStatus),
+  getStatus: async () => {
+    const api = bridge()?.update;
+    if (!api?.getStatus) throw unavailable();
+    return api.getStatus();
+  },
+  check: async () => {
+    const api = bridge()?.update;
+    if (!api?.check) throw unavailable();
+    return api.check();
+  },
+  download: async () => {
+    const api = bridge()?.update;
+    if (!api?.download) throw unavailable();
+    return api.download();
+  },
+  install: async () => {
+    const api = bridge()?.update;
+    if (!api?.install) throw unavailable();
+    return api.install();
+  },
+  onStatus: (callback: (status: DesktopUpdateStatus) => void) => {
+    const api = bridge()?.update;
+    if (!api?.subscribe) return () => {};
+    const id = api.subscribe(callback);
+    return () => { if (id) api.unsubscribe(id); };
+  },
 };
 
 export const desktopTerminal = {

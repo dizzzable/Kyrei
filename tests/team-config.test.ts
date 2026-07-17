@@ -67,8 +67,21 @@ describe("team orchestration config", () => {
       activeProfileId: "",
       profiles: [],
     });
+    // OOB seed: coding team is present; mode remains single until the user enables Team.
     expect(normalizeGatewayConfig({ provider: "https://legacy.example/v1", model: "legacy" }).orchestration)
-      .toEqual({ defaultMode: "single", activeProfileId: "", profiles: [] });
+      .toMatchObject({
+        defaultMode: "single",
+        activeProfileId: "kyrei-coding-team",
+        profiles: [expect.objectContaining({
+          id: "kyrei-coding-team",
+          workflow: "supervisor",
+          roles: expect.arrayContaining([
+            expect.objectContaining({ id: "researcher" }),
+            expect.objectContaining({ id: "critic" }),
+            expect.objectContaining({ id: "architect" }),
+          ]),
+        })],
+      });
   });
 
   it("normalizes arbitrary roles, bounded capabilities, and safe limits", () => {

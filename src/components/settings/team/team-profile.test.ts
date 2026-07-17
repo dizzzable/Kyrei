@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import type { ProviderProfile } from "@/lib/types";
 import {
+  BUILTIN_TEAM_PROFILE_ID,
   cloneTeamOrchestration,
+  createBuiltinCodingTeamProfile,
   createPromptProfile,
   createTeamProfile,
   defaultTeamModel,
   emptyTeamOrchestration,
   isPromptProfilesDraftValid,
+  mergeBuiltinPromptProfiles,
   nextTeamId,
   promptProfilesFromEngine,
   reconcileTeamPromptAssignments,
@@ -33,7 +36,7 @@ describe("team profile helpers", () => {
     expect(profile.id).toBe("profile-3");
     expect(profile.roles[0]).toMatchObject({
       model: { providerId: "openai", modelId: "gpt" },
-      capabilities: ["workspace.read"],
+      capabilities: ["workspace.read", "memory.read", "web"],
       canSpawn: false,
       maxChildren: 0,
     });
@@ -63,7 +66,7 @@ describe("team profile helpers", () => {
     expect(selected.capabilities).toContain("skills.read");
     expect(withTeamSkillSelection(selected, "skill_0123456789abcdef01234567", false)).toMatchObject({
       skillIds: [],
-      capabilities: ["workspace.read"],
+      capabilities: ["workspace.read", "memory.read", "web"],
     });
     expect(withTeamCapability(["workspace.read"], "delegate", true)).toEqual(["workspace.read", "delegate"]);
     expect(withTeamCapability(["workspace.read", "delegate"], "delegate", false)).toEqual(["workspace.read"]);
@@ -83,6 +86,24 @@ describe("team profile helpers", () => {
       activePromptProfileId: first.id,
       promptProfiles: [first, { ...second, systemPrompt: "Challenge claims." }],
     });
+  });
+
+  it("builds the builtin coding team with linked prompt profiles", () => {
+    const team = createBuiltinCodingTeamProfile({ providerId: "openai", modelId: "gpt" });
+    expect(team.id).toBe(BUILTIN_TEAM_PROFILE_ID);
+    expect(team.roles).toHaveLength(3);
+    expect(team.roles.map((r) => r.promptProfileId)).toEqual([
+      "kyrei-researcher",
+      "kyrei-critic",
+      "kyrei-architect",
+    ]);
+    const merged = mergeBuiltinPromptProfiles({ activePromptProfileId: "", promptProfiles: [] });
+    expect(merged.promptProfiles.some((p) => p.id === "kyrei-main")).toBe(true);
+    const again = mergeBuiltinPromptProfiles({
+      activePromptProfileId: "kyrei-main",
+      promptProfiles: [{ id: "kyrei-main", name: "Mine", description: "", systemPrompt: "custom" }],
+    });
+    expect(again.promptProfiles.find((p) => p.id === "kyrei-main")?.systemPrompt).toBe("custom");
   });
 
   it("validates bounded prompt profiles and clears stale role assignments", () => {

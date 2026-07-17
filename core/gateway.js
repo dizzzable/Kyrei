@@ -52,6 +52,17 @@ import {
   applySingleSkillsProposal,
   normalizeSkillsCuratorConfig,
 } from "./skills-curator.js";
+import {
+  digestMessagesToTrajectory,
+  normalizeSkillsSleepConfig,
+  runSkillSleep,
+} from "./skills-sleep.js";
+import {
+  listSkillPacks,
+  enableSkillPack,
+  disableSkillPack,
+  BUILTIN_SKILL_PACKS,
+} from "./skill-packs.js";
 import { CronStore } from "./cron-store.js";
 import { CronScheduler } from "./cron-scheduler.js";
 import { TeamRunStore } from "./team-run-store.js";
@@ -104,6 +115,7 @@ import {
   publicGatewayConfig,
   readyProviderAccounts,
   removeProvider,
+  resolveBrowserSubscriptionCredentials,
   resolveProviderModel,
   selectProviderModel,
   setProviderAccountCredentials,
@@ -113,6 +125,40 @@ import {
   validateProviderPoolInput,
   validateProviderInput,
 } from "./provider-config.js";
+import { createUsageLedger } from "./usage-ledger.js";
+import {
+  budgetWindowStartMs,
+  evaluateUsageBudget,
+  normalizeUsageBudgetConfig,
+  usageBudgetFromEngine,
+} from "./usage-budget.js";
+import {
+  AccessTokenError,
+  createAccessPrincipal,
+  evaluatePrincipalBudget,
+  extractAccessTokenFromRequest,
+  normalizeAccessControl,
+  normalizeAccessTokenHashes,
+  patchPrincipal,
+  publicAccessControl,
+  regenerateAccessPrincipal,
+  resolveAccessPrincipal,
+} from "./access-tokens.js";
+import {
+  formatChatCompletionResponse,
+  formatChatCompletionSseFrames,
+  listCompatModels,
+  newCompletionId,
+  normalizeProxyConfig,
+  openAiMessagesToModelMessages,
+  parseChatCompletionRequest,
+  resolveCompatModelRef,
+} from "./openai-compat.js";
+import {
+  listFamilyModelRefs,
+  normalizeCapacityConfig,
+  orderCapacityCandidates,
+} from "./capacity-router.js";
 
 // A regular chat can expose many enabled skills, but a user-selected set is
 // intentionally bounded so one accidental multi-select cannot spend an entire
@@ -156,11 +202,21 @@ const PROMPT_SKILL_ID_RE = /^skill_[a-f0-9]{24}$/;
  *   GET  /api/messaging                  -> inbound webhook status (no secrets)
  *   POST /api/messaging/token            -> rotate webhook token
  *   POST /api/messaging/inbound          -> external ingress { text, sessionId? }
+ *   GET  /api/usage?days=30              -> durable usage summary + budget status
+ *   GET  /api/usage/events?limit=200     -> recent ledger events (accounting only)
+ *   GET  /api/usage/budget               -> current soft/hard budget snapshot
+ *   GET  /api/access-tokens              -> public principal list (no secrets)
+ *   POST /api/access-tokens              -> create principal; returns plain token once
+ *   PATCH /api/access-tokens/:id         -> enable/disable/label/budget
+ *   DELETE /api/access-tokens/:id        -> revoke permanently
+ *   POST /api/access-tokens/:id/regenerate -> new plain token once
+ *   GET  /v1/models                      -> OpenAI-compatible catalog
+ *   POST /v1/chat/completions            -> OpenAI-compatible chat (no tools)
  */
 
 const CORS_BASE = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Kyrei-Gateway-Token, Authorization, X-Kyrei-Messaging-Token",
+  "Access-Control-Allow-Headers": "Content-Type, X-Kyrei-Gateway-Token, Authorization, X-Kyrei-Messaging-Token, X-Kyrei-Access-Token",
 };
 
 function sendJson(res, status, body) {
@@ -521,16 +577,16 @@ function privateRuntimeModelLimits(model) {
     : undefined;
 }
 
-function providerIsReady(provider, secretState) {
-  return Boolean(provider?.enabled && hasReadyProviderCredentials(provider, secretState));
+function providerIsReady(provider, secretState, configState) {
+  return Boolean(provider?.enabled && hasReadyProviderCredentials(provider, secretState, configState));
 }
 
 function requireReadyProviderModel(configState, secretState, providerId, modelId, options) {
   const target = resolveProviderModel(configState, providerId, modelId, options);
-  if (!providerIsReady(target.provider, secretState)) {
+  if (!providerIsReady(target.provider, secretState, configState)) {
     throw new ProviderConfigError("provider_credentials_required");
   }
-  const hasEligibleAccount = readyProviderAccounts(target.provider, secretState).some((account) => (
+  const hasEligibleAccount = readyProviderAccounts(target.provider, secretState, configState).some((account) => (
     !Object.hasOwn(account, "modelIds") || account.modelIds.includes(target.model.id)
   ));
   if (!hasEligibleAccount) throw new ProviderConfigError("provider_accounts_unavailable");
@@ -564,6 +620,18 @@ function applyModelAssignments(configState, requestedAssignments) {
   const worker = requestedAssignments.worker == null
     ? undefined
     : resolveAssignment(requestedAssignments.worker);
+  const build = requestedAssignments.build == null
+    ? undefined
+    : resolveAssignment(requestedAssignments.build);
+  const polish = requestedAssignments.polish == null
+    ? undefined
+    : resolveAssignment(requestedAssignments.polish);
+  const plan = requestedAssignments.plan == null
+    ? undefined
+    : resolveAssignment(requestedAssignments.plan);
+  const deepreep = requestedAssignments.deepreep == null
+    ? undefined
+    : resolveAssignment(requestedAssignments.deepreep);
   if (requestedAssignments.fallbacks != null && !Array.isArray(requestedAssignments.fallbacks)) {
     throw new ProviderConfigError("provider_selection_invalid");
   }
@@ -576,21 +644,37 @@ function applyModelAssignments(configState, requestedAssignments) {
   });
   return normalizeGatewayConfig({
     ...configState,
-    modelAssignments: { ...(worker ? { worker } : {}), fallbacks },
+    modelAssignments: {
+      ...(worker ? { worker } : {}),
+      ...(build ? { build } : {}),
+      ...(polish ? { polish } : {}),
+      ...(plan ? { plan } : {}),
+      ...(deepreep ? { deepreep } : {}),
+      fallbacks,
+    },
   });
 }
 
 function reconcileReadyModelAssignments(configState, secretState) {
-  const worker = configState.modelAssignments?.worker;
-  const readyWorker = (() => {
-    if (!worker) return undefined;
+  const readyRole = (assignment) => {
+    if (!assignment) return undefined;
     try {
-      requireReadyProviderModel(configState, secretState, worker.providerId, worker.modelId);
-      return worker;
+      requireReadyProviderModel(configState, secretState, assignment.providerId, assignment.modelId);
+      return assignment;
     } catch {
       return undefined;
     }
-  })();
+  };
+  const worker = configState.modelAssignments?.worker;
+  const build = configState.modelAssignments?.build;
+  const polish = configState.modelAssignments?.polish;
+  const plan = configState.modelAssignments?.plan;
+  const deepreep = configState.modelAssignments?.deepreep;
+  const readyWorker = readyRole(worker);
+  const readyBuild = readyRole(build);
+  const readyPolish = readyRole(polish);
+  const readyPlan = readyRole(plan);
+  const readyDeepreep = readyRole(deepreep);
   const readyFallbacks = (configState.modelAssignments?.fallbacks ?? []).filter((fallback) => {
     try {
       requireReadyProviderModel(configState, secretState, fallback.providerId, fallback.modelId);
@@ -600,11 +684,22 @@ function reconcileReadyModelAssignments(configState, secretState) {
     }
   });
   const unchanged = readyWorker === worker
+    && readyBuild === build
+    && readyPolish === polish
+    && readyPlan === plan
+    && readyDeepreep === deepreep
     && readyFallbacks.length === (configState.modelAssignments?.fallbacks ?? []).length;
   if (unchanged) return configState;
   return normalizeGatewayConfig({
     ...configState,
-    modelAssignments: { ...(readyWorker ? { worker: readyWorker } : {}), fallbacks: readyFallbacks },
+    modelAssignments: {
+      ...(readyWorker ? { worker: readyWorker } : {}),
+      ...(readyBuild ? { build: readyBuild } : {}),
+      ...(readyPolish ? { polish: readyPolish } : {}),
+      ...(readyPlan ? { plan: readyPlan } : {}),
+      ...(readyDeepreep ? { deepreep: readyDeepreep } : {}),
+      fallbacks: readyFallbacks,
+    },
   });
 }
 
@@ -844,7 +939,7 @@ export function requestErrorStatus(error) {
     code.startsWith("pipeline_")
     || code.startsWith("workspace_lease_")
   ) return 400;
-  if (error?.name === "SkillsStoreError" || error?.name === "ProviderConfigError" || error?.name === "ProviderDiscoveryError" || error?.name === "TeamConfigError" || error?.name === "PipelineConfigError" || error?.name === "KiroOrganizationConfigError" || error?.name === "KiroOrganizationBrokerError" || error?.name === "KiroOrganizationWorkerError" || error instanceof TypeError || error instanceof RangeError) return 400;
+  if (error?.name === "SkillsStoreError" || error?.name === "ProviderConfigError" || error?.name === "ProviderDiscoveryError" || error?.name === "TeamConfigError" || error?.name === "PipelineConfigError" || error?.name === "KiroOrganizationConfigError" || error?.name === "KiroOrganizationBrokerError" || error?.name === "KiroOrganizationWorkerError" || error?.name === "BrowserSubscriptionAuthError" || error instanceof TypeError || error instanceof RangeError) return 400;
   return 500;
 }
 
@@ -1895,6 +1990,70 @@ export async function startGateway({
       if (process.platform !== "win32") await chmod(organizationAuditPath, 0o600);
     }).catch(() => undefined);
   };
+  /** Durable multi-provider usage ledger (governance P0). Fail-open on write. */
+  const usageLedger = createUsageLedger({ dataDir });
+  const recordChatUsage = (payload) => {
+    void usageLedger.record(payload).catch(() => undefined);
+  };
+  /** Touch lastUsedAt for a principal (public metadata only). */
+  const touchAccessPrincipal = (principalId) => {
+    if (!principalId) return;
+    const control = accessControlState();
+    const nextPrincipals = control.principals.map((row) => (
+      row.id === principalId
+        ? { ...row, lastUsedAt: new Date().toISOString() }
+        : row
+    ));
+    config = normalizeGatewayConfig({
+      ...config,
+      accessControl: { ...control, principals: nextPrincipals },
+    });
+    void saveConfig(config, secrets).catch(() => undefined);
+  };
+  async function usageBudgetSnapshot() {
+    const budgetConfig = usageBudgetFromEngine(config.engine);
+    const sinceMs = budgetWindowStartMs(budgetConfig.window);
+    const events = await usageLedger.readEvents({ limit: 50_000, sinceMs });
+    let totalTokens = 0;
+    let costUsd = 0;
+    for (const event of events) {
+      totalTokens += Number(event.totalTokens) || 0;
+      costUsd += Number(event.costUsd) || 0;
+    }
+    return evaluateUsageBudget(budgetConfig, {
+      totalTokens,
+      costUsd,
+      requestCount: events.length,
+    });
+  }
+  function accessControlState() {
+    return normalizeAccessControl(config.accessControl);
+  }
+  function accessTokenHashes() {
+    return normalizeAccessTokenHashes(secrets.accessTokenHashes);
+  }
+  /**
+   * Resolve optional employee access token from the request.
+   * When requireToken is on, missing/invalid tokens fail.
+   */
+  function resolveRequestPrincipal(req, { required = false } = {}) {
+    const control = accessControlState();
+    const plain = extractAccessTokenFromRequest(req);
+    if (!plain) {
+      if (required || control.requireToken) {
+        throw new AccessTokenError("access_token_required", 401);
+      }
+      return null;
+    }
+    const resolved = resolveAccessPrincipal(plain, control, accessTokenHashes());
+    if (!resolved) throw new AccessTokenError("access_token_invalid", 401);
+    return resolved;
+  }
+  async function principalBudgetSnapshot(principal) {
+    if (!principal) return null;
+    const events = await usageLedger.readEvents({ limit: 50_000 });
+    return evaluatePrincipalBudget(principal, events);
+  }
   const kiroOrganizationBroker = new KiroOrganizationBroker({
     config: config.kiroOrganization,
     secrets: normalizeKiroOrganizationSecrets(secrets.kiroOrganization),
@@ -2362,13 +2521,13 @@ export async function startGateway({
       const provider = providersById.get(id);
       if (!provider) return { id, missing: true };
       const pool = normalizeProviderAccountPool(provider.accountPool, provider.models);
-      const readyAccountIds = new Set(readyProviderAccounts(provider, secretsSnapshot).map((account) => account.id));
+      const readyAccountIds = new Set(readyProviderAccounts(provider, secretsSnapshot, configSnapshot).map((account) => account.id));
       return {
         id,
         protocol: provider.protocol,
         baseURL: provider.baseURL,
         enabled: provider.enabled,
-        ready: providerIsReady(provider, secretsSnapshot),
+        ready: providerIsReady(provider, secretsSnapshot, configSnapshot),
         requiresApiKey: provider.requiresApiKey,
         headersDigest: digestJson(provider.headers ?? {}),
         models: provider.models,
@@ -2488,9 +2647,16 @@ export async function startGateway({
 
   const engineConfigForSession = (sessionId) => {
     const base = isPlainRecord(config.engine) ? config.engine : {};
+    const session = store.getSession(sessionId);
+    const sessionMode = session?.codingMode;
+    const withMode = sessionMode
+      && (sessionMode === "auto" || sessionMode === "plan" || sessionMode === "build"
+        || sessionMode === "polish" || sessionMode === "deepreep")
+      ? { ...base, codingMode: sessionMode }
+      : base;
     const allowOnce = sessionProtectedAllowOnce.get(sessionId) ?? [];
-    if (!allowOnce.length) return base;
-    const permissions = isPlainRecord(base.permissions) ? base.permissions : {};
+    if (!allowOnce.length) return withMode;
+    const permissions = isPlainRecord(withMode.permissions) ? withMode.permissions : {};
     const existing = Array.isArray(permissions.protectedPathAllowOnce)
       ? permissions.protectedPathAllowOnce
       : [];
@@ -2499,7 +2665,7 @@ export async function startGateway({
       if (!merged.includes(p)) merged.push(p);
     }
     return {
-      ...base,
+      ...withMode,
       permissions: {
         ...permissions,
         protectedPathAllowOnce: merged.slice(0, 200),
@@ -3607,9 +3773,9 @@ export async function startGateway({
     for (const providerId of new Set(known)) invalidateProviderRuntime(providerId);
   }
 
-  function accountPoolRouterFor(provider, secretState = secrets) {
+  function accountPoolRouterFor(provider, secretState = secrets, configState = config) {
     const pool = normalizeProviderAccountPool(provider.accountPool, provider.models);
-    const readyIds = new Set(readyProviderAccounts(provider, secretState).map((account) => account.id));
+    const readyIds = new Set(readyProviderAccounts(provider, secretState, configState).map((account) => account.id));
     const members = pool.members.map((member) => ({
       ...member,
       status: readyIds.has(member.id) ? "ready" : "auth-required",
@@ -3692,6 +3858,8 @@ export async function startGateway({
             statusCode: outcome.statusCode,
             retryAfterMs: outcome.retryAfterMs,
             retryable: outcome.outcome === "retryable-error",
+            // Enum only — never raw provider bodies (anti-false-ban + no secret leak).
+            failureClass: outcome.failureClass,
           });
         }
       },
@@ -3748,19 +3916,26 @@ export async function startGateway({
     if (!ordered.length) throw new ProviderConfigError("provider_accounts_unavailable");
     const limits = privateRuntimeModelLimits(model);
     return ordered.map((account) => {
-      const credentials = provider.requiresApiKey
+      let credentials = provider.requiresApiKey
         ? getProviderAccountCredentials(secretState, provider.id, account.id)
         : {};
+      if (provider.credentialSource === "browser-subscription") {
+        const resolved = resolveBrowserSubscriptionCredentials(configState, secretState, provider);
+        if (!resolved?.apiKey) throw new ProviderConfigError("provider_credentials_required");
+        credentials = { apiKey: resolved.apiKey };
+      }
       return {
         providerId: provider.id,
         ...(poolEnabled ? { accountId: account.id } : {}),
         protocol: provider.protocol,
         baseURL: provider.baseURL,
         model: model.id,
-        apiKey: provider.requiresApiKey ? credentials.apiKey ?? "" : "",
+        apiKey: provider.requiresApiKey || provider.credentialSource === "browser-subscription"
+          ? credentials.apiKey ?? ""
+          : "",
         credentials,
         ...(provider.headers ? { headers: provider.headers } : {}),
-        requiresApiKey: provider.requiresApiKey,
+        requiresApiKey: provider.requiresApiKey || provider.credentialSource === "browser-subscription",
         ...(limits ? { limits: { ...limits } } : {}),
       };
     });
@@ -4276,6 +4451,9 @@ export async function startGateway({
         sessionId: pipelineSessionId,
         signal,
       });
+      const stageCodingMode = typeof mod.codingModeForPipelineStage === "function"
+        ? mod.codingModeForPipelineStage({ id: stage.id, name: stage.name, kind: stage.kind })
+        : undefined;
       const result = await mod.runTeamDepartment({
         team,
         goal: run.goal,
@@ -4283,7 +4461,10 @@ export async function startGateway({
         workspace: run.workspace,
         auditLogPath: join(dataDir, "audit.jsonl"),
         sessionId: pipelineSessionId,
-        config: configSnapshot.engine,
+        config: {
+          ...(isPlainRecord(configSnapshot.engine) ? configSnapshot.engine : {}),
+          ...(stageCodingMode ? { codingMode: stageCodingMode } : {}),
+        },
         skills: runtimeSkillsForEngine(runtimeSkills.skills),
         readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         dependencyArtifacts: departmentInputArtifacts(dependencyArtifacts),
@@ -4569,6 +4750,7 @@ export async function startGateway({
     appendUser = true,
     skillIds,
     images,
+    accessPrincipal = null,
   } = {}) {
     if (shutdownController.signal.aborted) {
       return { status: "cancelled", sessionId, error: "gateway-shutdown" };
@@ -4726,10 +4908,36 @@ export async function startGateway({
       ).catch(() => ({ skills: [] }));
       throwIfAborted(controller.signal);
       const workerProvider = workerRuntimeTarget(sessionId);
-      const fallbackProviders = [
-        ...mainTargets.slice(1),
-        ...fallbackRuntimeTargets(sessionId),
-      ];
+      // Capacity chain: all accounts for primary model, then same-family models
+      // on other providers, then configured fallbacks — so spare keys keep the job alive.
+      const capacityCfg = normalizeCapacityConfig(config.capacity);
+      const subscriptionShield = capacityCfg.subscriptionShield;
+      const familyTargets = [];
+      if (capacityCfg.enabled && capacityCfg.crossProviderFamily) {
+        for (const ref of listFamilyModelRefs(config, mainTarget.providerId, mainTarget.model)) {
+          try {
+            const expanded = privateRuntimeTargetsForConfig(
+              config,
+              secrets,
+              ref.providerId,
+              ref.modelId,
+              { sessionId, preferredAccountId: session.providerAccountId },
+            );
+            familyTargets.push(...expanded);
+          } catch {
+            /* sibling provider not ready */
+          }
+        }
+      }
+      const orderedCapacity = orderCapacityCandidates({
+        primaryTargets: mainTargets,
+        familyTargets,
+        fallbackTargets: fallbackRuntimeTargets(sessionId),
+        capacity: capacityCfg,
+      });
+      // First candidate is primary; rest feed openStream failover.
+      if (orderedCapacity[0]) mainTarget = orderedCapacity[0];
+      const fallbackProviders = orderedCapacity.slice(1);
       const team = activeTeamProfile
         ? teamRuntimeSpecForProfile(
             activeTeamProfile.id,
@@ -4762,6 +4970,7 @@ export async function startGateway({
         model: mainTarget.model,
         ...(mainTarget.limits ? { modelLimits: { ...mainTarget.limits } } : {}),
         providerAttemptLifecycle,
+        subscriptionShield,
         ...(workerProvider ? { workerProvider } : {}),
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
         ...(team ? { team } : {}),
@@ -4835,6 +5044,37 @@ export async function startGateway({
           : {}),
         ...(fileReview ? { fileReview } : {}),
       });
+      // Accounting ledger (no prompts/secrets): supports multi-model pooling UX.
+      try {
+        const usage = result?.usage && typeof result.usage === "object" ? result.usage : null;
+        const route = result?.route && typeof result.route === "object" ? result.route : null;
+        const inputTokens = Number(usage?.inputTokens);
+        const outputTokens = Number(usage?.outputTokens);
+        const totalTokens = Number(usage?.totalTokens)
+          || ((Number.isFinite(inputTokens) ? inputTokens : 0) + (Number.isFinite(outputTokens) ? outputTokens : 0));
+        if (totalTokens > 0 || Number(usage?.costUsd) > 0) {
+          recordChatUsage({
+            kind: "chat_turn",
+            sessionId,
+            providerId: route?.providerId ?? mainTarget.providerId,
+            accountId: route?.accountId ?? mainTarget.accountId,
+            modelId: route?.modelId ?? mainTarget.model,
+            ...(Number.isFinite(inputTokens) ? { inputTokens } : {}),
+            ...(Number.isFinite(outputTokens) ? { outputTokens } : {}),
+            totalTokens,
+            ...(Number.isFinite(Number(usage?.costUsd)) ? { costUsd: Number(usage.costUsd) } : {}),
+            status: turnStatus,
+            latencyMs: Date.now() - (runtimeActivity.get(sessionId)?.startedAt ?? Date.now()),
+            ...(accessPrincipal?.id ? {
+              accessTokenId: accessPrincipal.id,
+              principalLabel: accessPrincipal.principal?.label ?? accessPrincipal.id,
+            } : {}),
+          });
+          if (accessPrincipal?.id) touchAccessPrincipal(accessPrincipal.id);
+        }
+      } catch {
+        /* ledger never blocks the agent turn */
+      }
       // Project chat text into the rebuildable search index. Engine dual-commit
       // already ran inside finalizeActiveTurn (A4c); re-sync only if needed later.
       if (successfulTurn) {
@@ -4923,14 +5163,28 @@ export async function startGateway({
     const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
     res.kyreiCors = corsFor(origin);
 
-    // Bind only to loopback and reject spoofed browser origins before any
-    // response that a page could read. The bearer token remains mandatory even
-    // for file:// (Origin: null) renderers.
-    if (!isLoopbackHost(req.headers.host)) return sendJson(res, 421, { error: "loopback host required" });
-    if (!isExpectedOrigin(origin)) return sendJson(res, 403, { error: "unexpected origin" });
+    // Default: loopback-only. When proxy.listenLan is enabled, non-loopback
+    // Host is allowed only for /v1/* and /health (OpenAI-compat employees).
+    const proxyCfg = normalizeProxyConfig(config.proxy);
+    const isV1Path = path === "/v1" || path.startsWith("/v1/");
+    if (!isLoopbackHost(req.headers.host)) {
+      if (!(proxyCfg.listenLan && (isV1Path || path === "/health"))) {
+        return sendJson(res, 421, { error: "loopback host required" });
+      }
+    }
+    if (!isExpectedOrigin(origin)) {
+      // OpenAI-compat clients often omit Origin; allow empty origin on /v1.
+      if (!(isV1Path && !origin)) {
+        return sendJson(res, 403, { error: "unexpected origin" });
+      }
+    }
     if (req.method === "OPTIONS") {
-      if (!origin) return sendJson(res, 403, { error: "origin required" });
-      res.writeHead(204, res.kyreiCors);
+      if (!origin && !isV1Path) return sendJson(res, 403, { error: "origin required" });
+      res.writeHead(204, {
+        ...res.kyreiCors,
+        "Access-Control-Allow-Origin": origin || "*",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Kyrei-Gateway-Token, X-Kyrei-Access-Token",
+      });
       res.end();
       return;
     }
@@ -4938,12 +5192,178 @@ export async function startGateway({
       ? req.headers["x-kyrei-gateway-token"][0]
       : req.headers["x-kyrei-gateway-token"];
     const eventToken = path === "/api/events" ? url.searchParams.get("token") : null;
-    if (path !== "/health" && !tokenMatches(headerToken) && !tokenMatches(eventToken)) {
+    const gatewayAuthOk = tokenMatches(headerToken) || tokenMatches(eventToken);
+    // /v1 may authenticate with employee access token alone (company proxy).
+    let v1Principal = null;
+    if (isV1Path && path !== "/health") {
+      try {
+        const plain = extractAccessTokenFromRequest(req);
+        if (plain) {
+          v1Principal = resolveAccessPrincipal(plain, accessControlState(), accessTokenHashes());
+          if (!v1Principal) {
+            return sendJson(res, 401, { error: "invalid_api_key", code: "access_token_invalid" });
+          }
+        } else if (proxyCfg.requireAccessToken || !gatewayAuthOk) {
+          return sendJson(res, 401, { error: "invalid_api_key", code: "access_token_required" });
+        }
+      } catch (error) {
+        if (error instanceof AccessTokenError) {
+          return sendJson(res, error.status || 401, { error: error.code, code: error.code });
+        }
+        throw error;
+      }
+    } else if (path !== "/health" && !gatewayAuthOk) {
       return sendJson(res, 401, { error: "gateway authentication required" });
     }
 
     try {
       if (req.method === "GET" && path === "/health") return sendJson(res, 200, { ok: true });
+
+      // ── OpenAI-compatible proxy (/v1) ────────────────────────────────
+      if (proxyCfg.enabled && path === "/v1/models" && req.method === "GET") {
+        return sendJson(res, 200, listCompatModels(config));
+      }
+      if (proxyCfg.enabled && path === "/v1/chat/completions" && req.method === "POST") {
+        const body = await readBody(req);
+        const parsed = parseChatCompletionRequest(body);
+        if (!parsed.ok) {
+          return sendJson(res, 400, { error: { message: parsed.error, type: "invalid_request_error" } });
+        }
+        // Budgets: global then principal
+        try {
+          const budget = await usageBudgetSnapshot();
+          if (budget.blocked) {
+            return sendJson(res, 429, {
+              error: { message: "budget_exceeded", type: "insufficient_quota", code: "budget_exceeded" },
+              reasons: budget.hardReasons,
+            });
+          }
+          if (v1Principal?.principal) {
+            const pb = await principalBudgetSnapshot(v1Principal.principal);
+            if (pb?.blocked) {
+              return sendJson(res, 429, {
+                error: {
+                  message: "principal_budget_exceeded",
+                  type: "insufficient_quota",
+                  code: "principal_budget_exceeded",
+                },
+                reasons: pb.hardReasons,
+              });
+            }
+          }
+        } catch {
+          /* fail-open */
+        }
+
+        const ref = resolveCompatModelRef(parsed.model, config);
+        let target;
+        try {
+          target = privateRuntimeTargetForConfig(config, secrets, ref.providerId, ref.modelId, {
+            fallbackToDefault: true,
+          });
+        } catch (error) {
+          const code = error?.code || error?.message || "model_not_found";
+          return sendJson(res, 404, {
+            error: { message: String(code), type: "invalid_request_error", code: "model_not_found" },
+          });
+        }
+
+        const modelMessages = openAiMessagesToModelMessages(parsed.messages);
+        if (!modelMessages.length) {
+          return sendJson(res, 400, {
+            error: { message: "messages_required", type: "invalid_request_error" },
+          });
+        }
+
+        const startedAt = Date.now();
+        const completionId = newCompletionId();
+        const modelLabel = `${target.providerId}/${target.model}`;
+        try {
+          const mod = await getEngine();
+          if (typeof mod.buildModel !== "function") {
+            return sendJson(res, 503, {
+              error: { message: "engine_unavailable", type: "server_error" },
+            });
+          }
+          const { generateText } = await import("ai");
+          const languageModel = mod.buildModel({
+            protocol: target.protocol,
+            baseURL: target.baseURL,
+            apiKey: target.apiKey || "",
+            credentials: target.credentials || {},
+            model: target.model,
+            ...(target.headers ? { headers: target.headers } : {}),
+          });
+          const result = await generateText({
+            model: languageModel,
+            messages: modelMessages,
+            maxRetries: 1,
+          });
+          const text = typeof result.text === "string" ? result.text : "";
+          const usageRaw = result.usage && typeof result.usage === "object" ? result.usage : {};
+          const inputTokens = Number(usageRaw.inputTokens ?? usageRaw.promptTokens) || 0;
+          const outputTokens = Number(usageRaw.outputTokens ?? usageRaw.completionTokens) || 0;
+          const totalTokens = Number(usageRaw.totalTokens) || inputTokens + outputTokens;
+          // Cost estimate: optional registry entry if engine exposes cost metadata later.
+          const costUsd = undefined;
+
+          recordChatUsage({
+            kind: "other",
+            providerId: target.providerId,
+            accountId: target.accountId,
+            modelId: target.model,
+            inputTokens,
+            outputTokens,
+            totalTokens,
+            ...(costUsd !== undefined ? { costUsd } : {}),
+            status: "complete",
+            latencyMs: Date.now() - startedAt,
+            ...(v1Principal?.id ? {
+              accessTokenId: v1Principal.id,
+              principalLabel: v1Principal.principal?.label ?? v1Principal.id,
+            } : {}),
+          });
+          if (v1Principal?.id) touchAccessPrincipal(v1Principal.id);
+
+          const payload = formatChatCompletionResponse({
+            id: completionId,
+            model: modelLabel,
+            text,
+            usage: { inputTokens, outputTokens, totalTokens },
+          });
+
+          if (parsed.stream) {
+            res.writeHead(200, {
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              Connection: "keep-alive",
+              ...(res.kyreiCors ?? {}),
+            });
+            for (const frame of formatChatCompletionSseFrames({
+              id: completionId,
+              model: modelLabel,
+              text,
+            })) {
+              res.write(frame);
+            }
+            res.end();
+            return;
+          }
+          return sendJson(res, 200, payload);
+        } catch (error) {
+          const raw = error instanceof Error ? error.message : String(error);
+          const message = redactSensitiveText(raw, runtimeSensitiveValues()).slice(0, 500);
+          return sendJson(res, 502, {
+            error: { message, type: "server_error" },
+          });
+        }
+      }
+      if (isV1Path && proxyCfg.enabled === false) {
+        return sendJson(res, 404, { error: { message: "proxy_disabled", type: "invalid_request_error" } });
+      }
+      if (isV1Path) {
+        return sendJson(res, 404, { error: { message: "not_found", type: "invalid_request_error" } });
+      }
 
       if (req.method === "GET" && path === "/api/status") {
         const activeProvider = getActiveProvider(config);
@@ -4962,7 +5382,7 @@ export async function startGateway({
           activeRuns: runtimeStatus.size,
           platform: process.platform,
           arch: process.arch,
-          providerReady: Boolean(activeProvider && hasReadyProviderCredentials(activeProvider, secrets)),
+          providerReady: Boolean(activeProvider && hasReadyProviderCredentials(activeProvider, secrets, config)),
           providerName: activeProvider?.name ?? "",
           model: config.activeModelId,
           workspace: config.workspace,
@@ -4996,6 +5416,404 @@ export async function startGateway({
           return sendJson(res, 404, { code: "team_run_not_found", error: "team_run_not_found" });
         }
         return sendJson(res, 200, { runId, events });
+      }
+
+      if (path === "/api/usage") {
+        if (req.method === "GET") {
+          const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days")) || 30));
+          const summary = await usageLedger.summary({ days });
+          const budget = await usageBudgetSnapshot();
+          return sendJson(res, 200, { days, ...summary, budget });
+        }
+      }
+      if (path === "/api/usage/budget") {
+        if (req.method === "GET") {
+          return sendJson(res, 200, await usageBudgetSnapshot());
+        }
+      }
+      if (path === "/api/usage/events") {
+        if (req.method === "GET") {
+          const limit = Math.min(2_000, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+          const events = await usageLedger.readEvents({ limit });
+          return sendJson(res, 200, { events });
+        }
+      }
+
+      // ── Access tokens (employee principals) ─────────────────────────
+      if (path === "/api/access-tokens") {
+        if (req.method === "GET") {
+          return sendJson(res, 200, publicAccessControl(config.accessControl));
+        }
+        if (req.method === "POST") {
+          const body = await readBody(req);
+          const control = accessControlState();
+          if (control.principals.length >= 256) {
+            return sendJson(res, 400, { code: "access_token_limit", error: "access_token_limit" });
+          }
+          const created = createAccessPrincipal({
+            label: typeof body.label === "string" ? body.label : "User",
+            existing: control.principals,
+            budget: {
+              window: body.budgetWindow === "month" ? "month" : "day",
+              softCostUsd: body.softCostUsd,
+              hardCostUsd: body.hardCostUsd,
+              softTokens: body.softTokens,
+              hardTokens: body.hardTokens,
+            },
+          });
+          const nextControl = normalizeAccessControl({
+            ...control,
+            principals: [...control.principals, created.principal],
+          });
+          const nextHashes = {
+            ...accessTokenHashes(),
+            [created.principal.id]: created.hash,
+          };
+          await mutateConfig(async () => {
+            config = normalizeGatewayConfig({ ...config, accessControl: nextControl });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              accessTokenHashes: nextHashes,
+            });
+            await saveConfig(config, secrets);
+          });
+          return sendJson(res, 200, {
+            principal: created.principal,
+            // Shown once — never readable again from the store.
+            token: created.plain,
+            accessControl: publicAccessControl(config.accessControl),
+          });
+        }
+        if (req.method === "PUT") {
+          // Update requireToken flag only (principals use PATCH/POST/DELETE).
+          const body = await readBody(req);
+          const control = accessControlState();
+          await mutateConfig(async () => {
+            config = normalizeGatewayConfig({
+              ...config,
+              accessControl: {
+                ...control,
+                requireToken: body.requireToken === true,
+              },
+            });
+            await saveConfig(config, secrets);
+          });
+          return sendJson(res, 200, publicAccessControl(config.accessControl));
+        }
+      }
+      const accessTokenMatch = path.match(/^\/api\/access-tokens\/([^/]+)(?:\/(regenerate))?$/);
+      if (accessTokenMatch) {
+        let principalId = "";
+        try {
+          principalId = decodeURIComponent(accessTokenMatch[1]).trim();
+        } catch {
+          return sendJson(res, 400, { code: "access_token_id_invalid", error: "access_token_id_invalid" });
+        }
+        const action = accessTokenMatch[2] || "";
+        const control = accessControlState();
+        const existing = control.principals.find((row) => row.id === principalId);
+        if (!existing) {
+          return sendJson(res, 404, { code: "access_token_not_found", error: "access_token_not_found" });
+        }
+
+        if (req.method === "PATCH" && !action) {
+          const body = await readBody(req);
+          const nextPrincipal = patchPrincipal(existing, body);
+          const nextControl = normalizeAccessControl({
+            ...control,
+            principals: control.principals.map((row) => (row.id === principalId ? nextPrincipal : row)),
+          });
+          await mutateConfig(async () => {
+            config = normalizeGatewayConfig({ ...config, accessControl: nextControl });
+            await saveConfig(config, secrets);
+          });
+          return sendJson(res, 200, {
+            principal: nextPrincipal,
+            accessControl: publicAccessControl(config.accessControl),
+          });
+        }
+
+        if (req.method === "DELETE" && !action) {
+          const nextControl = normalizeAccessControl({
+            ...control,
+            principals: control.principals.filter((row) => row.id !== principalId),
+          });
+          const nextHashes = { ...accessTokenHashes() };
+          delete nextHashes[principalId];
+          await mutateConfig(async () => {
+            config = normalizeGatewayConfig({ ...config, accessControl: nextControl });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              accessTokenHashes: nextHashes,
+            });
+            await saveConfig(config, secrets);
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            accessControl: publicAccessControl(config.accessControl),
+          });
+        }
+
+        if (req.method === "POST" && action === "regenerate") {
+          const regen = regenerateAccessPrincipal(existing);
+          const nextControl = normalizeAccessControl({
+            ...control,
+            principals: control.principals.map((row) => (row.id === principalId ? regen.principal : row)),
+          });
+          const nextHashes = {
+            ...accessTokenHashes(),
+            [principalId]: regen.hash,
+          };
+          await mutateConfig(async () => {
+            config = normalizeGatewayConfig({ ...config, accessControl: nextControl });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              accessTokenHashes: nextHashes,
+            });
+            await saveConfig(config, secrets);
+          });
+          return sendJson(res, 200, {
+            principal: regen.principal,
+            token: regen.plain,
+            accessControl: publicAccessControl(config.accessControl),
+          });
+        }
+      }
+
+      if (path === "/api/experimental/browser-subscription" || path.startsWith("/api/experimental/browser-subscription/")) {
+        const {
+          BrowserSubscriptionAuthError,
+          bindBrowserSubscriptionToken,
+          deleteBrowserSubscriptionDeviceProfile,
+          deleteBrowserSubscriptionSession,
+          linkBrowserSubscriptionProvider,
+          pollBrowserSubscriptionDeviceSession,
+          publicBrowserSubscriptionSnapshot,
+          revokeBrowserSubscriptionSession,
+          setActiveBrowserSubscriptionDeviceProfile,
+          startBrowserSubscriptionSession,
+          upsertBrowserSubscriptionDeviceProfile,
+        } = await import("./browser-subscription-auth.js");
+
+        if (path === "/api/experimental/browser-subscription" && req.method === "GET") {
+          return sendJson(res, 200, publicBrowserSubscriptionSnapshot(config, secrets));
+        }
+
+        if (path === "/api/experimental/browser-subscription/profiles" && req.method === "POST") {
+          const body = await readBody(req);
+          let result = null;
+          await mutateConfig(async () => {
+            const saved = upsertBrowserSubscriptionDeviceProfile(config, secrets, body);
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: saved.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: saved.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = {
+              profile: saved.profile,
+              snapshot: publicBrowserSubscriptionSnapshot(config, secrets),
+            };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const profileActiveMatch = path.match(/^\/api\/experimental\/browser-subscription\/profiles\/([^/]+)\/activate$/);
+        if (profileActiveMatch && req.method === "POST") {
+          const profileId = decodeURIComponent(profileActiveMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const browserSubscription = setActiveBrowserSubscriptionDeviceProfile(config, profileId);
+            config = normalizeGatewayConfig({ ...config, browserSubscription });
+            await saveConfig(config, secrets);
+            result = { snapshot: publicBrowserSubscriptionSnapshot(config, secrets) };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const profileDeleteMatch = path.match(/^\/api\/experimental\/browser-subscription\/profiles\/([^/]+)$/);
+        if (profileDeleteMatch && req.method === "DELETE") {
+          const profileId = decodeURIComponent(profileDeleteMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const removed = deleteBrowserSubscriptionDeviceProfile(config, secrets, profileId);
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: removed.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: removed.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = { snapshot: publicBrowserSubscriptionSnapshot(config, secrets) };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        if (path === "/api/experimental/browser-subscription/sessions" && req.method === "POST") {
+          const body = await readBody(req);
+          let result = null;
+          await mutateConfig(async () => {
+            const started = await startBrowserSubscriptionSession(config, secrets, body);
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: started.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: started.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = {
+              session: started.session,
+              nextStep: started.nextStep,
+              snapshot: publicBrowserSubscriptionSnapshot(config, secrets),
+            };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const pollMatch = path.match(/^\/api\/experimental\/browser-subscription\/sessions\/([^/]+)\/poll$/);
+        if (pollMatch && req.method === "POST") {
+          const sessionId = decodeURIComponent(pollMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const polled = await pollBrowserSubscriptionDeviceSession(config, secrets, sessionId);
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: polled.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: polled.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = {
+              session: polled.session,
+              pollStatus: polled.pollStatus,
+              snapshot: publicBrowserSubscriptionSnapshot(config, secrets),
+            };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const bindMatch = path.match(/^\/api\/experimental\/browser-subscription\/sessions\/([^/]+)\/token$/);
+        if (bindMatch && req.method === "POST") {
+          const body = await readBody(req);
+          const sessionId = decodeURIComponent(bindMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const bound = bindBrowserSubscriptionToken(config, secrets, {
+              ...body,
+              sessionId,
+            });
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: bound.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: bound.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = {
+              session: bound.session,
+              snapshot: publicBrowserSubscriptionSnapshot(config, secrets),
+            };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const linkMatch = path.match(/^\/api\/experimental\/browser-subscription\/sessions\/([^/]+)\/link$/);
+        if (linkMatch && req.method === "POST") {
+          const body = await readBody(req);
+          const sessionId = decodeURIComponent(linkMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const browserSubscription = linkBrowserSubscriptionProvider(
+              config,
+              sessionId,
+              body?.providerId,
+            );
+            let providers = config.providers;
+            const providerId = typeof body?.providerId === "string"
+              ? body.providerId.trim().toLowerCase()
+              : "";
+            if (providerId) {
+              providers = config.providers.map((provider) => (
+                provider.id === providerId
+                  ? {
+                      ...provider,
+                      credentialSource: "browser-subscription",
+                      browserSubscriptionSessionId: sessionId,
+                      requiresApiKey: true,
+                    }
+                  : provider
+              ));
+            }
+            config = normalizeGatewayConfig({
+              ...config,
+              providers,
+              browserSubscription,
+            });
+            await saveConfig(config, secrets);
+            result = {
+              snapshot: publicBrowserSubscriptionSnapshot(config, secrets),
+              config: publicGatewayConfig(config, secrets),
+            };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const revokeMatch = path.match(/^\/api\/experimental\/browser-subscription\/sessions\/([^/]+)\/revoke$/);
+        if (revokeMatch && req.method === "POST") {
+          const sessionId = decodeURIComponent(revokeMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const revoked = revokeBrowserSubscriptionSession(config, secrets, sessionId);
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: revoked.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: revoked.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = {
+              session: revoked.session,
+              snapshot: publicBrowserSubscriptionSnapshot(config, secrets),
+            };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        const deleteMatch = path.match(/^\/api\/experimental\/browser-subscription\/sessions\/([^/]+)$/);
+        if (deleteMatch && req.method === "DELETE") {
+          const sessionId = decodeURIComponent(deleteMatch[1]);
+          let result = null;
+          await mutateConfig(async () => {
+            const removed = deleteBrowserSubscriptionSession(config, secrets, sessionId);
+            config = normalizeGatewayConfig({
+              ...config,
+              browserSubscription: removed.config,
+            });
+            secrets = normalizeProviderSecrets({
+              ...secrets,
+              browserSubscription: removed.secrets,
+            });
+            await saveConfig(config, secrets);
+            result = { snapshot: publicBrowserSubscriptionSnapshot(config, secrets) };
+          });
+          return sendJson(res, 200, result);
+        }
+
+        void BrowserSubscriptionAuthError;
+        return sendJson(res, 404, { error: "not_found" });
       }
 
       if (path === "/api/config") {
@@ -5100,6 +5918,76 @@ export async function startGateway({
             // The engine still performs defensive runtime normalization. User
             // prompt profiles are additionally strict at this durable boundary
             // so invalid assignments never become silent runtime fallbacks.
+            if (Object.hasOwn(body, "proxy")) {
+              nextConfig = normalizeGatewayConfig({
+                ...nextConfig,
+                proxy: body.proxy,
+              });
+            }
+            if (Object.hasOwn(body, "capacity")) {
+              nextConfig = normalizeGatewayConfig({
+                ...nextConfig,
+                capacity: body.capacity,
+              });
+            }
+            if (Object.hasOwn(body, "experimental")) {
+              const {
+                acceptExperimentalDisclaimer,
+                normalizeExperimentalConfig,
+                EXPERIMENTAL_ACCEPT_PHRASE,
+              } = await import("./experimental-features.js");
+              const companyLocked = nextConfig.accessControl?.requireToken === true;
+              const previous = normalizeExperimentalConfig(nextConfig.experimental, { companyLocked });
+              const requested = body.experimental && typeof body.experimental === "object"
+                ? body.experimental
+                : {};
+              let experimental = requested;
+              // Unlock requires the exact accept phrase so the UI checkbox alone
+              // is not enough if someone crafts a raw PUT.
+              if (requested.unlocked === true && !previous.unlocked && !companyLocked) {
+                try {
+                  experimental = acceptExperimentalDisclaimer(
+                    {
+                      ...requested,
+                      features: requested.features,
+                    },
+                    { acceptPhrase: body.experimentalAcceptPhrase },
+                  );
+                } catch (error) {
+                  if (error?.code === "experimental_accept_phrase_mismatch") {
+                    throw new ProviderConfigError("experimental_accept_phrase_mismatch");
+                  }
+                  throw error;
+                }
+                // Re-apply feature toggles the operator selected after accept.
+                experimental = normalizeExperimentalConfig({
+                  ...experimental,
+                  features: requested.features,
+                }, { companyLocked });
+              } else if (requested.unlocked !== true) {
+                experimental = normalizeExperimentalConfig({
+                  unlocked: false,
+                  acceptedAt: null,
+                  acceptedDisclaimerVersion: null,
+                  features: Object.fromEntries(
+                    Object.keys(previous.features || {}).map((id) => [id, false]),
+                  ),
+                }, { companyLocked });
+              } else {
+                experimental = normalizeExperimentalConfig({
+                  ...previous,
+                  ...requested,
+                  unlocked: true,
+                  acceptedAt: previous.acceptedAt,
+                  acceptedDisclaimerVersion: previous.acceptedDisclaimerVersion,
+                }, { companyLocked });
+              }
+              void EXPERIMENTAL_ACCEPT_PHRASE;
+              nextConfig = normalizeGatewayConfig({
+                ...nextConfig,
+                experimental,
+              });
+            }
             if (Object.hasOwn(body, "engine")) {
               nextConfig = { ...nextConfig, engine: validateEngineConfigBoundary(body.engine) };
             }
@@ -6775,6 +7663,120 @@ export async function startGateway({
         return sendJson(res, result.ok ? 200 : 400, result);
       }
 
+      // Wave C1: Skill sleep — trajectory harvest → proposal-only skill diffs.
+      if (path === "/api/skills/sleep" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const engineSkills = isPlainRecord(config.engine?.skills) ? config.engine.skills : {};
+        const sleepCfg = normalizeSkillsSleepConfig(
+          isPlainRecord(engineSkills.sleep) ? engineSkills.sleep : {},
+        );
+        if (!sleepCfg.enabled && body?.force !== true) {
+          return sendJson(res, 400, { code: "sleep_disabled", error: "sleep_disabled" });
+        }
+        // Build digests from recent sessions (JSON SoT).
+        const limit = Math.min(
+          sleepCfg.maxTrajectories,
+          Math.max(1, Number(body?.limit) || sleepCfg.maxTrajectories),
+        );
+        let sessions = [];
+        try {
+          sessions = await listSessionsForApi({ includeArchived: true });
+        } catch {
+          sessions = [];
+        }
+        const trajectories = [];
+        for (const session of (sessions || []).slice(0, limit)) {
+          try {
+            const messages = typeof store.getMessages === "function"
+              ? store.getMessages(session.id)
+              : [];
+            const full = typeof store.getSession === "function"
+              ? store.getSession(session.id)
+              : session;
+            const skillIds = Array.isArray(full?.skillIds)
+              ? full.skillIds
+              : Array.isArray(session?.skillIds)
+                ? session.skillIds
+                : [];
+            trajectories.push(digestMessagesToTrajectory(messages, {
+              sessionId: session.id,
+              status: full?.status || session?.status,
+              skillIds,
+            }));
+          } catch {
+            /* skip corrupt session */
+          }
+        }
+        // Prefer body-supplied digests when tests/offline inject them.
+        if (Array.isArray(body?.trajectories) && body.trajectories.length) {
+          trajectories.length = 0;
+          for (const t of body.trajectories.slice(0, limit)) {
+            if (t && typeof t === "object") trajectories.push(t);
+          }
+        }
+        const listed = await skillsStore.list();
+        /** @type {Map<string, object>} */
+        const enriched = new Map();
+        for (const s of listed.filter((x) => x.owned).slice(0, 40)) {
+          try {
+            const full = await skillsStore.get(s.id);
+            enriched.set(s.id, { ...s, content: full.content });
+          } catch {
+            enriched.set(s.id, s);
+          }
+        }
+        const skills = listed.map((s) => enriched.get(s.id) || s);
+        const result = await runSkillSleep({
+          dataDir,
+          trajectories,
+          skills,
+          config: { ...sleepCfg, enabled: true },
+        });
+        return sendJson(res, result.ok ? 200 : 400, result);
+      }
+
+      // Wave C2: curated skill packs (opt-in roots).
+      if (path === "/api/skills/packs" && req.method === "GET") {
+        const packs = await listSkillPacks(skillsStore);
+        return sendJson(res, 200, { packs, catalog: BUILTIN_SKILL_PACKS });
+      }
+      if (path === "/api/skills/packs/enable" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const packId = typeof body?.packId === "string" ? body.packId : "";
+        try {
+          const result = await enableSkillPack(skillsStore, packId);
+          return sendJson(res, 200, {
+            ...result,
+            skills: await skillsStore.list(),
+            roots: await skillsStore.roots(),
+            packs: await listSkillPacks(skillsStore),
+          });
+        } catch (error) {
+          return sendJson(res, 400, {
+            code: error?.code || "pack_enable_failed",
+            error: error?.message || "pack_enable_failed",
+          });
+        }
+      }
+      if (path === "/api/skills/packs/disable" && req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const packId = typeof body?.packId === "string" ? body.packId : "";
+        try {
+          const result = await disableSkillPack(skillsStore, packId);
+          return sendJson(res, 200, {
+            ...result,
+            skills: await skillsStore.list(),
+            roots: await skillsStore.roots(),
+            packs: await listSkillPacks(skillsStore),
+          });
+        } catch (error) {
+          return sendJson(res, 400, {
+            code: error?.code || "pack_disable_failed",
+            error: error?.message || "pack_disable_failed",
+          });
+        }
+      }
+
       if (path === "/api/skills/curator/proposals/apply-one" && req.method === "POST") {
         const body = await readBody(req).catch(() => ({}));
         const skillId = typeof body?.skillId === "string" ? body.skillId : "";
@@ -7630,6 +8632,19 @@ export async function startGateway({
             patch.modelId = target.model.id;
             if (target.provider.id !== current.providerId) patch.providerAccountId = undefined;
           }
+          if (Object.hasOwn(body, "codingMode")) {
+            const raw = body.codingMode;
+            if (raw === null || raw === "") {
+              patch.codingMode = undefined;
+            } else if (
+              raw === "auto" || raw === "plan" || raw === "build" || raw === "polish"
+              || raw === "deepreep" || raw === "balanced"
+            ) {
+              patch.codingMode = raw === "balanced" ? "auto" : raw;
+            } else {
+              return sendJson(res, 400, { code: "coding_mode_invalid", error: "coding_mode_invalid" });
+            }
+          }
           // Soft-archive: keep messages for hybrid memory FTS; hide from sidebar.
           if (Object.hasOwn(body, "archived")) {
             if (typeof body.archived !== "boolean") {
@@ -7724,6 +8739,46 @@ export async function startGateway({
         if (store.hasUnconsumedApprovals(sessionId)) {
           return sendJson(res, 409, { code: "approval_required", error: "approval_required" });
         }
+        // Access principal (optional tag) + hard budgets (global then per-user).
+        let accessPrincipal = null;
+        try {
+          accessPrincipal = resolveRequestPrincipal(req, {
+            required: accessControlState().requireToken,
+          });
+        } catch (error) {
+          if (error instanceof AccessTokenError) {
+            return sendJson(res, error.status || 401, { code: error.code, error: error.code });
+          }
+          throw error;
+        }
+        try {
+          const budget = await usageBudgetSnapshot();
+          if (budget.blocked) {
+            return sendJson(res, 429, {
+              code: "budget_exceeded",
+              error: "budget_exceeded",
+              reasons: budget.hardReasons,
+              budget,
+            });
+          }
+          if (accessPrincipal?.principal) {
+            const principalBudget = await principalBudgetSnapshot(accessPrincipal.principal);
+            if (principalBudget?.blocked) {
+              return sendJson(res, 429, {
+                code: "principal_budget_exceeded",
+                error: "principal_budget_exceeded",
+                reasons: principalBudget.hardReasons,
+                budget: principalBudget,
+                principalId: accessPrincipal.id,
+              });
+            }
+          }
+        } catch (error) {
+          if (error instanceof AccessTokenError) {
+            return sendJson(res, error.status || 401, { code: error.code, error: error.code });
+          }
+          /* fail-open for ledger errors only */
+        }
         await releaseFinalizedTurn(sessionId);
         if (controllers.has(sessionId) || sessionReservations.has(sessionId)) {
           return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
@@ -7734,6 +8789,7 @@ export async function startGateway({
         void runPrompt(sessionId, text, body.modelParams, messageId, reservationToken, {
           skillIds,
           ...(hasImages ? { images: body.images } : {}),
+          ...(accessPrincipal ? { accessPrincipal } : {}),
         });
         return;
       }
@@ -7810,7 +8866,7 @@ export async function startGateway({
         } catch { /* engine bundle unavailable — degrade to manual entry */ }
         const knownById = new Map(models.map(entry => [entry.id, entry]));
         const configuredModels = config.providers
-          .filter((provider) => providerIsReady(provider, secrets))
+          .filter((provider) => providerIsReady(provider, secrets, config))
           .flatMap((provider) => provider.models.map((model) => {
           const candidate = knownById.get(model.id);
           const known = candidate && sameModelEndpoint(provider.baseURL, candidate.baseURL) ? candidate : undefined;
@@ -7939,14 +8995,16 @@ export async function startGateway({
     return closePromise;
   };
 
+  const listenHost = normalizeProxyConfig(config.proxy).listenLan ? "0.0.0.0" : "127.0.0.1";
   return new Promise((resolve, reject) => {
     const onError = error => {
       if (error.code === "EADDRINUSE" && server.listening === false) {
         server.removeListener("error", onError);
         server.once("error", fallbackError => { void cronScheduler.stop(); reject(fallbackError); });
-        server.listen(0, "127.0.0.1", () => resolve({
+        server.listen(0, listenHost, () => resolve({
           port: server.address().port,
           token: gatewayToken,
+          host: listenHost,
           close: closeGateway,
         }));
         return;
@@ -7955,9 +9013,10 @@ export async function startGateway({
       reject(error);
     };
     server.once("error", onError);
-    server.listen(preferredPort, "127.0.0.1", () => resolve({
+    server.listen(preferredPort, listenHost, () => resolve({
       port: server.address().port,
       token: gatewayToken,
+      host: listenHost,
       close: closeGateway,
     }));
   });

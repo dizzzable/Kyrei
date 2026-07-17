@@ -1,10 +1,15 @@
-import { Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { Plus, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button, Input, Textarea } from "@/components/ui";
 import { useI18n } from "@/i18n";
 import type { PromptProfile } from "@/lib/types";
-import { createPromptProfile, type PromptProfilesDraft } from "./team-profile";
+import {
+  BUILTIN_PROMPT_PROFILE_IDS,
+  createPromptProfile,
+  mergeBuiltinPromptProfiles,
+  type PromptProfilesDraft,
+} from "./team-profile";
 
 const SELECT_CLASS = "h-8 w-full rounded-md border border-border bg-surface px-2.5 text-[11px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -55,6 +60,21 @@ export function PromptProfilesEditor({ draft, disabled, onChange }: PromptProfil
     setSelectedId(nextSelected);
   };
 
+  const seedStarters = () => {
+    const next = mergeBuiltinPromptProfiles(draft);
+    onChange(next);
+    if (!selectedId && next.promptProfiles[0]) setSelectedId(next.promptProfiles[0].id);
+  };
+
+  const useMainBuiltin = () => {
+    const next = mergeBuiltinPromptProfiles(draft);
+    onChange({
+      ...next,
+      activePromptProfileId: BUILTIN_PROMPT_PROFILE_IDS.main,
+    });
+    setSelectedId(BUILTIN_PROMPT_PROFILE_IDS.main);
+  };
+
   return (
     <section className="max-w-4xl space-y-3 border-t border-border-soft pt-6" aria-labelledby="prompt-profile-settings-title">
       <div className="flex items-start gap-3">
@@ -66,6 +86,7 @@ export function PromptProfilesEditor({ draft, disabled, onChange }: PromptProfil
             {t("settings.promptProfiles.title")}
           </h3>
           <p className="mt-1 max-w-2xl text-[10.5px] leading-4 text-muted">{t("settings.promptProfiles.hint")}</p>
+          <p className="mt-1 max-w-2xl text-[10px] leading-4 text-faint">{t("settings.promptProfiles.oobHint")}</p>
         </div>
       </div>
 
@@ -96,7 +117,14 @@ export function PromptProfilesEditor({ draft, disabled, onChange }: PromptProfil
           </select>
         </label>
 
-        <div className="flex items-end gap-1.5">
+        <div className="flex flex-wrap items-end gap-1.5">
+          <Button variant="outline" size="sm" disabled={disabled} onClick={seedStarters} title={t("settings.promptProfiles.seedStartersHint")}>
+            <Sparkles className="size-3.5" aria-hidden />
+            {t("settings.promptProfiles.seedStarters")}
+          </Button>
+          <Button variant="ghost" size="sm" disabled={disabled} onClick={useMainBuiltin} title={t("settings.promptProfiles.useMainHint")}>
+            {t("settings.promptProfiles.useMain")}
+          </Button>
           <Button variant="outline" size="sm" disabled={disabled || draft.promptProfiles.length >= 64} onClick={addProfile}>
             <Plus className="size-3.5" aria-hidden />{t("settings.promptProfiles.add")}
           </Button>

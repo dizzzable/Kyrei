@@ -4,7 +4,15 @@
  * the lease remains held until that exact attempt terminates.
  */
 
-import { isAuthFailure, isRetryable, isToolUnsupported, retryAfterMsOf, statusOf } from "./errors.js";
+import {
+  classifyProviderFailure,
+  isAuthFailure,
+  isRetryable,
+  isToolUnsupported,
+  retryAfterMsOf,
+  statusOf,
+  type ProviderFailureClass,
+} from "./errors.js";
 
 export type ProviderStreamAttemptPhase = "start" | "probe" | "stream";
 export type ProviderStreamAttemptOutcomeKind =
@@ -21,6 +29,8 @@ export interface ProviderStreamAttemptOutcome {
   phase: ProviderStreamAttemptPhase;
   statusCode?: number;
   retryAfterMs?: number;
+  /** Enum-only failure class for account-pool anti-false-ban (no raw messages). */
+  failureClass?: ProviderFailureClass;
 }
 
 export interface ProviderStreamAttemptLifecycle {
@@ -138,12 +148,17 @@ function attemptOutcome(
 ): ProviderStreamAttemptOutcome {
   const statusCode = error === undefined ? undefined : statusOf(error);
   const retryAfterMs = error === undefined ? undefined : retryAfterMsOf(error);
+  const attachClass = error !== undefined
+    && outcome !== "interrupted"
+    && outcome !== "success"
+    && outcome !== "capacity-unavailable";
   return {
     candidateIndex,
     outcome,
     phase,
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    ...(attachClass ? { failureClass: classifyProviderFailure(error) } : {}),
   };
 }
 
@@ -194,12 +209,19 @@ export function streamAttemptsFromError(error: unknown): ProviderStreamAttemptOu
     if (!phases.includes(source["phase"] as ProviderStreamAttemptPhase)) return [];
     const statusCode = Number(source["statusCode"]);
     const retryAfterMs = Number(source["retryAfterMs"]);
+    const failureClasses: ProviderFailureClass[] = [
+      "network", "rate_limit", "server", "auth_definite", "auth_soft", "client", "unknown",
+    ];
+    const failureClass = failureClasses.includes(source["failureClass"] as ProviderFailureClass)
+      ? source["failureClass"] as ProviderFailureClass
+      : undefined;
     return [{
       candidateIndex,
       outcome: source["outcome"] as ProviderStreamAttemptOutcomeKind,
       phase: source["phase"] as ProviderStreamAttemptPhase,
       ...(Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? { statusCode } : {}),
       ...(Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs: Math.floor(retryAfterMs) } : {}),
+      ...(failureClass ? { failureClass } : {}),
     }];
   });
 }

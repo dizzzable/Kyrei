@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom";
 import {
   Archive,
+  BarChart3,
   Bell,
   Blocks,
   Box,
@@ -9,6 +10,7 @@ import {
   FolderOpen,
   Info,
   Keyboard,
+  Layers3,
   MessageSquare,
   Palette,
   Network,
@@ -33,6 +35,10 @@ import { ModelSettings } from "@/components/settings/models/ModelSettings";
 import { ProvidersSettings } from "@/components/settings/providers/ProvidersSettings";
 import { SkillsSettings } from "@/components/settings/SkillsSettings";
 import { SessionsSettings } from "@/components/settings/SessionsSettings";
+import { AboutUpdatePanel } from "@/components/settings/AboutUpdatePanel";
+import { UsageSettings } from "@/components/settings/UsageSettings";
+import { CapacitySettings } from "@/components/settings/CapacitySettings";
+import { ExperimentalSettings } from "@/components/settings/ExperimentalSettings";
 import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
 import { KyreiMark } from "@/components/brand/KyreiMark";
 import {
@@ -72,6 +78,8 @@ const SECTION_ICONS: Record<VisibleSettingsSectionId, ReactNode> = {
   chat: <MessageSquare className="size-4" />,
   memory: <BrainCircuit className="size-4" />,
   sessions: <Archive className="size-4" />,
+  usage: <BarChart3 className="size-4" />,
+  capacity: <Layers3 className="size-4" />,
   appearance: <Palette className="size-4" />,
   notifications: <Bell className="size-4" />,
   keybinds: <Keyboard className="size-4" />,
@@ -876,11 +884,64 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                 />
               )}
 
+              {visibleSection === "usage" && (
+                <UsageSettings
+                  config={config}
+                  onSaved={(next) => {
+                    setProvider(next.provider);
+                    setModel(next.model);
+                    onSaved(next);
+                    flash();
+                  }}
+                />
+              )}
+
+              {visibleSection === "capacity" && (
+                <CapacitySettings
+                  config={config}
+                  onSaved={(next) => {
+                    setProvider(next.provider);
+                    setModel(next.model);
+                    onSaved(next);
+                    flash();
+                  }}
+                />
+              )}
+
               {visibleSection === "chat" && (
                 <div className="space-y-6">
                   <section>
                     <GroupTitle>{t("settings.groups.chat")}</GroupTitle>
                     <div className="divide-y divide-border-soft">
+                      <EnumField
+                        label={t("settings.codingMode.label")}
+                        hint={t("settings.codingMode.hint")}
+                        value={((): "auto" | "plan" | "build" | "polish" | "deepreep" => {
+                          const raw = String(getEngineField("codingMode", "auto"));
+                          if (raw === "plan" || raw === "build" || raw === "polish" || raw === "deepreep") return raw;
+                          return "auto";
+                        })()}
+                        options={[
+                          { value: "auto", label: t("settings.codingMode.auto") },
+                          { value: "plan", label: t("settings.codingMode.plan") },
+                          { value: "build", label: t("settings.codingMode.build") },
+                          { value: "polish", label: t("settings.codingMode.polish") },
+                          { value: "deepreep", label: t("settings.codingMode.deepreep") },
+                        ]}
+                        onChange={(value) => {
+                          setEngineField("codingMode", value);
+                          const assignments = config.modelAssignments;
+                          const pick = value === "build" || value === "polish" || value === "plan" || value === "deepreep"
+                            ? (assignments as Record<string, { providerId?: string; modelId?: string } | undefined> | undefined)?.[value]
+                            : undefined;
+                          if (pick?.providerId && pick?.modelId) {
+                            void gateway.setConfig({
+                              activeProviderId: pick.providerId,
+                              activeModelId: pick.modelId,
+                            }).then((next) => onSaved(next)).catch(() => undefined);
+                          }
+                        }}
+                      />
                       <Field label={t("settings.personality.label")} hint={t("settings.personality.hint")} stacked>
                         <div className="space-y-2">
                           <div className="flex flex-wrap gap-1.5">
@@ -1679,6 +1740,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
 
               {visibleSection === "advanced" && (
                 <div className="space-y-6">
+                  <ExperimentalSettings config={config} onSaved={onSaved} />
                   <section>
                     <GroupTitle>{t("settings.groups.maintenance")}</GroupTitle>
                     <div className="divide-y divide-border-soft">
@@ -1727,6 +1789,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                     <div className="flex justify-between py-2"><span className="text-muted">{t("settings.about.engine")}</span><span>{t("settings.about.engineValue")}</span></div>
                     <div className="flex justify-between py-2"><span className="text-muted">{t("settings.about.provider")}</span><span className="truncate">{provider || "—"}</span></div>
                   </div>
+                  <AboutUpdatePanel />
                 </div>
               )}
             </div>

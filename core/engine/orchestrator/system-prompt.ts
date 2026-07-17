@@ -4,5 +4,10 @@
  * orchestrator import stable.
  */
 
-export { buildSystemPrompt, PROMPT_VERSION, PROMPT_CHANGELOG } from "../prompt/system.js";
-export type { SystemPromptInput } from "../prompt/system.js";
+export {
+  buildSystemPrompt,
+  buildSystemPromptParts,
+  PROMPT_VERSION,
+  PROMPT_CHANGELOG,
+} from "../prompt/system.js";
+export type { SystemPromptInput, SystemPromptParts } from "../prompt/system.js";

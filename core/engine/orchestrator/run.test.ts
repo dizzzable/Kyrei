@@ -4,7 +4,7 @@ const streamTextMock = vi.fn();
 const generateTextMock = vi.fn();
 const isStepCountMock = vi.fn((steps: number) => ({ steps }));
 const assembleSystemContextMock = vi.fn();
-const buildSystemPromptMock = vi.fn(() => "system prompt");
+const buildSystemPromptPartsMock = vi.fn(() => ({ stable: "system prompt" }));
 const isWorkspaceDirMock = vi.fn();
 const openStreamMock = vi.fn();
 const bridgeStreamMock = vi.fn();
@@ -38,6 +38,11 @@ vi.mock("../provider/build.js", () => ({
   buildModel: buildModelMock,
   buildProviderOptions: buildProviderOptionsMock,
   hasProviderCredentials: () => true,
+  resolveTurnModelParams: (params: { effort?: string } | undefined, def?: string) => {
+    if (params?.effort) return params;
+    if (def && def !== "off" && def !== "none") return { ...(params ?? {}), effort: def };
+    return params;
+  },
 }));
 
 vi.mock("../provider/registry.js", () => ({
@@ -111,7 +116,7 @@ vi.mock("../memory/layers.js", () => ({
 }));
 
 vi.mock("./system-prompt.js", () => ({
-  buildSystemPrompt: buildSystemPromptMock,
+  buildSystemPromptParts: buildSystemPromptPartsMock,
 }));
 
 vi.mock("./stop-conditions.js", () => ({
@@ -174,7 +179,7 @@ describe("runKyreiChat project context wiring", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    buildSystemPromptMock.mockReturnValue("system prompt");
+    buildSystemPromptPartsMock.mockReturnValue({ stable: "system prompt" });
     buildToolsMock.mockReturnValue({ read_file: { name: "read_file" } });
     buildGBrainToolsMock.mockReturnValue({});
     buildPlanningToolsMock.mockReturnValue({});
@@ -213,7 +218,7 @@ describe("runKyreiChat project context wiring", () => {
     });
 
     expect(assembleSystemContextMock).toHaveBeenCalledWith({ workspace: "/workspace" });
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(
       expect.objectContaining({
         workspace: "/workspace",
         hasTools: true,
@@ -275,7 +280,7 @@ describe("runKyreiChat project context wiring", () => {
     expect(buildMemorySearchToolsMock).toHaveBeenCalledWith(
       expect.objectContaining({ workspace: "/workspace", ltmEnabled: true }),
     );
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(
       expect.objectContaining({
         hasDecisionTools: true,
         hasPlanningTools: true,
@@ -515,7 +520,7 @@ describe("runKyreiChat project context wiring", () => {
       route: { providerId: "mock-provider", modelId: "mock-model" },
     });
 
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(
       expect.objectContaining({
         projectContext: undefined,
       }),
@@ -535,7 +540,7 @@ describe("runKyreiChat project context wiring", () => {
     });
 
     expect(assembleSystemContextMock).not.toHaveBeenCalled();
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(
       expect.objectContaining({
         workspace: undefined,
         hasTools: true,
@@ -559,7 +564,7 @@ describe("runKyreiChat project context wiring", () => {
       model: "mock-model",
     });
 
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(
       expect.objectContaining({ hasTools: false, hasDelegation: false }),
     );
     expect(openStreamMock).toHaveBeenCalledWith(2, false, expect.any(Function));
@@ -639,7 +644,7 @@ describe("runKyreiChat project context wiring", () => {
       model: "mock-model",
     });
 
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(expect.objectContaining({ hasBrainTools: true, hasTools: true }));
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(expect.objectContaining({ hasBrainTools: true, hasTools: true }));
     expect(openStreamMock).toHaveBeenCalledWith(2, true, expect.any(Function));
   });
 
@@ -896,6 +901,8 @@ describe("runKyreiChat project context wiring", () => {
       credentials: { apiKey: "primary-key" },
       model: "shared-model",
       headers: { "X-Primary": "primary-header" },
+      identifyEngine: false,
+      fetch: expect.any(Function),
     });
     expect(buildModelMock).toHaveBeenNthCalledWith(2, {
       protocol: "anthropic-messages",
@@ -904,6 +911,8 @@ describe("runKyreiChat project context wiring", () => {
       credentials: { apiKey: "backup-key" },
       model: "shared-model",
       headers: { "X-Backup": "backup-header" },
+      identifyEngine: false,
+      fetch: expect.any(Function),
     });
     expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" });
     expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" });
@@ -1124,6 +1133,8 @@ describe("runKyreiChat project context wiring", () => {
       credentials: { apiKey: "main-secret" },
       model: "main-model",
       headers: { "X-Main": "main-header" },
+      identifyEngine: false,
+      fetch: expect.any(Function),
     });
     expect(buildModelMock).toHaveBeenCalledWith({
       protocol: "anthropic-messages",
@@ -1132,18 +1143,21 @@ describe("runKyreiChat project context wiring", () => {
       credentials: { apiKey: "worker-secret" },
       model: "worker-model",
       headers: { "X-Worker": "worker-header" },
+      identifyEngine: false,
+      fetch: expect.any(Function),
     });
     expect(parentOptions["model"]).toEqual({ builtFor: "main-model" });
     const childOptions = generateTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(childOptions["model"]).toEqual({ builtFor: "worker-model" });
+    // Mock returns protocol-keyed bags; worker inherits turn effort from modelParams.
     expect(childOptions["providerOptions"]).toEqual({
-      "anthropic-messages": { effort: "provider-default" },
+      "anthropic-messages": { effort: "high" },
     });
     expect(parentOptions["providerOptions"]).toEqual({
       "openai-chat": { effort: "high" },
     });
     expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" });
-    expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", undefined);
+    expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" });
     expect(acquire).toHaveBeenCalledOnce();
     expect(acquire).toHaveBeenCalledWith({
       providerId: "worker-provider",
@@ -1318,7 +1332,7 @@ describe("runKyreiChat project context wiring", () => {
       apiKey: "search-secret",
       model: "search-model",
     }));
-    expect(buildSystemPromptMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(expect.objectContaining({
       team: {
         name: "Core team",
         workflow: "supervisor",

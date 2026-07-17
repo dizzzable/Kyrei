@@ -67,6 +67,90 @@ export interface ModelParams {
   maxOutputOverride?: number;
 }
 
+/** Soft/hard spend caps from engine.usageBudget. */
+export interface UsageBudgetConfig {
+  enabled: boolean;
+  window: "day" | "month";
+  softCostUsd: number | null;
+  hardCostUsd: number | null;
+  softTokens: number | null;
+  hardTokens: number | null;
+}
+
+export interface UsageBudgetSnapshot {
+  config: UsageBudgetConfig;
+  level: "ok" | "soft" | "hard";
+  blocked: boolean;
+  warnings: string[];
+  hardReasons: string[];
+  usage: {
+    totalTokens: number;
+    costUsd: number;
+    requestCount: number;
+    sinceMs: number;
+    window: "day" | "month";
+  };
+  remaining: {
+    softCostUsd: number | null;
+    hardCostUsd: number | null;
+    softTokens: number | null;
+    hardTokens: number | null;
+  };
+}
+
+/** Durable usage ledger summary (`GET /api/usage`). */
+export interface UsageSummary {
+  days: number;
+  requestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  byProvider: Array<{ key: string; requestCount: number; totalTokens: number; costUsd: number }>;
+  byModel: Array<{ key: string; requestCount: number; totalTokens: number; costUsd: number }>;
+  byDay: Array<{ day: string; requestCount: number; totalTokens: number; costUsd: number }>;
+  budget?: UsageBudgetSnapshot;
+}
+
+/** One accounting row from `GET /api/usage/events` (no prompts/secrets). */
+export interface UsageLedgerEvent {
+  id: string;
+  ts: string;
+  kind: string;
+  sessionId?: string;
+  providerId?: string;
+  accountId?: string;
+  modelId?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  status?: string;
+  latencyMs?: number;
+  accessTokenId?: string;
+  principalLabel?: string;
+}
+
+/** Public employee principal (hash never exposed). */
+export interface AccessPrincipal {
+  id: string;
+  label: string;
+  prefix: string;
+  enabled: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+  softCostUsd: number | null;
+  hardCostUsd: number | null;
+  softTokens: number | null;
+  hardTokens: number | null;
+  budgetWindow: "day" | "month";
+}
+
+export interface AccessControlPublic {
+  requireToken: boolean;
+  principals: AccessPrincipal[];
+}
+
 const launchParams = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
 
 function resolveBase(): string {
@@ -166,8 +250,141 @@ export const gateway = {
     pipelines: AppConfig["pipelines"];
     workspace: string;
     engine: Record<string, unknown>;
+    proxy: AppConfig["proxy"];
+    accessControl: AppConfig["accessControl"];
+    capacity: AppConfig["capacity"];
+    experimental: AppConfig["experimental"];
+    /** Required once when unlocking the experimental gate. */
+    experimentalAcceptPhrase: string;
   }>) =>
     json<AppConfig>("/api/config", { method: "PUT", body: JSON.stringify(patch) }),
+
+  getBrowserSubscriptionAuth: () =>
+    json<{
+      allowed: boolean;
+      vendors: Array<{ id: string; label: string; defaultBaseURL: string; docsHint?: string; protocol?: string }>;
+      sessions: Array<{
+        id: string;
+        vendorId: string;
+        label: string;
+        status: string;
+        providerId?: string | null;
+        hasStoredToken?: boolean;
+        updatedAt?: string;
+        flow?: string;
+        userCode?: string;
+        verificationUri?: string;
+      }>;
+      profiles: Array<{
+        id: string;
+        label: string;
+        vendorId?: string;
+        clientId: string;
+        deviceAuthorizationEndpoint: string;
+        tokenEndpoint: string;
+        scope?: string;
+        hasClientSecret?: boolean;
+      }>;
+      activeProfileId?: string;
+    }>("/api/experimental/browser-subscription"),
+  saveBrowserSubscriptionProfile: (input: {
+    id?: string;
+    label?: string;
+    vendorId?: string;
+    clientId: string;
+    deviceAuthorizationEndpoint: string;
+    tokenEndpoint: string;
+    scope?: string;
+    clientSecret?: string;
+    clearClientSecret?: boolean;
+  }) =>
+    json<{ profile: { id: string; label: string; hasClientSecret?: boolean }; snapshot: unknown }>(
+      "/api/experimental/browser-subscription/profiles",
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  activateBrowserSubscriptionProfile: (profileId: string) =>
+    json<{ snapshot: unknown }>(
+      `/api/experimental/browser-subscription/profiles/${encodeURIComponent(profileId)}/activate`,
+      { method: "POST", body: "{}" },
+    ),
+  deleteBrowserSubscriptionProfile: (profileId: string) =>
+    json<{ snapshot: unknown }>(
+      `/api/experimental/browser-subscription/profiles/${encodeURIComponent(profileId)}`,
+      { method: "DELETE" },
+    ),
+  startBrowserSubscriptionSession: (input: {
+    vendorId: string;
+    label?: string;
+    providerId?: string;
+    flow?: "manual" | "device";
+    profileId?: string;
+    /** Full registration, or partial overrides when profileId is set. */
+    deviceFlow?: {
+      clientId?: string;
+      deviceAuthorizationEndpoint?: string;
+      tokenEndpoint?: string;
+      scope?: string;
+      clientSecret?: string;
+    };
+  }) =>
+    json<{
+      session: {
+        id: string;
+        status: string;
+        vendorId: string;
+        label: string;
+        flow?: string;
+        userCode?: string;
+        verificationUri?: string;
+        verificationUriComplete?: string;
+        pollIntervalSec?: number;
+        deviceExpiresAt?: string;
+      };
+      nextStep: string;
+      snapshot: unknown;
+    }>("/api/experimental/browser-subscription/sessions", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  pollBrowserSubscriptionSession: (sessionId: string) =>
+    json<{
+      session: {
+        id: string;
+        status: string;
+        userCode?: string;
+        verificationUri?: string;
+        pollIntervalSec?: number;
+        errorCode?: string;
+      };
+      pollStatus: string;
+      snapshot: unknown;
+    }>(
+      `/api/experimental/browser-subscription/sessions/${encodeURIComponent(sessionId)}/poll`,
+      { method: "POST", body: "{}" },
+    ),
+  bindBrowserSubscriptionToken: (
+    sessionId: string,
+    input: { accessToken: string; refreshToken?: string; expiresAt?: string },
+  ) =>
+    json<{ session: { id: string; status: string }; snapshot: unknown }>(
+      `/api/experimental/browser-subscription/sessions/${encodeURIComponent(sessionId)}/token`,
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  linkBrowserSubscriptionSession: (sessionId: string, providerId: string) =>
+    json<{ snapshot: unknown; config?: AppConfig }>(
+      `/api/experimental/browser-subscription/sessions/${encodeURIComponent(sessionId)}/link`,
+      { method: "POST", body: JSON.stringify({ providerId }) },
+    ),
+  revokeBrowserSubscriptionSession: (sessionId: string) =>
+    json<{ session: unknown; snapshot: unknown }>(
+      `/api/experimental/browser-subscription/sessions/${encodeURIComponent(sessionId)}/revoke`,
+      { method: "POST", body: "{}" },
+    ),
+  deleteBrowserSubscriptionSession: (sessionId: string) =>
+    json<{ snapshot: unknown }>(
+      `/api/experimental/browser-subscription/sessions/${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+    ),
   getPipelines: () => json<PipelinesConfig>("/api/pipelines"),
   setPipelines: (pipelines: PipelinesConfig) =>
     json<PipelinesConfig>("/api/pipelines", { method: "PUT", body: JSON.stringify(pipelines) }),
@@ -434,6 +651,52 @@ export const gateway = {
       },
     ),
 
+  /** Wave C1: skill sleep (trajectory harvest → proposals only). */
+  runSkillSleep: (input?: { force?: boolean; limit?: number; trajectories?: unknown[] }) =>
+    json<{
+      ok: boolean;
+      proposals?: Array<Record<string, unknown>>;
+      summary?: string;
+      error?: string;
+      fileName?: string;
+      proposalPath?: string;
+    }>("/api/skills/sleep", { method: "POST", body: JSON.stringify(input ?? {}) }),
+
+  /** Wave C2: curated skill packs. */
+  listSkillPacks: () =>
+    json<{
+      packs: Array<{
+        id: string;
+        name: string;
+        description: string;
+        tags?: string[];
+        path: string;
+        available: boolean;
+        skillCount: number;
+        enabled: boolean;
+      }>;
+    }>("/api/skills/packs"),
+  enableSkillPack: (packId: string) =>
+    json<{
+      ok: boolean;
+      packId?: string;
+      already?: boolean;
+      skills?: SkillInfo[];
+      roots?: SkillRoot[];
+      packs?: Array<Record<string, unknown>>;
+      error?: string;
+    }>("/api/skills/packs/enable", { method: "POST", body: JSON.stringify({ packId }) }),
+  disableSkillPack: (packId: string) =>
+    json<{
+      ok: boolean;
+      packId?: string;
+      already?: boolean;
+      skills?: SkillInfo[];
+      roots?: SkillRoot[];
+      packs?: Array<Record<string, unknown>>;
+      error?: string;
+    }>("/api/skills/packs/disable", { method: "POST", body: JSON.stringify({ packId }) }),
+
   listCronJobs: () => json<{ jobs: CronJob[] }>("/api/cron/jobs").then((result) => result.jobs),
   createCronJob: (input: { name: string; prompt: string; schedule: string; enabled?: boolean }) =>
     json<{ job: CronJob }>("/api/cron/jobs", { method: "POST", body: JSON.stringify(input) }).then((result) => result.job),
@@ -546,6 +809,49 @@ export const gateway = {
       method: "POST",
       body: JSON.stringify({ fileName, applyMode }),
     }),
+  /** Durable multi-provider usage summary (accounting; no secrets). */
+  getUsageSummary: (days = 30) =>
+    json<UsageSummary>(`/api/usage?days=${encodeURIComponent(String(days))}`),
+  getUsageBudget: () => json<UsageBudgetSnapshot>("/api/usage/budget"),
+  getUsageEvents: (limit = 200) =>
+    json<{ events: UsageLedgerEvent[] }>(
+      `/api/usage/events?limit=${encodeURIComponent(String(limit))}`,
+    ).then((r) => r.events),
+
+  getAccessControl: () => json<AccessControlPublic>("/api/access-tokens"),
+  createAccessToken: (input: {
+    label?: string;
+    budgetWindow?: "day" | "month";
+    softCostUsd?: number | null;
+    hardCostUsd?: number | null;
+    softTokens?: number | null;
+    hardTokens?: number | null;
+  }) =>
+    json<{ principal: AccessPrincipal; token: string; accessControl: AccessControlPublic }>(
+      "/api/access-tokens",
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  setAccessControlRequireToken: (requireToken: boolean) =>
+    json<AccessControlPublic>("/api/access-tokens", {
+      method: "PUT",
+      body: JSON.stringify({ requireToken }),
+    }),
+  patchAccessToken: (id: string, patch: Partial<AccessPrincipal> & { budgetWindow?: "day" | "month" }) =>
+    json<{ principal: AccessPrincipal; accessControl: AccessControlPublic }>(
+      `/api/access-tokens/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  deleteAccessToken: (id: string) =>
+    json<{ ok: boolean; accessControl: AccessControlPublic }>(
+      `/api/access-tokens/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+  regenerateAccessToken: (id: string) =>
+    json<{ principal: AccessPrincipal; token: string; accessControl: AccessControlPublic }>(
+      `/api/access-tokens/${encodeURIComponent(id)}/regenerate`,
+      { method: "POST", body: "{}" },
+    ),
+
   deleteSession: (id: string) => json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   renameSession: (id: string, title: string) =>
     json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ title }) }),
@@ -554,6 +860,11 @@ export const gateway = {
       method: "PATCH",
       body: JSON.stringify({ providerId, modelId }),
     }).then((result) => result.session),
+  setSessionCodingMode: (id: string, codingMode: "auto" | "plan" | "build" | "polish" | "deepreep") =>
+    json<{ ok: boolean; session?: SessionInfo }>(`/api/sessions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ codingMode }),
+    }),
   getMessages: (id: string) =>
     json<{ messages: import("./types").StoredChatMessage[] }>(
       `/api/sessions/${encodeURIComponent(id)}/messages`,

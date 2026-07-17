@@ -125,12 +125,16 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
     }
   };
 
-  const saveWorker = async (worker: ModelRef | undefined) => {
+  const saveAssignment = async (
+    role: "worker" | "build" | "polish" | "plan" | "deepreep",
+    value: ModelRef | undefined,
+  ) => {
     setBusy(true);
     setFailed(false);
     try {
-      const nextAssignments = { ...(config.modelAssignments ?? {}), ...(worker ? { worker } : {}) };
-      if (!worker) delete nextAssignments.worker;
+      const nextAssignments = { ...(config.modelAssignments ?? {}) };
+      if (value) nextAssignments[role] = value;
+      else delete nextAssignments[role];
       onSaved(await gateway.setConfig({ modelAssignments: nextAssignments }));
     } catch {
       setFailed(true);
@@ -244,7 +248,55 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
           assignment={config.modelAssignments?.worker}
           providers={config.providers}
           busy={busy}
-          onChange={(worker) => void saveWorker(worker)}
+          onChange={(worker) => void saveAssignment("worker", worker)}
+        />
+        <ModelAssignmentRow
+          main={main}
+          assignment={config.modelAssignments?.build}
+          providers={config.providers}
+          busy={busy}
+          onChange={(build) => void saveAssignment("build", build)}
+          labelKey="settings.model.build.label"
+          badgeKey="settings.model.build.badge"
+          descriptionKey="settings.model.build.description"
+          dialogTitleKey="settings.model.build.dialogTitle"
+          dialogDescriptionKey="settings.model.build.dialogDescription"
+        />
+        <ModelAssignmentRow
+          main={main}
+          assignment={config.modelAssignments?.polish}
+          providers={config.providers}
+          busy={busy}
+          onChange={(polish) => void saveAssignment("polish", polish)}
+          labelKey="settings.model.polish.label"
+          badgeKey="settings.model.polish.badge"
+          descriptionKey="settings.model.polish.description"
+          dialogTitleKey="settings.model.polish.dialogTitle"
+          dialogDescriptionKey="settings.model.polish.dialogDescription"
+        />
+        <ModelAssignmentRow
+          main={main}
+          assignment={config.modelAssignments?.plan}
+          providers={config.providers}
+          busy={busy}
+          onChange={(plan) => void saveAssignment("plan", plan)}
+          labelKey="settings.model.plan.label"
+          badgeKey="settings.model.plan.badge"
+          descriptionKey="settings.model.plan.description"
+          dialogTitleKey="settings.model.plan.dialogTitle"
+          dialogDescriptionKey="settings.model.plan.dialogDescription"
+        />
+        <ModelAssignmentRow
+          main={main}
+          assignment={config.modelAssignments?.deepreep}
+          providers={config.providers}
+          busy={busy}
+          onChange={(deepreep) => void saveAssignment("deepreep", deepreep)}
+          labelKey="settings.model.deepreep.label"
+          badgeKey="settings.model.deepreep.badge"
+          descriptionKey="settings.model.deepreep.description"
+          dialogTitleKey="settings.model.deepreep.dialogTitle"
+          dialogDescriptionKey="settings.model.deepreep.dialogDescription"
         />
       </section>
 
