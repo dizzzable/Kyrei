@@ -3208,16 +3208,27 @@ export async function startGateway({
   };
 
   /**
-   * OOB: create local SQLite files + .kyrei dirs without user clicking Rebuild.
-   * Fail-open — never blocks gateway start.
+   * OOB: create local SQLite + .kyrei layout when the user opens a project folder.
+   * Awaited on workspace set so chat/memory work immediately — no manual Rebuild.
+   * Fail-open on errors (still returns; never blocks open forever).
    */
   const bootstrapLocalDatabases = async (reason = "start") => {
+    const result = {
+      ok: true,
+      reason,
+      sessionMirror: false,
+      workspace: false,
+      reindexed: false,
+      error: undefined,
+    };
     try {
       // Session mirror DB under app dataDir (chat dual-write).
-      await ensureSessionMirror().catch(() => null);
+      const mirror = await ensureSessionMirror().catch(() => null);
+      result.sessionMirror = Boolean(mirror);
       const mod = await getEngine();
       if (typeof mod?.bootstrapGatewayLocalStores === "function") {
         const gw = mod.bootstrapGatewayLocalStores(dataDir);
+        result.sessionMirror = result.sessionMirror || gw.ok;
         if (!gw.ok) {
           console.warn("[kyrei bootstrap] session-mirror:", gw.sessionMirror?.error ?? "failed");
         }
@@ -3229,19 +3240,31 @@ export async function startGateway({
           config: builtinMemoryIndexConfig(),
           seedMemoryMd: true,
         });
+        result.workspace = Boolean(ws.ok);
         if (!ws.ok) {
           console.warn(
             `[kyrei bootstrap] workspace (${reason}):`,
             ws.index?.error || ws.graph?.error || "partial",
           );
-        } else if (ws.seededMemoryMd) {
-          // Seed file exists — project it so index is not empty on first open.
-          void reindexBuiltinMemoryIndex().catch(() => undefined);
+        }
+        // Always warm the projection after open-folder so index is not empty
+        // and memory_search works without a Settings click.
+        if (ws.index?.ok !== false) {
+          try {
+            const reindex = await reindexBuiltinMemoryIndex();
+            result.reindexed = reindex?.ok === true;
+          } catch {
+            /* fail-open */
+          }
         }
       }
+      result.ok = result.sessionMirror || result.workspace;
     } catch (error) {
-      console.warn("[kyrei bootstrap] skipped:", error?.message ?? error);
+      result.ok = false;
+      result.error = error?.message ?? String(error);
+      console.warn("[kyrei bootstrap] skipped:", result.error);
     }
+    return result;
   };
 
   /** Rebuild LTM runtime snapshot (active-context / last-recall) from the ledger. */
@@ -6452,8 +6475,11 @@ export async function startGateway({
             invalidateAllProviderRuntimes();
             if (selectionExplicit) rebindUnreadyIdleSessions(config, secrets);
             const nextWorkspace = typeof nextConfig.workspace === "string" ? nextConfig.workspace.trim() : "";
-            if (nextWorkspace && nextWorkspace !== previousWorkspace.trim()) {
-              void bootstrapLocalDatabases("workspace-set");
+            const prevWs = previousWorkspace.trim().replace(/\\/g, "/").toLowerCase();
+            const nextWs = nextWorkspace.replace(/\\/g, "/").toLowerCase();
+            if (nextWorkspace && nextWs !== prevWs) {
+              // Await so "Open folder" finishes with DBs ready — not fire-and-forget.
+              await bootstrapLocalDatabases("workspace-set");
             }
             return publicGatewayConfig(config, secrets);
           });
@@ -7983,6 +8009,9 @@ export async function startGateway({
             config = nextConfig;
             return publicGatewayConfig(config, secrets);
           });
+          // Same OOB path as setConfig({ workspace }) — DBs before UI continues.
+          await bootstrapLocalDatabases("choose-folder");
+          snapshot = publicConfig();
         }
         return sendJson(res, 200, { folder: folder || "", ...snapshot });
       }
