@@ -37,11 +37,12 @@
 учётной записью](docs/linux-launch.md). Не используйте `sudo kyrei` и не
 добавляйте `--no-sandbox`.
 
-API-ключи на Linux требуют **Secret Service** в той же графической сессии
-(GNOME/Cinnamon/XFCE/MATE/Budgie/COSMIC → `gnome-keyring`, KDE → KWallet,
-Hyprland/Sway/niri → поставьте keyring сами). Wayland поддерживается; если
-хранилище «не видно», почти всегда нет разблокированного keyring, а не
-запрет Wayland. Подробности и матрица DE/WM — в
+API-ключи на Linux требуют **Secret Service** в той же графической сессии.
+Нативные DEB- и Arch-пакеты сами ставят `gnome-keyring` вместе с Kyrei;
+KDE/KWallet и KeePassXC остаются альтернативами. Wayland поддерживается; если
+хранилище «не видно», почти всегда нет разблокированного keyring, а не запрет
+Wayland. AppImage использует keyring хост-системы и не может установить его сам.
+Подробности, путь зашифрованного контейнера и матрица DE/WM — в
 [`docs/linux-launch.md`](docs/linux-launch.md).
 
 Каждый релиз содержит `SHA256SUMS.txt`. Пока проект не получил сертификаты
@@ -50,7 +51,7 @@ Microsoft и Apple, Windows- и macOS-сборки публикуются без
 
 ## Быстрый старт для разработки
 
-Требуется Node.js 22 или новее.
+Требуется Node.js 24 или новее.
 
 ```bash
 npm ci

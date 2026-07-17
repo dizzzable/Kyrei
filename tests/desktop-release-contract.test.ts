@@ -40,4 +40,16 @@ describe("desktop release contract", () => {
       installerHeaderIcon: "assets/icon.ico",
     });
   });
+
+  it("unpacks embedded Postgres WASM assets for Electron", async () => {
+    const packageJson = JSON.parse(
+      await readFile(resolve(process.cwd(), "package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string>; build?: { asarUnpack?: string[] } };
+
+    expect(packageJson.dependencies?.["@electric-sql/pglite-socket"]).toBe("0.2.7");
+    expect(packageJson.build?.asarUnpack).toEqual(expect.arrayContaining([
+      "**/node_modules/@electric-sql/pglite/**",
+      "**/node_modules/@electric-sql/pglite-pgvector/**",
+    ]));
+  });
 });

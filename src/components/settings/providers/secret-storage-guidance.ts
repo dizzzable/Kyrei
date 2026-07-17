@@ -8,6 +8,8 @@ export interface SecretStorageGuidance {
   commands: TranslationKey[];
   /** Extra non-numbered hint (e.g. pure Wayland WMs). */
   hint?: TranslationKey;
+  /** Location of the encrypted envelope and the OS keyring entry. */
+  location?: TranslationKey;
 }
 
 export function secretStorageGuidanceFor(platform: DesktopPlatform): SecretStorageGuidance {
@@ -22,6 +24,7 @@ export function secretStorageGuidanceFor(platform: DesktopPlatform): SecretStora
           "settings.providers.error.secretStorageLinuxKdeCommand",
         ],
         hint: "settings.providers.error.secretStorageLinuxWaylandHint",
+        location: "settings.providers.error.secretStorageLinuxLocation",
       };
     case "windows":
       return {

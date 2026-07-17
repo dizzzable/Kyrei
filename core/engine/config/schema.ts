@@ -160,6 +160,7 @@ const MemoryIndexConfigSchema = z.object({
   enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.index.enabled),
   backend: z.enum(["sqlite", "postgres", "off"]).default(DEFAULT_ENGINE_CONFIG.memory.index.backend),
   connectionString: z.string().trim().min(1).max(4_000).optional(),
+  connectionSource: z.enum(["builtin", "external"]).optional(),
   embed: MemoryIndexEmbedSchema.default(DEFAULT_ENGINE_CONFIG.memory.index.embed),
 });
 

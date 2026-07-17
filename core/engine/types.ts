@@ -404,6 +404,8 @@ export interface EngineConfig {
       backend: "sqlite" | "postgres" | "off";
       /** Required when backend is postgres (team multi-host FTS). */
       connectionString?: string;
+      /** Identifies the loopback PGlite connection managed by Kyrei. */
+      connectionSource?: "builtin" | "external";
       /**
        * Embedding path for vector projection. Default lexical (offline).
        * `http` uses an OpenAI-compatible /v1/embeddings endpoint.

@@ -24,6 +24,8 @@ export interface MemoryIndexConfig {
    * Never used for code graph or plan-as-files SoT.
    */
   connectionString?: string;
+  /** Whether Kyrei provisioned the connection or the operator supplied it. */
+  connectionSource?: "builtin" | "external";
   /** Optional embed config applied by reindex/inspect callers. */
   embed?: {
     mode: "lexical" | "http";

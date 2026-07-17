@@ -22,6 +22,7 @@ import { rebaseImportedPipelines } from "@/lib/pipeline-import";
 import type {
   AppConfig,
   GBrainRuntimeStatus,
+  LocalPostgresRuntimeStatus,
   MemoryIndexRuntimeStatus,
   McpRuntimeStatus,
   SessionMirrorRuntimeStatus,
@@ -152,6 +153,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [messagingNote, setMessagingNote] = useState<string | null>(null);
   const [mcpStatus, setMcpStatus] = useState<McpRuntimeStatus | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [localPostgresStatus, setLocalPostgresStatus] = useState<LocalPostgresRuntimeStatus | null>(null);
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -377,6 +379,14 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
   }, [flushEngineSave]);
 
+  const checkLocalPostgres = useCallback(async () => {
+    try {
+      setLocalPostgresStatus(await gateway.getLocalPostgresStatus());
+    } catch {
+      setLocalPostgresStatus({ state: "unavailable", reason: "gateway_unreachable" });
+    }
+  }, []);
+
   const reindexMemoryIndex = useCallback(async () => {
     if (!await flushEngineSave()) return;
     setMemoryIndexBusy(true);
@@ -500,11 +510,12 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       void checkMemoryIndex();
       void checkSessionMirror();
       void checkMcp();
+      void checkLocalPostgres();
     }
     if (visibleSection === "notifications") {
       void checkMessaging();
     }
-  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMcp, checkMessaging, visibleSection]);
+  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMcp, checkLocalPostgres, checkMessaging, visibleSection]);
 
   const initializeGBrain = useCallback(async () => {
     // Persist a just-edited command before invoking it; otherwise a delayed
@@ -1626,13 +1637,34 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                             ]}
                             onChange={(value) => setEngineField("memory.index.backend", value)}
                           />
+                          <Field label={t("settings.projectMemory.localPostgres.label")} stacked>
+                            <div className="rounded-lg border border-border-soft bg-elevated/45 px-3 py-2.5">
+                              <p className="text-[12px] font-medium text-foreground" role="status">
+                                {localPostgresStatus?.state === "ready"
+                                  ? t("settings.projectMemory.localPostgres.ready", { port: localPostgresStatus.port ?? "?" })
+                                  : localPostgresStatus?.state === "starting"
+                                    ? t("settings.projectMemory.localPostgres.starting")
+                                    : localPostgresStatus?.state === "error"
+                                      ? t("settings.projectMemory.localPostgres.error")
+                                      : localPostgresStatus?.state === "unavailable"
+                                        ? t("settings.projectMemory.localPostgres.unavailable")
+                                        : t("settings.projectMemory.localPostgres.idle")}
+                              </p>
+                              <p className="mt-1 text-[11px] text-muted">
+                                {t("settings.projectMemory.localPostgres.hint")}
+                              </p>
+                            </div>
+                          </Field>
                           {String(getEngineField("memory.index.backend", "sqlite")) === "postgres" && (
                             <TextField
                               label={t("settings.projectMemory.connectionString.label")}
                               hint={t("settings.projectMemory.connectionString.hint")}
                               value={String(getEngineField("memory.index.connectionString", ""))}
                               placeholder="postgres://user@localhost:5432/kyrei"
-                              onChange={(value) => setEngineField("memory.index.connectionString", value)}
+                              onChange={(value) => {
+                                setEngineField("memory.index.connectionString", value);
+                                setEngineField("memory.index.connectionSource", "external");
+                              }}
                             />
                           )}
                         </>

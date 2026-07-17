@@ -44,6 +44,7 @@ describe("Linux root launcher", () => {
     const depends = packageJson.build?.pacman?.depends ?? [];
     expect(depends).not.toContain("libappindicator");
     expect(depends).toContain("libsecret");
+    expect(depends).toContain("gnome-keyring");
     expect(depends).toContain("at-spi2-core");
     expect(depends).toContain("libxkbcommon");
     expect(depends).toContain("alsa-lib");

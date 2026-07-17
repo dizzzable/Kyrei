@@ -13,6 +13,7 @@ describe("secret-storage guidance", () => {
         "settings.providers.error.secretStorageLinuxKdeCommand",
       ],
       hint: "settings.providers.error.secretStorageLinuxWaylandHint",
+      location: "settings.providers.error.secretStorageLinuxLocation",
     });
   });
 

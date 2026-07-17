@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  LINUX_DEB_SECRET_DEPENDS,
   LINUX_DEB_SECRET_RECOMMENDS,
+  LINUX_PACMAN_SECRET_DEPENDS,
   LINUX_PACMAN_SECRET_OPTDEPENDS,
   classifyLinuxDesktopFamily,
+  configureLinuxSecretServiceBackend,
   describeLinuxSecretsEnvironment,
   formatLinuxSecretsUnavailableMessage,
+  linuxProtectedStorageAvailable,
   linuxPacmanSecretServiceFpmArgs,
   linuxSecretsInstallCommands,
 } from "../electron/linux-secrets-env.js";
@@ -62,13 +66,37 @@ describe("linux secrets environment", () => {
     expect(message).not.toMatch(/api[_-]?key|token|password/i);
   });
 
-  it("exports packaging metadata for Arch optdepends and Debian recommends", () => {
-    expect(LINUX_PACMAN_SECRET_OPTDEPENDS.some((line) => line.startsWith("gnome-keyring:"))).toBe(true);
+  it("exports packaging metadata for hard dependencies and alternatives", () => {
+    expect(LINUX_PACMAN_SECRET_DEPENDS).toEqual(expect.arrayContaining(["libsecret", "gnome-keyring"]));
     expect(LINUX_PACMAN_SECRET_OPTDEPENDS.some((line) => line.startsWith("kwallet:"))).toBe(true);
-    expect(LINUX_DEB_SECRET_RECOMMENDS).toContain("gnome-keyring");
+    expect(LINUX_DEB_SECRET_DEPENDS).toEqual(expect.arrayContaining(["libsecret-1-0", "gnome-keyring"]));
+    expect(LINUX_DEB_SECRET_RECOMMENDS).toContain("libsecret-tools");
+    expect(LINUX_DEB_SECRET_RECOMMENDS).not.toContain("gnome-keyring");
     expect(linuxPacmanSecretServiceFpmArgs()).toEqual(
       LINUX_PACMAN_SECRET_OPTDEPENDS.map((entry) => `--pacman-optional-depends=${entry}`),
     );
+  });
+
+  it("forces the generic Secret Service backend without overriding an explicit choice", () => {
+    const commandLine = {
+      hasSwitch: vi.fn(() => false),
+      appendSwitch: vi.fn(),
+    };
+    expect(configureLinuxSecretServiceBackend({ platform: "linux", commandLine })).toBe(true);
+    expect(commandLine.appendSwitch).toHaveBeenCalledWith("password-store", "gnome-libsecret");
+
+    commandLine.hasSwitch.mockReturnValue(true);
+    expect(configureLinuxSecretServiceBackend({ platform: "linux", commandLine })).toBe(false);
+    expect(configureLinuxSecretServiceBackend({ platform: "win32", commandLine })).toBe(false);
+  });
+
+  it("accepts only protected Electron backends", () => {
+    expect(linuxProtectedStorageAvailable({ backend: "gnome_libsecret", encryptionAvailable: true })).toBe(true);
+    expect(linuxProtectedStorageAvailable({ backend: "kwallet6", encryptionAvailable: true })).toBe(true);
+    expect(linuxProtectedStorageAvailable({ backend: "basic_text", encryptionAvailable: true })).toBe(false);
+    expect(linuxProtectedStorageAvailable({ backend: "unknown", encryptionAvailable: true })).toBe(false);
+    expect(linuxProtectedStorageAvailable({ backend: undefined, encryptionAvailable: true })).toBe(false);
+    expect(linuxProtectedStorageAvailable({ backend: "gnome_libsecret", encryptionAvailable: false })).toBe(false);
   });
 
   it("keeps electron-builder package.json aligned with Secret Service metadata", async () => {
@@ -82,8 +110,8 @@ describe("linux secrets environment", () => {
     const debDepends = packageJson.build?.deb?.depends ?? [];
     const pacmanDepends = packageJson.build?.pacman?.depends ?? [];
 
-    expect(pacmanDepends).toContain("libsecret");
-    expect(debDepends).toContain("libsecret-1-0");
+    for (const dependency of LINUX_PACMAN_SECRET_DEPENDS) expect(pacmanDepends).toContain(dependency);
+    for (const dependency of LINUX_DEB_SECRET_DEPENDS) expect(debDepends).toContain(dependency);
     for (const entry of LINUX_PACMAN_SECRET_OPTDEPENDS) {
       expect(pacmanFpm).toContain(`--pacman-optional-depends=${entry}`);
     }

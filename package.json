@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
@@ -53,6 +53,9 @@
     "@ai-sdk/google-vertex": "5.0.18",
     "@ai-sdk/openai": "4.0.13",
     "@ai-sdk/openai-compatible": "3.0.9",
+    "@electric-sql/pglite": "0.5.4",
+    "@electric-sql/pglite-pgvector": "0.0.5",
+    "@electric-sql/pglite-socket": "0.2.7",
     "@vscode/ripgrep": "^1.18.0",
     "ai": "7.0.26",
     "better-sqlite3": "^12.11.1",
@@ -141,6 +144,8 @@
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**",
       "**/node_modules/sqlite-vec*/**",
+      "**/node_modules/@electric-sql/pglite/**",
+      "**/node_modules/@electric-sql/pglite-pgvector/**",
       "**/node_modules/bindings/**",
       "**/node_modules/@vscode/ripgrep/**"
     ],
@@ -216,10 +221,10 @@
         "xdg-utils",
         "libatspi2.0-0",
         "libuuid1",
-        "libsecret-1-0"
+        "libsecret-1-0",
+        "gnome-keyring"
       ],
       "recommends": [
-        "gnome-keyring",
         "libsecret-tools"
       ]
     },
@@ -232,6 +237,7 @@
         "gtk3",
         "libnotify",
         "libsecret",
+        "gnome-keyring",
         "libxkbcommon",
         "libxss",
         "libxtst",
@@ -239,7 +245,6 @@
         "xdg-utils"
       ],
       "fpm": [
-        "--pacman-optional-depends=gnome-keyring: Secret Service for GNOME and most Wayland WMs (Hyprland/Sway/niri) — required to save provider API keys",
         "--pacman-optional-depends=kwallet: KDE Plasma KWallet Secret Service (alternative to gnome-keyring)",
         "--pacman-optional-depends=keepassxc: alternative Secret Service provider when desktop keyring is unavailable",
         "--pacman-optional-depends=xorg-xwayland: XWayland fallback for Electron on pure Wayland if native Ozone fails"

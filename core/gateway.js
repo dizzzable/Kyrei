@@ -1389,6 +1389,9 @@ function validateEngineConfigBoundary(value) {
           throw new TypeError("engine_memory_index_connection_invalid");
         }
       }
+      if (Object.hasOwn(index, "connectionSource") && !new Set(["builtin", "external"]).has(index.connectionSource)) {
+        throw new TypeError("engine_memory_index_connection_source_invalid");
+      }
       memory.index = index;
     }
     if (Object.hasOwn(memory, "ltm") && memory.ltm && typeof memory.ltm === "object" && !Array.isArray(memory.ltm)) {
@@ -1953,6 +1956,7 @@ export async function startGateway({
   kiroConnector = new KiroCliConnector(),
   kiroOrganizationWorker,
   commandRunner,
+  localPostgres,
   engineLoader = () => import("./engine/.dist/index.mjs"),
   providerDiscovery = discoverProviderModels,
   sandboxCapabilityProbe = pipelineSandboxCapability,
@@ -1962,6 +1966,13 @@ export async function startGateway({
   if (typeof engineLoader !== "function") throw new TypeError("engine-loader-required");
   if (commandRunner != null && typeof commandRunner.run !== "function") {
     throw new TypeError("command-runner-invalid");
+  }
+  if (localPostgres != null && (
+    typeof localPostgres.ensure !== "function"
+    || typeof localPostgres.getStatus !== "function"
+    || typeof localPostgres.close !== "function"
+  )) {
+    throw new TypeError("local-postgres-runtime-invalid");
   }
   if (typeof providerDiscovery !== "function") throw new TypeError("provider-discovery-required");
   if (typeof sandboxCapabilityProbe !== "function") throw new TypeError("sandbox-capability-probe-required");
@@ -2066,6 +2077,55 @@ export async function startGateway({
   }
   config = reconcileReadyRuntimeConfig(config, secrets);
   const saveConfig = (configValue = config, secretsValue = secrets) => persistence.save(configValue, secretsValue);
+
+  /**
+   * Team mode gets a persistent local Postgres-compatible index when the
+   * operator has not supplied an external connection. The loopback port is
+   * process-local, so refresh the generated URL after every app restart.
+   */
+  const ensureBuiltinTeamMemory = async (configValue) => {
+    const orchestration = configValue?.orchestration;
+    if (!localPostgres || orchestration?.defaultMode === "single") return configValue;
+    const currentIndex = configValue.engine?.memory?.index;
+    const hasExternalConnection = currentIndex?.backend === "postgres"
+      && typeof currentIndex.connectionString === "string"
+      && currentIndex.connectionString.trim()
+      && currentIndex.connectionSource !== "builtin";
+    if (hasExternalConnection) return configValue;
+    try {
+      const runtime = await localPostgres.ensure(configValue.workspace);
+      if (runtime?.state !== "ready" || typeof runtime.connectionString !== "string") {
+        console.warn("[kyrei] Team mode kept SQLite: local Postgres is unavailable", runtime?.error ?? "unknown_error");
+        return configValue;
+      }
+      return normalizeGatewayConfig({
+        ...configValue,
+        engine: {
+          ...(configValue.engine ?? {}),
+          memory: {
+            ...(configValue.engine?.memory ?? {}),
+            index: {
+              ...(currentIndex ?? {}),
+              enabled: true,
+              backend: "postgres",
+              connectionString: runtime.connectionString,
+              connectionSource: "builtin",
+            },
+          },
+        },
+      });
+    } catch (error) {
+      console.warn("[kyrei] Team mode kept SQLite: local Postgres bootstrap failed", error?.message ?? error);
+      return configValue;
+    }
+  };
+
+  // Rebind a previously configured built-in connection to this process's
+  // fresh loopback port before the first Team request after application start.
+  const bootstrappedConfig = await ensureBuiltinTeamMemory(config);
+  if (bootstrappedConfig !== config) {
+    config = bootstrappedConfig;
+  }
   await saveConfig(config, secrets);
 
   const organizationWorker = kiroOrganizationWorker ?? new KiroOrganizationWorker({
@@ -6689,6 +6749,7 @@ export async function startGateway({
             }
             nextConfig = reconcileReadyModelAssignments(nextConfig, nextSecrets);
             nextConfig = reconcileReadyOrchestration(nextConfig, nextSecrets);
+            nextConfig = await ensureBuiltinTeamMemory(nextConfig);
             nextSecrets = pruneProviderAccountSecrets(nextSecrets, nextConfig.providers);
             const previousWorkspace = typeof config.workspace === "string" ? config.workspace : "";
             if (typeof body.workspace === "string") {
@@ -6727,6 +6788,19 @@ export async function startGateway({
 
       if (path === "/api/memory/mcp" && req.method === "GET") {
         return sendJson(res, 200, await inspectMcp());
+      }
+
+      if (path === "/api/memory/local-postgres" && req.method === "GET") {
+        return sendJson(res, 200, localPostgres?.getStatus?.() ?? {
+          state: "unavailable",
+          reason: "runtime_not_embedded",
+        });
+      }
+
+      if (path === "/api/memory/local-postgres/ensure" && req.method === "POST") {
+        return sendJson(res, 200, localPostgres?.ensure
+          ? await localPostgres.ensure(config.workspace)
+          : { state: "unavailable", reason: "runtime_not_embedded" });
       }
 
       if (path === "/api/memory/gbrain/initialize" && req.method === "POST") {

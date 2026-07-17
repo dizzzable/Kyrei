@@ -1035,6 +1035,17 @@ export interface McpRuntimeStatus {
   message?: string;
 }
 
+/** Loopback-only embedded Postgres used as the Team memory bus. */
+export interface LocalPostgresRuntimeStatus {
+  state: "stopped" | "starting" | "ready" | "error" | "unavailable";
+  host?: string;
+  port?: number;
+  vector?: boolean;
+  connectionString?: string;
+  error?: string;
+  reason?: string;
+}
+
 /** Event frames streamed from the gateway (Server-Sent Events). */
 export interface GatewayEvent {
   type: string;

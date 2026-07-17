@@ -3,11 +3,16 @@ import electronUpdater from "electron-updater";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startGateway } from "../core/gateway.js";
+import { createLocalPostgres } from "../core/local-postgres.js";
 import { createAppUpdater } from "./app-updater.js";
 import { registerDesktopIpc } from "./desktop-ipc.js";
 import { installDesktopViewportGuard } from "./desktop-viewport-guard.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
-import { formatLinuxSecretsUnavailableMessage } from "./linux-secrets-env.js";
+import {
+  configureLinuxSecretServiceBackend,
+  formatLinuxSecretsUnavailableMessage,
+  linuxProtectedStorageAvailable,
+} from "./linux-secrets-env.js";
 import {
   createWindowsDpapiSecretsCodec,
   createWindowsProtectedSecretsCodec,
@@ -16,8 +21,13 @@ import {
 const here = fileURLToPath(new URL(".", import.meta.url));
 const appIcon = join(here, "..", "assets", "icon.png");
 
+// Use the freedesktop Secret Service API on every Linux desktop, including
+// Hyprland/Sway/niri which Electron's legacy desktop-name heuristic can miss.
+configureLinuxSecretServiceBackend({ platform: process.platform, commandLine: app.commandLine });
+
 let windowRef;
 let gateway; // { port, token, close }
+let localPostgres;
 let desktopCapabilities; // { terminalManager, dispose }
 let shutdownStarted = false;
 let shutdownComplete = false;
@@ -64,9 +74,19 @@ async function createSecretsCodec() {
   } catch {
     selectedBackend = undefined;
   }
-  // Electron's basic_text backend is not OS-protected storage. Refuse it so
-  // provider keys never land on disk as pseudo-encrypted plaintext.
-  if (process.platform === "linux" && selectedBackend === "basic_text") {
+  let synchronousEncryptionAvailable = false;
+  try {
+    synchronousEncryptionAvailable = safeStorage.isEncryptionAvailable();
+  } catch {
+    synchronousEncryptionAvailable = false;
+  }
+  // Electron's async Linux API has a POSIX fallback. Require the synchronous
+  // backend probe as proof that an actual OS Secret Service is reachable, so
+  // the fallback can never become pseudo-encrypted secret persistence.
+  if (process.platform === "linux" && !linuxProtectedStorageAvailable({
+    backend: selectedBackend,
+    encryptionAvailable: synchronousEncryptionAvailable,
+  })) {
     warnLinuxSecretsUnavailable(selectedBackend);
     return undefined;
   }
@@ -84,7 +104,7 @@ async function createSecretsCodec() {
       // storage even if Electron's wrapper is temporarily unavailable.
     }
   }
-  if (!safeStorageCodec && safeStorage.isEncryptionAvailable()) {
+  if (!safeStorageCodec && synchronousEncryptionAvailable) {
     const codec = {
       encode: (value) => safeStorage.encryptString(value).toString("base64"),
       decode: (value) => safeStorage.decryptString(Buffer.from(value, "base64")),
@@ -179,6 +199,9 @@ if (ownsSingleInstance) app.whenReady().then(async () => {
         rendererId: windowRef && !windowRef.isDestroyed() ? windowRef.webContents.id : 0,
       }),
     };
+    localPostgres = createLocalPostgres({
+      dataDir: join(app.getPath("userData"), "kyrei", "team-postgres"),
+    });
     gateway = await startGateway({
       dataDir: join(app.getPath("userData"), "kyrei"),
       chooseFolder,
@@ -188,6 +211,7 @@ if (ownsSingleInstance) app.whenReady().then(async () => {
       runtimeBuildId: `${app.getVersion()}:${process.env.KYREI_BUILD_ID ?? "release"}`,
       requireProtectedSecrets: true,
       commandRunner,
+      localPostgres,
       ...(secretsCodec ? { secretsCodec } : {}),
     });
     // download/install are user-driven from Settings → About (never silent).
@@ -230,10 +254,14 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
-  Promise.all([
-    Promise.resolve(gateway && typeof gateway.close === "function" ? gateway.close() : undefined),
-    Promise.resolve(desktopCapabilities && typeof desktopCapabilities.dispose === "function" ? desktopCapabilities.dispose() : undefined),
-  ])
+  (async () => {
+    // Stop request producers before closing the database they may still use.
+    await Promise.all([
+      Promise.resolve(gateway && typeof gateway.close === "function" ? gateway.close() : undefined),
+      Promise.resolve(desktopCapabilities && typeof desktopCapabilities.dispose === "function" ? desktopCapabilities.dispose() : undefined),
+    ]);
+    await Promise.resolve(localPostgres && typeof localPostgres.close === "function" ? localPostgres.close() : undefined);
+  })()
     .catch(error => console.error("[kyrei] desktop shutdown failed:", error))
     .finally(() => {
       shutdownComplete = true;

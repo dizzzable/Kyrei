@@ -257,6 +257,11 @@ export function ProviderSetupDialog({
                         {secretStorageGuidance.hint ? (
                           <p className="mt-2 text-[9.5px] leading-4 text-secondary">{t(secretStorageGuidance.hint)}</p>
                         ) : null}
+                        {secretStorageGuidance.location ? (
+                          <p className="mt-2 break-all rounded border border-border-soft bg-bg/35 px-2 py-1.5 font-mono text-[9px] leading-4 text-muted">
+                            {t(secretStorageGuidance.location)}
+                          </p>
+                        ) : null}
                         <p className="mt-2 text-[9.5px] leading-4 text-muted">{t("settings.providers.error.secretStorageNotSaved")}</p>
                       </div>
                     </div>

@@ -98,20 +98,43 @@ const FAMILY_PACKAGES = Object.freeze({
  * (`--pacman-optional-depends=pkg: description`).
  */
 export const LINUX_PACMAN_SECRET_OPTDEPENDS = Object.freeze([
-  "gnome-keyring: Secret Service for GNOME and most Wayland WMs (Hyprland/Sway/niri) — required to save provider API keys",
   "kwallet: KDE Plasma KWallet Secret Service (alternative to gnome-keyring)",
   "keepassxc: alternative Secret Service provider when desktop keyring is unavailable",
   "xorg-xwayland: XWayland fallback for Electron on pure Wayland if native Ozone fails",
 ]);
 
+/** Installed automatically by the native Linux packages. */
+export const LINUX_PACMAN_SECRET_DEPENDS = Object.freeze(["libsecret", "gnome-keyring"]);
+export const LINUX_DEB_SECRET_DEPENDS = Object.freeze(["libsecret-1-0", "gnome-keyring"]);
+
 /**
- * Debian/Ubuntu Recommends for provider-key storage.
- * libsecret-1-0 is a hard Depends (Electron safeStorage client).
+ * Debian/Ubuntu Recommends for provider-key diagnostics.
+ * libsecret-1-0 and gnome-keyring are hard Depends of the native package.
  */
 export const LINUX_DEB_SECRET_RECOMMENDS = Object.freeze([
-  "gnome-keyring",
   "libsecret-tools",
 ]);
+
+/**
+ * Electron's legacy desktop-name heuristic misses Hyprland/Sway/niri and other
+ * valid Secret Service sessions. Force the generic libsecret client unless the
+ * operator explicitly selected another password store.
+ */
+export function configureLinuxSecretServiceBackend({ platform = process.platform, commandLine } = {}) {
+  if (platform !== "linux" || !commandLine?.hasSwitch || !commandLine?.appendSwitch) return false;
+  if (commandLine.hasSwitch("password-store")) return false;
+  commandLine.appendSwitch("password-store", "gnome-libsecret");
+  return true;
+}
+
+export function linuxProtectedStorageAvailable({ backend, encryptionAvailable }) {
+  return encryptionAvailable === true && [
+    "gnome_libsecret",
+    "kwallet",
+    "kwallet5",
+    "kwallet6",
+  ].includes(backend);
+}
 
 /**
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null | undefined} env

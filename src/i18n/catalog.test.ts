@@ -43,19 +43,22 @@ describe("translation catalog", () => {
   });
 
   it("keeps Linux credential-storage recovery concrete and sandbox-safe", () => {
-    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep1"]).toContain("not sudo kyrei");
-    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep1"]).toContain("Wayland");
-    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep2"]).toContain("Hyprland");
-    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep2"]).toContain("KDE Plasma");
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep1"]).toContain("normal desktop user");
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep1"]).toContain("AppImage");
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep2"]).toContain("org.freedesktop.secrets");
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxStep2"]).toContain("KWallet");
     expect(CATALOG.en["settings.providers.error.secretStorageLinuxArchCommand"]).toContain("pacman -S gnome-keyring");
     expect(CATALOG.en["settings.providers.error.secretStorageLinuxDebCommand"]).toContain("apt install gnome-keyring");
     expect(CATALOG.en["settings.providers.error.secretStorageLinuxKdeCommand"]).toContain("kwallet");
     expect(CATALOG.en["settings.providers.error.secretStorageLinuxWaylandHint"]).toContain("Hyprland");
-    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxStep1"]).toContain("а не sudo kyrei");
-    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxStep1"]).toContain("Wayland");
+    expect(CATALOG.en["settings.providers.error.secretStorageLinuxLocation"]).toContain("kyrei-secrets.json");
+    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxStep1"]).toContain("обычным пользователем");
+    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxStep1"]).toContain("AppImage");
+    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxStep2"]).toContain("org.freedesktop.secrets");
     expect(CATALOG.ru["settings.providers.error.secretStorageLinuxArchCommand"]).toContain("pacman -S gnome-keyring");
     expect(CATALOG.ru["settings.providers.error.secretStorageLinuxDebCommand"]).toContain("apt install gnome-keyring");
     expect(CATALOG.ru["settings.providers.error.secretStorageLinuxKdeCommand"]).toContain("kwallet");
     expect(CATALOG.ru["settings.providers.error.secretStorageLinuxWaylandHint"]).toContain("Hyprland");
+    expect(CATALOG.ru["settings.providers.error.secretStorageLinuxLocation"]).toContain("kyrei-secrets.json");
   });
 });
