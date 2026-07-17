@@ -22,8 +22,29 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await server?.close();
-  await rm(dataDir, { recursive: true, force: true });
+  try {
+    await server?.close();
+  } catch {
+    /* ignore close races after aborted pipeline work */
+  }
+  // macOS can report ENOTEMPTY while SQLite / FTS handles drain after close.
+  // Retry with backoff; do not fail the suite on a leftover temp dir.
+  if (!dataDir) return;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+      if (attempt === 7) {
+        if (code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM") return;
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
 });
 
 async function response(path: string, init?: RequestInit) {
