@@ -73,6 +73,17 @@ describe("gateway GBrain onboarding", () => {
     }));
   });
 
+  it("coalesces concurrent health probes and keeps the result stable briefly", async () => {
+    createGBrainClient.mockClear();
+    const statuses = await Promise.all([
+      request<{ state: string }>("/api/memory/gbrain"),
+      request<{ state: string }>("/api/memory/gbrain"),
+      request<{ state: string }>("/api/memory/gbrain"),
+    ]);
+    expect(statuses.map((status) => status.state)).toEqual(["not_initialized", "not_initialized", "not_initialized"]);
+    expect(createGBrainClient).toHaveBeenCalledTimes(1);
+  });
+
   it("initializes only on the explicit endpoint and enables safe read access after a healthy check", async () => {
     const result = await request<{
       status: { state: string; mode: string };

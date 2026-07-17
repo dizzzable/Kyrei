@@ -6,6 +6,7 @@ import {
   normalizeVersion,
   parseLatestReleasePayload,
   releaseTagUrl,
+  shouldHighlightUpdate,
 } from "./app-update";
 
 describe("normalizeVersion / compareSemver", () => {
@@ -104,5 +105,15 @@ describe("checkForAppUpdate", () => {
       status: "available",
       latestVersion: "0.4.3",
     });
+  });
+});
+
+describe("shouldHighlightUpdate", () => {
+  it("highlights actionable native update phases only", () => {
+    expect(shouldHighlightUpdate("available")).toBe(true);
+    expect(shouldHighlightUpdate("downloaded")).toBe(true);
+    expect(shouldHighlightUpdate("checking")).toBe(false);
+    expect(shouldHighlightUpdate("error")).toBe(false);
+    expect(shouldHighlightUpdate(undefined)).toBe(false);
   });
 });

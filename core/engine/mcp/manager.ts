@@ -100,6 +100,34 @@ export function createMcpManager(options: McpManagerOptions) {
     return out;
   }
 
+  /** Explicit diagnostics used by Settings; unlike listTools it preserves one
+   * stable result per configured server and includes startup failures. */
+  async function inspectServers(): Promise<Array<{
+    id: string;
+    command: string;
+    ok: boolean;
+    toolCount: number;
+    error?: string;
+  }>> {
+    if (!config.enabled) return [];
+    const out = [];
+    for (const server of config.servers) {
+      try {
+        const tools = await getClient(server.id).listTools();
+        out.push({ id: server.id, command: server.command, ok: true, toolCount: tools.length });
+      } catch (error) {
+        out.push({
+          id: server.id,
+          command: server.command,
+          ok: false,
+          toolCount: 0,
+          error: (error as Error).message,
+        });
+      }
+    }
+    return out;
+  }
+
   function formatCallResult(raw: unknown): string {
     if (raw == null) return "";
     if (typeof raw === "string") return raw;
@@ -173,6 +201,7 @@ export function createMcpManager(options: McpManagerOptions) {
   return {
     config,
     listTools,
+    inspectServers,
     callTool,
     close,
     serverIds: () => config.servers.map((s) => s.id),

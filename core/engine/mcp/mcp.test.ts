@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { tryParseFramedMessage, McpStdioClient } from "./stdio-client.js";
+import { tryParseFramedMessage, McpStdioClient, resolveMcpCommand } from "./stdio-client.js";
 import { createMcpManager, normalizeMcpConfig } from "./manager.js";
 import { buildMcpTools } from "../tools/mcp.js";
 import { decide } from "../security/permissions.js";
@@ -14,6 +14,11 @@ describe("MCP framing", () => {
     expect(parsed).not.toBeNull();
     expect(parsed!.message).toEqual({ jsonrpc: "2.0", id: 1, result: { ok: true } });
     expect(parsed!.rest.length).toBe(0);
+  });
+
+  it("keeps the Windows npm launcher executable when shell=false", () => {
+    const command = resolveMcpCommand("npx");
+    expect(command === "npx" || command === "npx.cmd").toBe(true);
   });
 });
 

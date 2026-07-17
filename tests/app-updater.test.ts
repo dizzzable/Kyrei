@@ -55,6 +55,7 @@ describe("createAppUpdater", () => {
 
     expect(autoUpdater.autoDownload).toBe(false);
     expect(autoUpdater.autoInstallOnAppQuit).toBe(true);
+    expect(autoUpdater.disableDifferentialDownload).toBe(true);
 
     autoUpdater.checkForUpdates.mockImplementation(async () => {
       autoUpdater.emit("update-available", { version: "0.4.3", releaseName: "Kyrei v0.4.3" });
@@ -104,5 +105,26 @@ describe("createAppUpdater", () => {
     });
     const status = await updater.check();
     expect(status).toMatchObject({ phase: "error", error: "network down" });
+  });
+
+  it("runs the startup check once without downloading", async () => {
+    const autoUpdater = makeAutoUpdater();
+    const updater = createAppUpdater({
+      app: { getVersion: () => "0.4.7", isPackaged: true },
+      autoUpdater,
+      env: {},
+    });
+
+    autoUpdater.checkForUpdates.mockImplementation(async () => {
+      autoUpdater.emit("update-available", { version: "0.5.0" });
+      return { updateInfo: { version: "0.5.0" } };
+    });
+
+    const [first, second] = await Promise.all([updater.start(), updater.start()]);
+
+    expect(first).toMatchObject({ phase: "available", latestVersion: "0.5.0" });
+    expect(second).toMatchObject({ phase: "available", latestVersion: "0.5.0" });
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(autoUpdater.downloadUpdate).not.toHaveBeenCalled();
   });
 });

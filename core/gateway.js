@@ -2282,6 +2282,8 @@ export async function startGateway({
   // approvals/rewind; enginePrimary (A4b) prefers engine for public GET.
   let sessionMirrorHandle = null;
   let sessionMirrorStores = null;
+  let sessionMirrorInitPromise = null;
+  let sessionMirrorUnavailableUntil = 0;
   const sessionMirrorConfig = () => {
     const engine = isPlainRecord(config.engine) ? config.engine : {};
     const memory = isPlainRecord(engine.memory) ? engine.memory : {};
@@ -2298,22 +2300,32 @@ export async function startGateway({
   const ensureSessionMirror = async () => {
     if (!sessionMirrorEnabled()) return null;
     if (sessionMirrorHandle) return sessionMirrorHandle;
-    try {
-      const mod = await getEngine();
-      if (typeof mod?.createStores !== "function" || typeof mod?.createSessionMirror !== "function") {
+    if (Date.now() < sessionMirrorUnavailableUntil) return null;
+    if (sessionMirrorInitPromise) return sessionMirrorInitPromise;
+    sessionMirrorInitPromise = (async () => {
+      try {
+        const mod = await getEngine();
+        if (typeof mod?.createStores !== "function" || typeof mod?.createSessionMirror !== "function") {
+          sessionMirrorUnavailableUntil = Date.now() + 5_000;
+          return null;
+        }
+        sessionMirrorStores = mod.createStores(join(dataDir, "session-mirror"));
+        sessionMirrorHandle = mod.createSessionMirror({
+          sessions: sessionMirrorStores.sessions,
+          jsonlPathPrefix: `gateway://${dataDir.replace(/\\/g, "/")}/sessions`,
+          sensitiveValues: runtimeSensitiveValues(),
+        });
+        sessionMirrorUnavailableUntil = 0;
+        return sessionMirrorHandle;
+      } catch (error) {
+        sessionMirrorUnavailableUntil = Date.now() + 5_000;
+        console.warn("[kyrei session-mirror] unavailable:", error?.message ?? error);
         return null;
+      } finally {
+        sessionMirrorInitPromise = null;
       }
-      sessionMirrorStores = mod.createStores(join(dataDir, "session-mirror"));
-      sessionMirrorHandle = mod.createSessionMirror({
-        sessions: sessionMirrorStores.sessions,
-        jsonlPathPrefix: `gateway://${dataDir.replace(/\\/g, "/")}/sessions`,
-        sensitiveValues: runtimeSensitiveValues(),
-      });
-      return sessionMirrorHandle;
-    } catch (error) {
-      console.warn("[kyrei session-mirror] unavailable:", error?.message ?? error);
-      return null;
-    }
+    })();
+    return sessionMirrorInitPromise;
   };
   /**
    * Dual-write one session JSON → engine mirror.
@@ -2847,33 +2859,54 @@ export async function startGateway({
    * deliberately a health-only operation: it never sends a provider key,
    * writes personal knowledge, or starts an installer.
    */
-  const inspectGBrain = async ({ command } = {}) => {
+  const gbrainHealthCache = { key: "", at: 0, value: null, promise: null };
+  const inspectGBrain = async ({ command, force = false } = {}) => {
     const configured = configuredGBrainRuntime(config.engine);
     const gbrain = typeof command === "string" && command.trim() && command.length <= 1_024
       ? { ...configured, command: command.trim() }
       : configured;
-    let mod;
-    try {
-      mod = await getEngine();
-    } catch {
-      return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+    const key = `${gbrain.command}|${gbrain.timeoutMs}|${gbrain.maxOutputBytes}`;
+    const now = Date.now();
+    if (!force && gbrainHealthCache.key === key && gbrainHealthCache.value && now - gbrainHealthCache.at < 5_000) {
+      return gbrainHealthCache.value;
     }
-    if (typeof mod?.createGBrainClient !== "function") {
-      return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+    if (!force && gbrainHealthCache.key === key && gbrainHealthCache.promise) {
+      return gbrainHealthCache.promise;
     }
+    const probe = (async () => {
+      let mod;
+      try {
+        mod = await getEngine();
+      } catch {
+        return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+      }
+      if (typeof mod?.createGBrainClient !== "function") {
+        return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+      }
+      try {
+        // Source scoping is an agent-search preference. A health check must not
+        // become "not ready" simply because a user has not created that source.
+        const client = mod.createGBrainClient({
+          mode: "read",
+          command: gbrain.command,
+          timeoutMs: Math.min(gbrain.timeoutMs, 60_000),
+          maxOutputBytes: gbrain.maxOutputBytes,
+        });
+        const doctor = await client.doctor();
+        return { ...gbrainDoctorState(doctor), mode: gbrain.mode };
+      } catch (error) {
+        return { ...gbrainFailureState(error), mode: gbrain.mode, doctorStatus: "unknown" };
+      }
+    })();
+    gbrainHealthCache.key = key;
+    gbrainHealthCache.promise = probe;
     try {
-      // Source scoping is an agent-search preference. A health check must not
-      // become "not ready" simply because a user has not created that source.
-      const client = mod.createGBrainClient({
-        mode: "read",
-        command: gbrain.command,
-        timeoutMs: Math.min(gbrain.timeoutMs, 60_000),
-        maxOutputBytes: gbrain.maxOutputBytes,
-      });
-      const doctor = await client.doctor();
-      return { ...gbrainDoctorState(doctor), mode: gbrain.mode };
-    } catch (error) {
-      return { ...gbrainFailureState(error), mode: gbrain.mode, doctorStatus: "unknown" };
+      const result = await probe;
+      gbrainHealthCache.value = result;
+      gbrainHealthCache.at = Date.now();
+      return result;
+    } finally {
+      if (gbrainHealthCache.promise === probe) gbrainHealthCache.promise = null;
     }
   };
 
@@ -2893,6 +2926,40 @@ export async function startGateway({
     return publicConfig();
   });
 
+  const inspectMcp = async () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const raw = isPlainRecord(engine.mcp) ? engine.mcp : {};
+    if (raw.enabled !== true) return { enabled: false, state: "disabled", servers: [] };
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return { enabled: true, state: "error", servers: [], message: "adapter_unavailable" };
+    }
+    if (typeof mod?.normalizeMcpConfig !== "function" || typeof mod?.createMcpManager !== "function") {
+      return { enabled: true, state: "error", servers: [], message: "adapter_unavailable" };
+    }
+    const mcpConfig = mod.normalizeMcpConfig(raw);
+    if (!mcpConfig.servers.length) return { enabled: true, state: "no_servers", servers: [], message: "no_servers" };
+    const manager = mod.createMcpManager({
+      config: mcpConfig,
+      sensitiveValues: runtimeSensitiveValues(),
+    });
+    try {
+      const servers = await manager.inspectServers();
+      return {
+        enabled: true,
+        state: servers.every((server) => server.ok) ? "ready" : "error",
+        servers: servers.map((server) => ({
+          ...server,
+          ...(server.error ? { error: redactSensitiveText(server.error, runtimeSensitiveValues()) } : {}),
+        })),
+      };
+    } finally {
+      await manager.close().catch(() => undefined);
+    }
+  };
+
   /**
    * Explicitly create GBrain's local PGLite store. This endpoint is never
    * invoked during startup and intentionally does not install a CLI or prompt
@@ -2900,7 +2967,7 @@ export async function startGateway({
    * agent's read tools are enabled.
    */
   const initializeGBrain = async () => {
-    const before = await inspectGBrain();
+    const before = await inspectGBrain({ force: true });
     if (before.state === "ready") {
       if (before.mode === "read" || before.mode === "read-write") return { status: before, config: publicConfig() };
       const snapshot = await persistGBrainConfig({ mode: "read" });
@@ -2930,7 +2997,7 @@ export async function startGateway({
       throw gbrainGatewayError("gbrain_initialization_failed");
     }
 
-    const after = await inspectGBrain();
+    const after = await inspectGBrain({ force: true });
     if (after.state !== "ready") throw gbrainGatewayError("gbrain_initialization_unverified");
     const snapshot = await persistGBrainConfig({ mode: "read" });
     return { status: { ...after, mode: "read" }, config: snapshot };
@@ -2942,7 +3009,7 @@ export async function startGateway({
    * app starts or merely checks status.
    */
   const installAndInitializeGBrain = async () => {
-    const before = await inspectGBrain();
+    const before = await inspectGBrain({ force: true });
     if (before.state === "ready" || before.state === "not_initialized") return initializeGBrain();
     if (before.state !== "unavailable" || before.reason !== "command_unavailable") {
       throw gbrainGatewayError("gbrain_install_unverified");
@@ -2987,7 +3054,7 @@ export async function startGateway({
     const command = join(globalBin, process.platform === "win32" ? "gbrain.exe" : "gbrain");
     await persistGBrainConfig({ command });
 
-    const installed = await inspectGBrain();
+    const installed = await inspectGBrain({ force: true });
     if (installed.state !== "ready" && installed.state !== "not_initialized") {
       throw gbrainGatewayError("gbrain_install_unverified");
     }
@@ -3021,7 +3088,7 @@ export async function startGateway({
     };
   };
 
-  const inspectBuiltinMemoryIndex = async () => {
+  const inspectBuiltinMemoryIndexRaw = async () => {
     let mod;
     try {
       mod = await getEngine();
@@ -3071,6 +3138,26 @@ export async function startGateway({
       workspace: typeof config.workspace === "string" ? config.workspace : "",
       config: builtinMemoryIndexConfig(),
     });
+  };
+  let memoryIndexInspectPromise = null;
+  let memoryIndexInspectAt = 0;
+  let memoryIndexInspectValue = null;
+  const inspectBuiltinMemoryIndex = async () => {
+    // Status is read-only and can be requested by three Settings cards at
+    // once. Share the probe and keep a short snapshot so a transient SQLite
+    // open/reindex cannot make the UI alternate between ready and error.
+    const now = Date.now();
+    if (memoryIndexInspectValue && now - memoryIndexInspectAt < 2_000) return memoryIndexInspectValue;
+    if (!memoryIndexInspectPromise) {
+      memoryIndexInspectPromise = inspectBuiltinMemoryIndexRaw();
+      void memoryIndexInspectPromise.then((value) => {
+        memoryIndexInspectValue = value;
+        memoryIndexInspectAt = Date.now();
+      }).catch(() => undefined).finally(() => {
+        memoryIndexInspectPromise = null;
+      });
+    }
+    return memoryIndexInspectPromise;
   };
 
   const extractStoredMessageText = (message) => {
@@ -6636,6 +6723,10 @@ export async function startGateway({
       // what will happen before a local database is created.
       if (path === "/api/memory/gbrain" && req.method === "GET") {
         return sendJson(res, 200, await inspectGBrain());
+      }
+
+      if (path === "/api/memory/mcp" && req.method === "GET") {
+        return sendJson(res, 200, await inspectMcp());
       }
 
       if (path === "/api/memory/gbrain/initialize" && req.method === "POST") {

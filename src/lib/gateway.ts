@@ -7,6 +7,7 @@ import type {
   GatewayStatus,
   GBrainInitializationResult,
   GBrainRuntimeStatus,
+  McpRuntimeStatus,
   MemoryIndexReindexResult,
   MemoryIndexRuntimeStatus,
   LtmConsolidateResult,
@@ -217,10 +218,22 @@ export class GatewayRequestError extends Error {
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   if (!GATEWAY_TOKEN) throw new GatewayRequestError("capability_unavailable");
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", "X-Kyrei-Gateway-Token": GATEWAY_TOKEN, ...(init?.headers || {}) },
-  });
+  const method = String(init?.method ?? "GET").toUpperCase();
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", "X-Kyrei-Gateway-Token": GATEWAY_TOKEN, ...(init?.headers || {}) },
+    });
+  } catch (error) {
+    // Browser fetch exposes local gateway shutdown/boot races as the opaque
+    // `TypeError: Failed to fetch`. Keep that detail out of the UI and give
+    // callers a stable, retryable error code instead.
+    throw new GatewayRequestError("request_failed", {
+      detail: "gateway_unreachable",
+      serverCode: method === "GET" ? "gateway_unreachable" : "gateway_request_failed",
+    });
+  }
   if (!res.ok) {
     const raw = await res.text().catch(() => res.statusText);
     let detail = raw;
@@ -252,6 +265,7 @@ export const gateway = {
 
   getConfig: () => json<AppConfig>("/api/config"),
   getGBrainStatus: () => json<GBrainRuntimeStatus>("/api/memory/gbrain"),
+  getMcpStatus: () => json<McpRuntimeStatus>("/api/memory/mcp"),
   initializeGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/initialize", { method: "POST" }),
   installGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/install", { method: "POST" }),
   getMemoryIndexStatus: () => json<MemoryIndexRuntimeStatus>("/api/memory/index"),

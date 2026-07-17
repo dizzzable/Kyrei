@@ -1021,6 +1021,20 @@ export interface GBrainInitializationResult {
   config: AppConfig;
 }
 
+/** Safe MCP connectivity diagnostics; command/env values are never echoed from env. */
+export interface McpRuntimeStatus {
+  enabled: boolean;
+  state: "ready" | "disabled" | "no_servers" | "error";
+  servers: Array<{
+    id: string;
+    command: string;
+    ok: boolean;
+    toolCount: number;
+    error?: string;
+  }>;
+  message?: string;
+}
+
 /** Event frames streamed from the gateway (Server-Sent Events). */
 export interface GatewayEvent {
   type: string;

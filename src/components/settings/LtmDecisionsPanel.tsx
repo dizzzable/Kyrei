@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Pin, PinOff, History, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
-import { gateway } from "@/lib/gateway";
+import { gateway, GatewayRequestError } from "@/lib/gateway";
 import type { LtmDecisionRow } from "@/lib/types";
 import { useI18n } from "@/i18n";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,16 @@ export function LtmDecisionsPanel() {
   const [pinBusyId, setPinBusyId] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
+  const describeError = useCallback((error: unknown): string => {
+    if (error instanceof GatewayRequestError) {
+      if (error.serverCode === "gateway_unreachable" || error.detail === "gateway_unreachable") {
+        return t("settings.gateway.unavailable");
+      }
+      return error.serverCode ?? error.detail ?? error.code;
+    }
+    return "request_failed";
+  }, [t]);
+
   const load = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -37,12 +47,12 @@ export function LtmDecisionsPanel() {
       }
       setRows(result.decisions ?? []);
     } catch (e) {
-      setError((e as Error).message ?? "request_failed");
+      setError(describeError(e));
       setRows([]);
     } finally {
       setBusy(false);
     }
-  }, [showHistory]);
+  }, [describeError, showHistory]);
 
   useEffect(() => {
     void load();

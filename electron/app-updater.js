@@ -65,6 +65,8 @@ export function createAppUpdater({
     portable,
     platform,
   };
+  /** @type {Promise<AppUpdateStatus> | null} */
+  let startupCheckPromise = null;
 
   const emit = () => {
     if (typeof onStatus === "function") {
@@ -86,6 +88,10 @@ export function createAppUpdater({
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  // Always replace the complete packaged bundle. This keeps the embedded
+  // engine/native modules and renderer dependency graph in lockstep after a
+  // release instead of relying on an old installer blockmap.
+  autoUpdater.disableDifferentialDownload = true;
   autoUpdater.allowPrerelease = false;
   // Public GitHub releases for this app; do not require GH_TOKEN for checks.
   if (typeof autoUpdater.setFeedURL === "function" || autoUpdater.channel !== undefined) {
@@ -209,6 +215,12 @@ export function createAppUpdater({
     }
   }
 
+  /** Run the app-start check exactly once; manual checks remain available. */
+  function start() {
+    if (!startupCheckPromise) startupCheckPromise = check();
+    return startupCheckPromise;
+  }
+
   function install() {
     if (!canAutoInstall) throw new Error("update_auto_install_unavailable");
     if (status.phase !== "downloaded") throw new Error("update_not_downloaded");
@@ -219,6 +231,7 @@ export function createAppUpdater({
 
   return {
     getStatus,
+    start,
     check,
     download,
     install,

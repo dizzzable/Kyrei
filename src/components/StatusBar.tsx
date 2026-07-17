@@ -8,6 +8,7 @@ import {
   GitBranch,
   Hash,
   LoaderCircle,
+  Sparkles,
   Terminal,
   Zap,
 } from "lucide-react";
@@ -20,6 +21,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui";
 import { useI18n } from "@/i18n";
+import { shouldHighlightUpdate } from "@/lib/app-update";
+import { desktopUpdate, type DesktopUpdateStatus } from "@/lib/desktop";
 import { contextMetric, formatCompactTokens, formatElapsed } from "@/lib/status-metrics";
 import type { GatewayStatus, SubagentRun } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -41,6 +44,7 @@ export interface StatusBarProps {
   onOpenCron: () => void;
   onOpenMissions: () => void;
   onOpenProviders: () => void;
+  onOpenAbout: () => void;
   onToggleTurbo: () => void;
   onToggleDeveloper: () => void;
 }
@@ -60,15 +64,32 @@ export function StatusBar({
   onOpenCron,
   onOpenMissions,
   onOpenProviders,
+  onOpenAbout,
   onToggleTurbo,
   onToggleDeveloper,
 }: StatusBarProps) {
   const { t } = useI18n();
   const [now, setNow] = useState(Date.now());
+  const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!desktopUpdate.available()) return;
+    let cancelled = false;
+    const stop = desktopUpdate.onStatus((next) => {
+      if (!cancelled) setUpdateStatus(next);
+    });
+    void desktopUpdate.getStatus().then((next) => {
+      if (!cancelled) setUpdateStatus(next);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      stop();
+    };
   }, []);
 
   const activeAgents = agents.filter((run) => run.status === "running" || run.status === "queued").length;
@@ -82,6 +103,10 @@ export function StatusBar({
     : gatewayReady
       ? t("shell.status.gatewayReady")
       : t("shell.status.gatewayNeedsSetup");
+  const updateAttention = shouldHighlightUpdate(updateStatus?.phase);
+  const updateTitle = updateStatus?.phase === "downloaded"
+    ? t("shell.status.updateDownloaded", { version: updateStatus.latestVersion || "?" })
+    : t("shell.status.updateAvailable", { version: updateStatus?.latestVersion || "?" });
 
   return (
     <footer className="statusbar flex shrink-0 items-stretch justify-between gap-2 overflow-hidden border-t border-border-soft px-1 font-mono text-[10px] text-muted">
@@ -213,13 +238,32 @@ export function StatusBar({
           active={developerOpen}
           compact
         />
-        <StatusText
-          icon={<Hash className="size-3" />}
-          label={`v${__APP_VERSION__}`}
-          detail={BUILD_SHA || undefined}
-          title={t("shell.status.build", { version: __APP_VERSION__, commit: BUILD_SHA || __APP_VERSION__ })}
-          className="text-faint"
-        />
+        {updateAttention ? (
+          <button
+            type="button"
+            className={cn(STATUS_ACTION, "status-update-attention")}
+            title={updateTitle}
+            aria-label={updateTitle}
+            onClick={onOpenAbout}
+          >
+            <Sparkles className="size-3" aria-hidden />
+            <span>{`v${__APP_VERSION__}`}</span>
+            {updateStatus?.latestVersion && (
+              <span className="status-update-version">{`→ v${updateStatus.latestVersion}`}</span>
+            )}
+          </button>
+        ) : (
+          <StatusText
+            icon={<Hash className="size-3" />}
+            label={`v${__APP_VERSION__}`}
+            detail={BUILD_SHA || undefined}
+            title={t("shell.status.build", { version: __APP_VERSION__, commit: BUILD_SHA || __APP_VERSION__ })}
+            className="text-faint"
+          />
+        )}
+        {updateAttention && (
+          <span className="sr-only" role="status" aria-live="polite">{updateTitle}</span>
+        )}
       </div>
     </footer>
   );

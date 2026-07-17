@@ -6,6 +6,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { McpServerConfig } from "./types.js";
 
+/** Windows exposes npm-family launchers as .cmd files when shell=false. */
+export function resolveMcpCommand(command: string): string {
+  if (process.platform !== "win32" || /\.(?:cmd|bat|exe|com)$/i.test(command)) return command;
+  const basename = command.split(/[\\/]/).at(-1)?.toLowerCase() ?? command.toLowerCase();
+  return ["npm", "npx", "pnpm", "yarn"].includes(basename) ? `${command}.cmd` : command;
+}
+
 export interface McpJsonRpcRequest {
   jsonrpc: "2.0";
   id: number;
@@ -41,6 +48,7 @@ export class McpStdioClient {
   private readonly timeoutMs: number;
   private readonly spawnImpl: typeof spawn;
   private initPromise: Promise<void> | null = null;
+  private stderr = "";
 
   constructor(private readonly options: McpStdioClientOptions) {
     this.timeoutMs = options.timeoutMs ?? 30_000;
@@ -69,7 +77,7 @@ export class McpStdioClient {
     // Never inherit Electron renderer tokens into MCP children.
     delete env.ELECTRON_RUN_AS_NODE;
 
-    this.child = this.spawnImpl(server.command, server.args ?? [], {
+    this.child = this.spawnImpl(resolveMcpCommand(server.command), server.args ?? [], {
       cwd: server.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -78,14 +86,17 @@ export class McpStdioClient {
     }) as ChildProcessWithoutNullStreams;
 
     this.child.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
-    this.child.stderr.on("data", () => {
-      /* ignore noisy server logs; errors surface via RPC */
+    this.child.stderr.on("data", (chunk: Buffer) => {
+      // Keep a short diagnostic tail. MCP servers commonly report the real
+      // cause (missing package, cwd, credentials) on stderr before exiting.
+      this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-2_000);
     });
     this.child.on("error", (err) => {
       this.failAll(err instanceof Error ? err : new Error(String(err)));
     });
     this.child.on("close", () => {
-      this.failAll(new Error("mcp_server_exited"));
+      const detail = this.stderr.trim();
+      this.failAll(new Error(detail ? `mcp_server_exited: ${detail}` : "mcp_server_exited"));
       this.child = null;
       this.initPromise = null;
     });
@@ -160,22 +171,34 @@ export class McpStdioClient {
     this.buffer = Buffer.concat([this.buffer, chunk]);
     for (;;) {
       const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
-      const header = this.buffer.subarray(0, headerEnd).toString("utf8");
-      const match = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!match) {
-        // Drop one line and retry (tolerant of noise).
-        const nl = this.buffer.indexOf("\n");
-        this.buffer = nl >= 0 ? this.buffer.subarray(nl + 1) : Buffer.alloc(0);
-        continue;
+      if (headerEnd >= 0) {
+        const header = this.buffer.subarray(0, headerEnd).toString("utf8");
+        const match = /Content-Length:\s*(\d+)/i.exec(header);
+        if (match) {
+          const length = Number(match[1]);
+          const total = headerEnd + 4 + length;
+          if (this.buffer.length < total) return;
+          const body = this.buffer.subarray(headerEnd + 4, total).toString("utf8");
+          this.buffer = this.buffer.subarray(total);
+          try {
+            this.onMessage(JSON.parse(body) as Record<string, unknown>);
+          } catch {
+            /* ignore malformed */
+          }
+          continue;
+        }
       }
-      const length = Number(match[1]);
-      const total = headerEnd + 4 + length;
-      if (this.buffer.length < total) return;
-      const body = this.buffer.subarray(headerEnd + 4, total).toString("utf8");
-      this.buffer = this.buffer.subarray(total);
+
+      // Current MCP stdio transport is newline-delimited JSON. Keep the
+      // legacy Content-Length parser above for older servers.
+      const newline = this.buffer.indexOf("\n");
+      if (newline < 0) return;
+      const line = this.buffer.subarray(0, newline).toString("utf8").replace(/\r$/, "");
+      if (/^\s*content-length\s*:/i.test(line) && headerEnd < 0) return;
+      this.buffer = this.buffer.subarray(newline + 1);
+      if (!line.trim()) continue;
       try {
-        this.onMessage(JSON.parse(body) as Record<string, unknown>);
+        this.onMessage(JSON.parse(line) as Record<string, unknown>);
       } catch {
         /* ignore malformed */
       }
@@ -219,4 +242,3 @@ export function tryParseFramedMessage(buffer: Buffer): { message: unknown; rest:
   const body = buffer.subarray(headerEnd + 4, total).toString("utf8");
   return { message: JSON.parse(body), rest: buffer.subarray(total) };
 }
-

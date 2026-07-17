@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
       - name: Verify tag matches package version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -55,20 +55,17 @@ jobs:
             artifact: Kyrei-Windows-x64
             files: |
               dist/app/*.exe
-          - os: macos-15-intel
-            label: macOS Intel
-            args: --mac --x64
-            artifact: Kyrei-macOS-x64
-            files: |
-              dist/app/*.dmg
-              dist/app/*.zip
+              dist/app/*.blockmap
+              dist/app/latest.yml
           - os: macos-15
-            label: macOS Apple Silicon
-            args: --mac --arm64
-            artifact: Kyrei-macOS-arm64
+            label: macOS x64 and Apple Silicon
+            args: --mac --x64 --arm64
+            artifact: Kyrei-macOS
             files: |
               dist/app/*.dmg
               dist/app/*.zip
+              dist/app/*.blockmap
+              dist/app/latest-mac.yml
           - os: ubuntu-24.04
             label: Linux and Arch x64
             args: --linux AppImage deb pacman --x64
@@ -78,6 +75,7 @@ jobs:
               dist/app/*.deb
               dist/app/*.pkg.tar.zst
               dist/app/*.pacman
+              dist/app/latest-linux.yml
           - os: ubuntu-24.04-arm
             label: Linux arm64
             args: --linux AppImage deb --arm64
@@ -85,6 +83,7 @@ jobs:
             files: |
               dist/app/*.AppImage
               dist/app/*.deb
+              dist/app/latest-linux-arm64.yml
     runs-on: ${{ matrix.os }}
     env:
       # Release artifacts remain unsigned until platform signing credentials
@@ -94,7 +93,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
       - name: Install Linux packaging tools
         if: startsWith(matrix.os, 'ubuntu-')

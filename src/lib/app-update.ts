@@ -9,6 +9,10 @@ export const KYREI_RELEASES_PAGE_URL = `https://github.com/${KYREI_GITHUB_OWNER}
 export const KYREI_LATEST_RELEASE_API =
   `https://api.github.com/repos/${KYREI_GITHUB_OWNER}/${KYREI_GITHUB_REPO}/releases/latest`;
 
+export function shouldHighlightUpdate(phase?: string): boolean {
+  return phase === "available" || phase === "downloaded";
+}
+
 export type UpdateCheckResult =
   | {
     status: "up_to_date";

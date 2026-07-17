@@ -148,6 +148,8 @@ export const ruShell = {
   "shell.status.developerShow": "Показать активность агента",
   "shell.status.developerHide": "Скрыть активность агента",
   "shell.status.build": "Сборка {version}, коммит {commit}",
+  "shell.status.updateAvailable": "Доступно обновление {version} — открыть обновления",
+  "shell.status.updateDownloaded": "Обновление {version} готово — перезапустить и установить",
   "shell.cron.title": "Расписания",
   "shell.cron.subtitle": "Запускайте локальные сессии Kyrei по расписанию.",
   "shell.cron.empty": "Расписаний пока нет",

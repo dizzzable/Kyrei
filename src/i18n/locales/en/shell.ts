@@ -147,6 +147,8 @@ export const enShell = {
   "shell.status.developerShow": "Show agent activity",
   "shell.status.developerHide": "Hide agent activity",
   "shell.status.build": "Build {version}, commit {commit}",
+  "shell.status.updateAvailable": "Update {version} is available — open updates",
+  "shell.status.updateDownloaded": "Update {version} is ready — restart to install",
   "shell.cron.title": "Schedules",
   "shell.cron.subtitle": "Run local Kyrei sessions on a schedule.",
   "shell.cron.empty": "No scheduled jobs",

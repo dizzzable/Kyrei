@@ -216,6 +216,7 @@ if (ownsSingleInstance) app.whenReady().then(async () => {
     });
     updateBroadcast.send = (status) => desktopCapabilities?.broadcastUpdate?.(status);
     await createWindow(gateway.port, gateway.token);
+    void appUpdater.start();
   } catch (error) {
     dialog.showErrorBox("Kyrei", error.message);
     app.quit();

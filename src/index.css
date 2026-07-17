@@ -426,6 +426,36 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 .send-button:not(:disabled):hover, .primary-action:hover { background: var(--k-primary-strong); }
 .statusbar { height: var(--app-statusbar-h); min-height: var(--app-statusbar-h); background: var(--k-bg); }
 
+@keyframes kyrei-update-glint {
+  0%, 58% { transform: translateX(-180%) skewX(-18deg); opacity: 0; }
+  64% { opacity: 0.7; }
+  82%, 100% { transform: translateX(420%) skewX(-18deg); opacity: 0; }
+}
+@keyframes kyrei-update-sparkle {
+  0%, 68%, 100% { transform: scale(1) rotate(0deg); filter: brightness(1); }
+  74% { transform: scale(1.18) rotate(10deg); filter: brightness(1.45); }
+  80% { transform: scale(0.96) rotate(-4deg); filter: brightness(1.1); }
+}
+.status-update-attention {
+  position: relative;
+  overflow: hidden;
+  color: var(--k-primary);
+  background: color-mix(in srgb, var(--k-primary) 7%, transparent);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--k-primary) 28%, transparent);
+}
+.status-update-attention::after {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 28%;
+  content: "";
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, white 68%, transparent), transparent);
+  animation: kyrei-update-glint 3.4s ease-in-out infinite;
+}
+.status-update-attention > svg { animation: kyrei-update-sparkle 3.4s ease-in-out infinite; }
+.status-update-version { color: color-mix(in srgb, var(--k-primary) 72%, var(--k-foreground)); }
+
 @media (max-width: 960px) {
   .shell-layout { display: block; }
   .shell-pane-conversation { position: absolute; inset: 0; }
@@ -492,5 +522,6 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 [data-radix-popper-content-wrapper] > * { animation: kyrei-pop-in 0.13s ease-out; }
 
 @media (prefers-reduced-motion: reduce) {
-  .msg-in, .animate-fade, [data-radix-popper-content-wrapper] > * { animation: none; }
+  .msg-in, .animate-fade, [data-radix-popper-content-wrapper] > *,
+  .status-update-attention::after, .status-update-attention > svg { animation: none; }
 }

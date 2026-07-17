@@ -23,6 +23,7 @@ import type {
   AppConfig,
   GBrainRuntimeStatus,
   MemoryIndexRuntimeStatus,
+  McpRuntimeStatus,
   SessionMirrorRuntimeStatus,
   SessionMirrorParityResult,
   MessagingRuntimeStatus,
@@ -149,6 +150,8 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [messagingBusy, setMessagingBusy] = useState(false);
   const [messagingTokenOnce, setMessagingTokenOnce] = useState<string | null>(null);
   const [messagingNote, setMessagingNote] = useState<string | null>(null);
+  const [mcpStatus, setMcpStatus] = useState<McpRuntimeStatus | null>(null);
+  const [mcpBusy, setMcpBusy] = useState(false);
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -303,14 +306,17 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
   }, [engineText, persist]);
 
-  const getEngineField = (path: string, fallback: unknown): unknown => {
-    let current: unknown = engine;
+  // Keep this accessor identity-stable. Health effects depend on the callback;
+  // closing over `engine` made every status update look like a configuration
+  // change and re-fired all memory probes in a loop.
+  const getEngineField = useCallback((path: string, fallback: unknown): unknown => {
+    let current: unknown = engineRef.current;
     for (const key of path.split(".")) {
       if (current == null || typeof current !== "object") return fallback;
       current = (current as Record<string, unknown>)[key];
     }
     return current ?? fallback;
-  };
+  }, []);
   const setEngineField = (path: string, value: unknown, persistImmediately = false) => {
     const next: Record<string, unknown> = JSON.parse(JSON.stringify(engineRef.current));
     const keys = path.split(".");
@@ -356,6 +362,18 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       setMemoryIndexCheckFailed(true);
     } finally {
       setMemoryIndexBusy(false);
+    }
+  }, [flushEngineSave]);
+
+  const checkMcp = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setMcpBusy(true);
+    try {
+      setMcpStatus(await gateway.getMcpStatus());
+    } catch {
+      setMcpStatus({ enabled: true, state: "error", servers: [], message: "gateway_unreachable" });
+    } finally {
+      setMcpBusy(false);
     }
   }, [flushEngineSave]);
 
@@ -481,11 +499,12 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       void checkGBrain();
       void checkMemoryIndex();
       void checkSessionMirror();
+      void checkMcp();
     }
     if (visibleSection === "notifications") {
       void checkMessaging();
     }
-  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMessaging, visibleSection]);
+  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMcp, checkMessaging, visibleSection]);
 
   const initializeGBrain = useCallback(async () => {
     // Persist a just-edited command before invoking it; otherwise a delayed
@@ -1372,6 +1391,34 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                             format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })}
                             onChange={(value) => setEngineField("mcp.timeoutMs", value)}
                           />
+                          <div className="flex flex-wrap items-center justify-between gap-2 py-2.5">
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-medium text-foreground">{t("settings.mcp.status.label")}</p>
+                              <p className="text-[11px] leading-snug text-muted">
+                                {!mcpStatus
+                                  ? t("settings.mcp.status.unknown")
+                                  : mcpStatus.state === "ready"
+                                    ? t("settings.mcp.status.ready", { count: mcpStatus.servers.length })
+                                    : mcpStatus.state === "no_servers"
+                                      ? t("settings.mcp.status.noServers")
+                                      : mcpStatus.state === "disabled"
+                                        ? t("settings.mcp.status.disabled")
+                                        : t("settings.mcp.status.error")}
+                              </p>
+                              {mcpStatus?.servers.map((server) => (
+                                <p key={server.id} className="mt-0.5 text-[11px] text-muted">
+                                  <span className={server.ok ? "text-success" : "text-warning"}>{server.ok ? "●" : "●"}</span>{" "}
+                                  <span className="font-mono">{server.id}</span>{" "}
+                                  {server.ok
+                                    ? t("settings.mcp.status.tools", { count: server.toolCount })
+                                    : server.error ?? t("settings.mcp.status.failed")}
+                                </p>
+                              ))}
+                            </div>
+                            <Button variant="outline" size="sm" onClick={() => void checkMcp()} disabled={mcpBusy}>
+                              {mcpBusy ? t("settings.mcp.status.checking") : t("settings.mcp.status.check")}
+                            </Button>
+                          </div>
                         </>
                       )}
                     </div>

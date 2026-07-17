@@ -1318,6 +1318,7 @@ export function App() {
         onOpenCron={openCron}
         onOpenMissions={openMissions}
         onOpenProviders={() => openSettings("providers")}
+        onOpenAbout={() => openSettings("about")}
         onToggleTurbo={toggleTurbo}
         onToggleDeveloper={toggleDeveloper}
       />
