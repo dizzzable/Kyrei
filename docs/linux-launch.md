@@ -29,7 +29,7 @@ root-process crash.
 
 | Symptom | Fix |
 | --- | --- |
-| `error: target not found: libappindicator` | You have an **old** package. Rebuild/download **v0.4.6+** (that dep was removed; Arch dropped the package). |
+| `error: target not found: libappindicator` | You have an **old** package. Rebuild/download **v0.4.7+** (that dep was removed; Arch dropped the package). |
 | `kyrei: command not found` | Log out/in or `hash -r`; package should put `/usr/bin/kyrei` on PATH. |
 | App starts but cannot save API key | Install + unlock Secret Service: `sudo pacman -S gnome-keyring` then re-login. |
 | Black window / instant exit on pure Wayland | Ensure `WAYLAND_DISPLAY` is set; launcher sets `ELECTRON_OZONE_PLATFORM_HINT=auto`. Override: `ELECTRON_OZONE_PLATFORM_HINT=wayland kyrei` or `=x11`. Install `xorg-xwayland` for XWayland fallback. |
@@ -163,7 +163,7 @@ kyrei
 
 | Симптом | Что делать |
 | --- | --- |
-| `error: target not found: libappindicator` | Старый пакет. Нужен **v0.4.6+** (зависимость убрана — в Arch пакета больше нет). |
+| `error: target not found: libappindicator` | Старый пакет. Нужен **v0.4.7+** (зависимость убрана — в Arch пакета больше нет). |
 | `kyrei: command not found` | Перелогиньтесь или `hash -r`; бинарь должен быть в `/usr/bin/kyrei`. |
 | Окно есть, ключ API не сохраняется | `sudo pacman -S gnome-keyring`, полный re-login, разблокировать keyring. |
 | Чёрный экран / мгновенный выход на Wayland | Лаунчер ставит `ELECTRON_OZONE_PLATFORM_HINT=auto`. Вручную: `ELECTRON_OZONE_PLATFORM_HINT=wayland kyrei` или `=x11`. Поставьте `xorg-xwayland`. |

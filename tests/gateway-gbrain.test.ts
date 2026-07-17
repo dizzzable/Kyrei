@@ -144,7 +144,18 @@ describe("gateway GBrain onboarding", () => {
   });
 
   it("returns a structured unavailable state when this build has no GBrain adapter", async () => {
+    // Engine module is cached after OOB bootstrap — restart without the GBrain adapter.
+    await server.close();
     includeAdapter = false;
+    runGBrainProcess.mockClear();
+    createGBrainClient.mockClear();
+    server = await startGateway({
+      dataDir,
+      preferredPort: 0,
+      engineLoader: vi.fn(async () => (includeAdapter
+        ? { runKyreiChat: vi.fn(), createGBrainClient, runGBrainProcess }
+        : { runKyreiChat: vi.fn() })),
+    });
     const status = await request<{ state: string; reason: string; doctorStatus: string }>("/api/memory/gbrain");
 
     expect(status).toEqual({ state: "unavailable", mode: "off", reason: "adapter_unavailable", doctorStatus: "unknown" });

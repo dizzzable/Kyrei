@@ -11,6 +11,8 @@ let workspace = "";
 let selectedFolder = "";
 let openedPath = "";
 let engineLoader = vi.fn();
+/** Shared chat mock — gateway caches engine after OOB bootstrap at start. */
+let runKyreiChat = vi.fn();
 let server: { port: number; token: string; close(): Promise<void> };
 
 beforeEach(async () => {
@@ -19,7 +21,17 @@ beforeEach(async () => {
   await mkdir(workspace);
   selectedFolder = workspace;
   openedPath = "";
-  engineLoader = vi.fn(async () => ({ runKyreiChat: vi.fn() }));
+  runKyreiChat = vi.fn(async () => ({
+    text: "done",
+    parts: [],
+    status: "complete",
+    attempts: [],
+  }));
+  // Real engine exports (bootstrap / stores) + stable runKyreiChat mock for the process lifetime.
+  engineLoader = vi.fn(async () => {
+    const engine = await import("../core/engine/.dist/index.mjs");
+    return { ...engine, runKyreiChat };
+  });
   server = await startGateway({
     dataDir,
     preferredPort: 0,
@@ -117,13 +129,7 @@ describe("gateway operational capabilities", () => {
   });
 
   it("forwards only explicitly selected standalone Skills for a normal chat turn", async () => {
-    const runKyreiChat = vi.fn(async () => ({
-      text: "done",
-      parts: [],
-      status: "complete",
-      attempts: [],
-    }));
-    engineLoader.mockResolvedValue({ runKyreiChat });
+    // runKyreiChat is the same mock cached at gateway start (bootstrap loads engine once).
     const config = await request<{ activeProviderId: string }>("/api/config");
     await request(`/api/providers/${config.activeProviderId}/secret`, {
       method: "PUT",
