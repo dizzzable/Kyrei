@@ -531,7 +531,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
   };
 
   return {
-    ...buildProjectIntelTools(workspace),
+    ...buildProjectIntelTools(workspace, { onMemoryMutated: options.onMemoryMutated }),
     list_dir: tool({
       description: TOOL_DESCRIPTIONS.list_dir,
       inputSchema: z.object({

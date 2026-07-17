@@ -81,6 +81,9 @@ async function runReindex(entry: PoolEntry, opts: {
     await entry.reindexInFlight;
     if (!entry.dirty) return;
   }
+  // Skip full projection when nothing changed — every chat turn used to reindex
+  // the whole Tier A corpus, which felt "infinite" and hammered SQLite.
+  if (!entry.dirty) return;
   const work = (async () => {
     entry.dirty = false;
     try {

@@ -64,4 +64,25 @@ describe("MemoryIndexSession pool", () => {
     expect(hits.length).toBeGreaterThanOrEqual(1);
     await session.release();
   });
+
+  it("skips full reindex when the pool entry is clean (no dirty flag)", async () => {
+    await mkdir(join(ws, ".kyrei", "memory"), { recursive: true });
+    await writeFile(join(ws, ".kyrei", "memory", "MEMORY.md"), "once only projection", "utf8");
+
+    const session = await MemoryIndexSession.acquire({
+      workspace: ws,
+      config: { enabled: true, backend: "sqlite" },
+      ltmEnabled: false,
+      planningEnabled: false,
+    });
+    await session.reindexNow();
+    const first = await session.memoryStore!.listDocs({ workspace: ws });
+    expect(first.length).toBeGreaterThanOrEqual(1);
+
+    // Clean second call must not thrash — still returns cached docs.
+    await session.reindexNow();
+    const second = await session.memoryStore!.listDocs({ workspace: ws });
+    expect(second.length).toBe(first.length);
+    await session.release();
+  });
 });

@@ -145,17 +145,21 @@ export async function reindexProjectMemory(
       const raw = await readIf(indexPath);
       if (raw?.trim()) {
         const parsed = JSON.parse(raw) as {
-          entryCandidates?: Array<{ path?: string; reason?: string }>;
+          entryCandidates?: Array<string | { path?: string; reason?: string }>;
           languages?: Record<string, number>;
           fileCount?: number;
         };
         const entries = Array.isArray(parsed.entryCandidates) ? parsed.entryCandidates.slice(0, 24) : [];
         if (entries.length || parsed.fileCount) {
+          const formatEntry = (e: string | { path?: string; reason?: string }): string => {
+            if (typeof e === "string") return `- ${e}`;
+            return `- ${e.path ?? "?"}${e.reason ? ` — ${e.reason}` : ""}`;
+          };
           const lines = [
             `Project graph snapshot (import-level, may be stale): ${parsed.fileCount ?? "?"} files`,
             parsed.languages ? `Languages: ${Object.keys(parsed.languages).slice(0, 12).join(", ")}` : "",
             "Entry candidates:",
-            ...entries.map((e) => `- ${e.path ?? "?"}${e.reason ? ` — ${e.reason}` : ""}`),
+            ...entries.map(formatEntry),
           ].filter(Boolean);
           await upsert(
             doc({

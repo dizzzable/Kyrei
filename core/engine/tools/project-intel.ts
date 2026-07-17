@@ -4,7 +4,6 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import {
   analyzeProjectImpact,
-  buildProjectIndex,
   buildProjectIndexIncremental,
   formatProjectImpact,
   formatProjectIndex,
@@ -13,7 +12,10 @@ import {
 } from "../intel/project-index.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 
-export function buildProjectIntelTools(workspace: string): ToolSet {
+export function buildProjectIntelTools(
+  workspace: string,
+  options: { onMemoryMutated?: () => void } = {},
+): ToolSet {
   return {
     project_index: tool({
       description: TOOL_DESCRIPTIONS.project_index,
@@ -23,6 +25,8 @@ export function buildProjectIntelTools(workspace: string): ToolSet {
           // Try incremental SQLite-backed indexing first (Phase 3C)
           const index = await buildProjectIndexIncremental(workspace);
           await persistProjectIndex(workspace, index);
+          // Project graph lite into the rebuildable FTS memory index (MEMORY SoT stays files).
+          options.onMemoryMutated?.();
           return `${formatProjectIndex(index, { edgeLimit: 80 })}\n\nSaved under .kyrei/intel/ for subsequent reads.`;
         } catch (err) {
           return `Indexing failed: ${err instanceof Error ? err.message : String(err)}`;

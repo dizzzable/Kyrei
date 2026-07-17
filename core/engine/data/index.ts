@@ -6,6 +6,7 @@
  * Requirements §10.3.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionStore, MemoryStore, VectorStore, MemoryDoc, VectorHit } from "./ports.js";
 import { createFileSessionStore } from "./file/session-store.js";
@@ -13,6 +14,43 @@ import { openDb } from "./sqlite/open.js";
 import { createSqliteSessionStore } from "./sqlite/session-store.js";
 import { createSqliteMemoryStore } from "./sqlite/memory-store.js";
 import { createSqliteVectorStore } from "./sqlite/vector-store.js";
+
+function isTransientSqliteOpenError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /SQLITE_BUSY|database is locked|EAGAIN|EBUSY/i.test(message);
+}
+
+function openSqliteStores(baseDir: string): Stores {
+  const { db, vecOk } = openDb(join(baseDir, "index.db"));
+  return {
+    backend: "sqlite",
+    vectorSearch: vecOk ? "sqlite-vec" : "bruteforce",
+    sessions: createSqliteSessionStore(db),
+    memory: createSqliteMemoryStore(db),
+    vectors: createSqliteVectorStore(db),
+    close: () => { db.close(); },
+  };
+}
+
+/** Prefer SQLite; retry transient locks before falling back to durable file store. */
+function openSqliteStoresWithRetry(baseDir: string, attempts = 4): Stores {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return openSqliteStores(baseDir);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientSqliteOpenError(error) || attempt === attempts - 1) break;
+      // brief backoff for concurrent chat-turn + Settings reindex
+      const waitMs = 25 * (attempt + 1);
+      const end = Date.now() + waitMs;
+      while (Date.now() < end) {
+        /* spin short — sync API */
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
 export interface Stores {
   backend: "sqlite" | "postgres" | "file";
@@ -26,28 +64,109 @@ export interface Stores {
 export function createStores(baseDir: string): Stores {
   try {
     // better-sqlite3 is external and only executes native code here (openDb → new Database).
-    const { db, vecOk } = openDb(join(baseDir, "index.db"));
-    return {
-      backend: "sqlite",
-      vectorSearch: vecOk ? "sqlite-vec" : "bruteforce",
-      sessions: createSqliteSessionStore(db),
-      memory: createSqliteMemoryStore(db),
-      vectors: createSqliteVectorStore(db),
-      close: () => { db.close(); },
-    };
+    return openSqliteStoresWithRetry(baseDir);
   } catch (err) {
     console.warn("[kyrei data] SQLite unavailable, using file backend:", (err as Error).message);
     return createFileStores(baseDir);
   }
 }
 
-/** Degraded fallback: file session store + in-memory memory/vector. */
+/**
+ * Degraded fallback when native SQLite is unavailable.
+ * Memory docs persist under baseDir so reindex results survive process restarts
+ * (the old in-memory Map looked successful then vanished on next status check).
+ */
 export function createFileStores(baseDir: string): Stores {
   const sessions = createFileSessionStore(baseDir);
+  const docsPath = join(baseDir, "memory-docs.json");
+  const vectorsPath = join(baseDir, "memory-vectors.json");
   const docs = new Map<string, MemoryDoc>();
+  const vecRows: Array<{
+    ownerType: string;
+    ownerId: string;
+    chunkIndex: number;
+    model?: string;
+    contentHash?: string;
+    embedding: Float32Array;
+  }> = [];
+
+  try {
+    mkdirSync(baseDir, { recursive: true });
+  } catch {
+    /* best effort */
+  }
+
+  try {
+    if (existsSync(docsPath)) {
+      const parsed = JSON.parse(readFileSync(docsPath, "utf8")) as MemoryDoc[];
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) {
+          if (d && typeof d.id === "string") docs.set(d.id, d);
+        }
+      }
+    }
+  } catch {
+    /* corrupt file — start empty */
+  }
+
+  try {
+    if (existsSync(vectorsPath)) {
+      const parsed = JSON.parse(readFileSync(vectorsPath, "utf8")) as Array<{
+        ownerType: string;
+        ownerId: string;
+        chunkIndex: number;
+        model?: string;
+        contentHash?: string;
+        embedding: number[];
+      }>;
+      if (Array.isArray(parsed)) {
+        for (const r of parsed) {
+          if (!r?.ownerType || !r?.ownerId || !Array.isArray(r.embedding)) continue;
+          vecRows.push({
+            ownerType: r.ownerType,
+            ownerId: r.ownerId,
+            chunkIndex: Number(r.chunkIndex) || 0,
+            ...(r.model ? { model: r.model } : {}),
+            ...(r.contentHash ? { contentHash: r.contentHash } : {}),
+            embedding: Float32Array.from(r.embedding),
+          });
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const flushDocs = (): void => {
+    try {
+      mkdirSync(baseDir, { recursive: true });
+      writeFileSync(docsPath, `${JSON.stringify([...docs.values()], null, 2)}\n`, "utf8");
+    } catch (error) {
+      console.warn("[kyrei data] file memory flush failed:", (error as Error).message);
+    }
+  };
+
+  const flushVectors = (): void => {
+    try {
+      mkdirSync(baseDir, { recursive: true });
+      const serializable = vecRows.map((r) => ({
+        ownerType: r.ownerType,
+        ownerId: r.ownerId,
+        chunkIndex: r.chunkIndex,
+        ...(r.model ? { model: r.model } : {}),
+        ...(r.contentHash ? { contentHash: r.contentHash } : {}),
+        embedding: [...r.embedding],
+      }));
+      writeFileSync(vectorsPath, `${JSON.stringify(serializable)}\n`, "utf8");
+    } catch (error) {
+      console.warn("[kyrei data] file vector flush failed:", (error as Error).message);
+    }
+  };
+
   const memory: MemoryStore = {
     async upsertDoc(d) {
       docs.set(d.id, d);
+      flushDocs();
     },
     async getDoc(id) {
       return docs.get(id) ?? null;
@@ -68,9 +187,9 @@ export function createFileStores(baseDir: string): Stores {
     },
     async removeDoc(id) {
       docs.delete(id);
+      flushDocs();
     },
   };
-  const vecRows: Array<{ ownerType: string; ownerId: string; chunkIndex: number; embedding: Float32Array }> = [];
   const cosine = (a: Float32Array, b: Float32Array): number => {
     const n = Math.min(a.length, b.length);
     let dot = 0;
@@ -88,10 +207,18 @@ export function createFileStores(baseDir: string): Stores {
     async upsert(rows) {
       for (const r of rows) {
         const i = vecRows.findIndex((x) => x.ownerType === r.ownerType && x.ownerId === r.ownerId && x.chunkIndex === r.chunkIndex);
-        const row = { ownerType: r.ownerType, ownerId: r.ownerId, chunkIndex: r.chunkIndex, embedding: r.embedding };
+        const row = {
+          ownerType: r.ownerType,
+          ownerId: r.ownerId,
+          chunkIndex: r.chunkIndex,
+          ...(r.model ? { model: r.model } : {}),
+          ...(r.contentHash ? { contentHash: r.contentHash } : {}),
+          embedding: r.embedding,
+        };
         if (i >= 0) vecRows[i] = row;
         else vecRows.push(row);
       }
+      flushVectors();
     },
     async query(embedding, opts) {
       const hits: VectorHit[] = vecRows
@@ -102,6 +229,7 @@ export function createFileStores(baseDir: string): Stores {
     },
     async deleteByOwner(ownerType, ownerId) {
       for (let i = vecRows.length - 1; i >= 0; i--) if (vecRows[i]!.ownerType === ownerType && vecRows[i]!.ownerId === ownerId) vecRows.splice(i, 1);
+      flushVectors();
     },
     async hybridSearch(query, opts) {
       return this.query(query.embedding, { k: opts.k });
@@ -141,17 +269,9 @@ export async function createStoresAsync(opts: {
     if (!opts.connectionString) throw new Error("Postgres backend requires connectionString");
     return createPostgresStores(opts.connectionString);
   }
-  // Default: try SQLite, fallback to file
+  // Default: try SQLite (with lock retries), fallback to durable file store
   try {
-    const { db, vecOk } = openDb(join(opts.baseDir, "index.db"));
-    return {
-      backend: "sqlite",
-      vectorSearch: vecOk ? "sqlite-vec" : "bruteforce",
-      sessions: createSqliteSessionStore(db),
-      memory: createSqliteMemoryStore(db),
-      vectors: createSqliteVectorStore(db),
-      close: () => { db.close(); },
-    };
+    return openSqliteStoresWithRetry(opts.baseDir);
   } catch (err) {
     console.warn("[kyrei data] SQLite unavailable, using file backend:", (err as Error).message);
     return createFileStores(opts.baseDir);

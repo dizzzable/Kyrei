@@ -91,4 +91,35 @@ describe("project memory indexer (Tier A → FTS projection)", () => {
     expect(on.backend === "sqlite" || on.backend === "file").toBe(true);
     await closeMemoryIndex(on.stores);
   });
+
+  it("projects string entryCandidates from project-index.json into graph-lite memory docs", async () => {
+    await mkdir(join(ws, ".kyrei", "intel"), { recursive: true });
+    await writeFile(
+      join(ws, ".kyrei", "intel", "project-index.json"),
+      JSON.stringify({
+        version: 1,
+        fileCount: 3,
+        languages: { TypeScript: 3 },
+        entryCandidates: ["src/index.ts", "package.json"],
+      }),
+      "utf8",
+    );
+
+    const stores = createStores(join(ws, ".kyrei", "index"));
+    try {
+      const result = await reindexProjectMemory({
+        workspace: ws,
+        memory: stores.memory,
+        ltmEnabled: false,
+        planningEnabled: false,
+      });
+      expect(result.sources).toContain("graph");
+      const doc = await stores.memory.getDoc("proj:intel:entry-candidates");
+      expect(doc?.body).toContain("src/index.ts");
+      expect(doc?.body).toContain("package.json");
+      expect(doc?.body).not.toMatch(/- \?/);
+    } finally {
+      await stores.close();
+    }
+  });
 });

@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { openDb } from "./sqlite/open.js";
 import { createSqliteSessionStore } from "./sqlite/session-store.js";
 import { createSqliteMemoryStore } from "./sqlite/memory-store.js";
 import { createSqliteVectorStore } from "./sqlite/vector-store.js";
-import { createPostgresStores } from "./index.js";
+import { createFileStores, createPostgresStores } from "./index.js";
 import type { SessionStore } from "./ports.js";
 
 function nowIso() {
@@ -166,6 +169,34 @@ describe("SQLite VectorStore (brute-force cosine)", () => {
     await vec.deleteByOwner("doc", "a");
     const after = await vec.query(new Float32Array([0.9, 0.1, 0]), { k: 2 });
     expect(after.map((h) => h.ownerId)).not.toContain("a");
+  });
+});
+
+describe("file memory backend persistence", () => {
+  it("survives close/reopen so reindex is not lost when SQLite is unavailable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kyrei-file-mem-"));
+    try {
+      const a = createFileStores(dir);
+      await a.memory.upsertDoc({
+        id: "persist-1",
+        scope: "project",
+        kind: "memory",
+        path: ".kyrei/memory/MEMORY.md",
+        workspace: dir,
+        title: "MEMORY",
+        body: "durable file-backend projection",
+        contentHash: "abc",
+        updatedAt: nowIso(),
+      });
+      await a.close();
+
+      const b = createFileStores(dir);
+      const doc = await b.memory.getDoc("persist-1");
+      expect(doc?.body).toContain("durable file-backend");
+      await b.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
