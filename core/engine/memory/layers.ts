@@ -8,7 +8,12 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createLtmBridge } from "./ltm-bridge.js";
-import { effectiveConfidence, DEFAULT_DECAY_CONFIG } from "./capture-signals.js";
+import {
+  effectiveConfidence,
+  DEFAULT_DECAY_CONFIG,
+  normalizeDecayConfig,
+  type DecayConfig,
+} from "./capture-signals.js";
 
 async function readIfExists(path: string): Promise<string | null> {
   try {
@@ -48,6 +53,8 @@ export interface AssembleOpts {
    * (ROADMAP.md + STATE.json + current phase notes). Fail-open.
    */
   includePlan?: boolean;
+  /** Wave H: decay ranking for DECISIONS layer (from engine config). */
+  decay?: import("./capture-signals.js").DecayConfig | { enabled?: boolean; floor?: number };
 }
 
 /**
@@ -94,24 +101,28 @@ async function readLtmRecall(ltmDir: string): Promise<string | null> {
  * Active bi-temporal decisions from `ltm/store/decisions.jsonl`.
  * Durable project memory, not instructions. Fail-open.
  */
-async function readLtmDecisions(ltmDir: string): Promise<string | null> {
+async function readLtmDecisions(ltmDir: string, decayCfg?: DecayConfig): Promise<string | null> {
   try {
     const bridge = createLtmBridge(ltmDir);
-    const ranked = await bridge.listDecisions({ rankByConfidence: true });
+    const decay = normalizeDecayConfig(decayCfg ?? DEFAULT_DECAY_CONFIG);
+    const ranked = await bridge.listDecisions({
+      rankByConfidence: decay.enabled,
+      decay,
+    });
     if (ranked.length === 0) return null;
     // Align with refreshRuntimeSnapshot: drop aged unpinned below decay floor.
     const now = new Date();
     const visible = ranked.filter((d) => {
-      if (d.pinned) return true;
+      if (!decay.enabled || d.pinned) return true;
       const conf = effectiveConfidence({
         baseConfidence: d.confidence,
         kind: d.kind,
         pinned: d.pinned,
         lastAccessedAt: d.lastAccessedAt,
         now,
-        config: DEFAULT_DECAY_CONFIG,
+        config: decay,
       });
-      return conf > DEFAULT_DECAY_CONFIG.floor;
+      return conf > decay.floor;
     });
     if (visible.length === 0) return null;
     const lines = visible.slice(0, 30).map((d) => {
@@ -175,7 +186,10 @@ export async function assembleSystemContext(opts: AssembleOpts): Promise<string>
   if (opts.ltmDir) {
     const recall = await readLtmRecall(opts.ltmDir);
     if (recall) layers.push({ name: "LTM_RECALL", body: recall });
-    const decisions = await readLtmDecisions(opts.ltmDir);
+    const decisions = await readLtmDecisions(
+      opts.ltmDir,
+      opts.decay ? normalizeDecayConfig(opts.decay) : undefined,
+    );
     if (decisions) layers.push({ name: "DECISIONS", body: decisions });
   }
   if (opts.includePlan) {

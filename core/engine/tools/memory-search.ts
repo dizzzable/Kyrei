@@ -107,6 +107,29 @@ async function searchDecisions(ltmDir: string, query: string, hits: Hit[]): Prom
   }
 }
 
+/** After ranking: refresh last_accessed for top decision hits (one lock batch). */
+async function touchTopDecisionHits(ltmDir: string | undefined, top: Hit[]): Promise<void> {
+  if (!ltmDir) return;
+  const ids: string[] = [];
+  for (const h of top) {
+    if (h.source !== "decision" || !h.path) continue;
+    const m = /#(dec_\d+)/i.exec(h.path);
+    if (m?.[1] && !ids.includes(m[1])) ids.push(m[1]);
+    if (ids.length >= 3) break;
+  }
+  if (!ids.length) return;
+  try {
+    const bridge = createLtmBridge(ltmDir);
+    if (typeof bridge.touchDecisions === "function") {
+      await bridge.touchDecisions(ids);
+    } else {
+      for (const id of ids) await bridge.touchDecision(id);
+    }
+  } catch {
+    /* fail-open */
+  }
+}
+
 async function searchPlan(workspace: string, query: string, hits: Hit[]): Promise<void> {
   const plan = createPlanStore(workspace);
   const roadmap = await plan.readRoadmap();
@@ -419,6 +442,10 @@ export function buildMemorySearchTools(options: MemorySearchOptions): ToolSet {
           await Promise.all(tasks);
 
           const top = rankHits(hits, lim, options.recall);
+          // Refresh Ebbinghaus last_accessed for top decision hits (await so no Windows tmp race).
+          if (options.ltmEnabled !== false && options.ltmDir) {
+            await touchTopDecisionHits(options.ltmDir, top);
+          }
           const channels = [
             "file scan",
             options.sessionSnippets?.length ? "live session" : null,

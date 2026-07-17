@@ -487,6 +487,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     planningTools,
     openvikingTools,
     memorySearchTools,
+    memoryAskTools,
     childSkillTools,
   );
   const delegationEnabled = cfg.delegation.enabled;
@@ -501,6 +502,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(cfg.memory?.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm") } : {}),
         ...(cfg.planning?.enabled ? { includePlan: true } : {}),
         ...(opts.globalMemoryDir ? { globalDir: opts.globalMemoryDir } : {}),
+        ...(cfg.memory?.decay ? { decay: cfg.memory.decay } : {}),
       });
       projectContext = assembled.trim() ? assembled : undefined;
       // Wave D4: budgeted symbol map (fail-open; complements import graph tools).
@@ -561,18 +563,18 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       personality: cfg.personality,
       personalityPresetId: cfg.personalityPresetId,
     }),
-    codingMode: cfg.codingMode,
+    // When long-task plan gate forces plan tools, prompt must match (not stay on auto).
+    codingMode: forcePlan ? "plan" : cfg.codingMode,
     timezone: cfg.timezone,
     promptProfile: cfg.promptProfiles.find((profile) => profile.id === cfg.activePromptProfileId)?.systemPrompt,
     projectContext,
     hasBrainTools: Object.keys(brainTools).length > 0,
     hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
-    hasDecisionTools: Boolean(
-      cfg.memory.ltm?.enabled && opts.sessionId && workspaceReady,
-    ),
+    // Reads (query/fetch) work without sessionId; writes need sessionId but policy still useful.
+    hasDecisionTools: Boolean(cfg.memory.ltm?.enabled && workspaceReady),
     hasPlanningTools: Object.keys(planningTools).length > 0,
     hasOpenVikingTools: Object.keys(openvikingTools).length > 0,
-    hasMemorySearch: Object.keys(memorySearchTools).length > 0,
+    hasMemorySearch: Object.keys(memorySearchTools).length > 0 || Object.keys(memoryAskTools).length > 0,
     hasMemoryWriteTools: Object.keys(memoryWriteTools).length > 0,
     hasMcpTools: Object.keys(mcpTools).length > 0,
     hasDelegation: delegationEnabled,
@@ -805,11 +807,16 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           : {}),
       }),
     });
-    const mergedTools: ToolSet = { ...(tools ?? {}), ...delegateTools, ...teamTools };
+    // Merge first, then re-apply plan filter so team_delegate cannot reappear
+    // after filterToolsForCodingMode stripped it from the base set.
+    const mergedRaw: ToolSet = { ...(tools ?? {}), ...delegateTools, ...teamTools };
+    const configuredMode = forcePlan ? "plan" as const : normalizeCodingMode(cfg.codingMode);
+    const mergedTools: ToolSet = (
+      filterToolsForCodingMode(mergedRaw as Record<string, unknown>, configuredMode) ?? {}
+    ) as ToolSet;
     const callTools: ToolSet | undefined = useTools && Object.keys(mergedTools).length
       ? mergedTools
       : undefined;
-    const configuredMode = forcePlan ? "plan" as const : normalizeCodingMode(cfg.codingMode);
     /** Plan-safe subset used when auto declares Effective phase: plan mid-turn. */
     const planActiveToolNames = callTools
       ? (Object.keys(

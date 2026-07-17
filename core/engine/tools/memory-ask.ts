@@ -139,6 +139,22 @@ export async function collectAskSnippets(
     { k: lim, mmrEnabled: true, clusterEnabled: true },
   );
 
+  // Refresh last_accessed for decision snippets that survived ranking (fail-open).
+  if (options.ltmDir) {
+    const ids = ranked
+      .map((h) => String(h.title ?? ""))
+      .filter((id) => /^dec_\d+$/i.test(id))
+      .slice(0, 3);
+    if (ids.length) {
+      try {
+        const bridge = createLtmBridge(options.ltmDir);
+        if (typeof bridge.touchDecisions === "function") await bridge.touchDecisions(ids);
+      } catch {
+        /* fail-open */
+      }
+    }
+  }
+
   return ranked.map((h, i) => ({
     id: String(h.title || `s${i + 1}`),
     text: h.snippet,

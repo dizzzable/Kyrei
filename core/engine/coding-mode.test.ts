@@ -64,6 +64,12 @@ describe("coding-mode", () => {
       plan_write_roadmap: {},
       web_search: {},
       team_delegate: {},
+      record_decision: {},
+      invalidate_decision: {},
+      memory_search: {},
+      memory_ask: {},
+      query_decisions: {},
+      fetch_decision: {},
     };
     const plan = filterToolsForCodingMode(tools, "plan");
     expect(plan).toBeDefined();
@@ -71,9 +77,15 @@ describe("coding-mode", () => {
     expect(plan).not.toHaveProperty("write_file");
     expect(plan).not.toHaveProperty("run_command");
     expect(plan).not.toHaveProperty("team_delegate");
+    expect(plan).not.toHaveProperty("record_decision");
+    expect(plan).not.toHaveProperty("invalidate_decision");
     expect(plan).toHaveProperty("read_file");
     expect(plan).toHaveProperty("plan_write_roadmap");
     expect(plan).toHaveProperty("web_search");
+    expect(plan).toHaveProperty("memory_search");
+    expect(plan).toHaveProperty("memory_ask");
+    expect(plan).toHaveProperty("query_decisions");
+    expect(plan).toHaveProperty("fetch_decision");
     for (const name of PLAN_MODE_BLOCKED_TOOLS) {
       expect(plan).not.toHaveProperty(name);
     }

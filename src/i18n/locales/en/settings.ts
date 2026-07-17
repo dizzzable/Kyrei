@@ -774,7 +774,7 @@ export const enSettings = {
   "settings.memoryRecall.citeOrRefuse.hint": "When hits are weak, memory_search returns a grounded refuse instead of low-confidence candidates. memory_ask always refuses when evidence is missing.",
   "settings.ltmDecisions.label": "Decisions (pin & history)",
   "settings.ltmDecisions.fieldHint": "Browse bi-temporal decisions. Pin hard facts; expand a row for SUPERSEDE history.",
-  "settings.ltmDecisions.hint": "Active decisions ranked by pin + confidence. Pinning supersedes the row with a pinned copy (history preserved).",
+  "settings.ltmDecisions.hint": "Active decisions ranked by pin + confidence. Pin flips in place (stable id, no SUPERSEDE spam).",
   "settings.ltmDecisions.showSuperseded": "Show superseded",
   "settings.ltmDecisions.refresh": "Refresh",
   "settings.ltmDecisions.loading": "Loading…",

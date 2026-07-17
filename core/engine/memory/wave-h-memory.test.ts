@@ -293,6 +293,18 @@ describe("curator + capture integration", () => {
     expect(all.find((d) => d.id === oldId)?.validTo).toBeTruthy();
   });
 
+  it("touchDecisions batch-updates last_accessed", async () => {
+    const bridge = createLtmBridge(join(ws, "ltm-touch"));
+    const a = await bridge.addDecision({ decision: "Alpha decision", sessionId: "s" });
+    const b = await bridge.addDecision({ decision: "Beta decision", sessionId: "s" });
+    const before = (await bridge.fetchDecision(a)).decision!.lastAccessedAt;
+    await new Promise((r) => setTimeout(r, 5));
+    const n = await bridge.touchDecisions([a, b]);
+    expect(n).toBe(2);
+    const after = (await bridge.fetchDecision(a)).decision!.lastAccessedAt;
+    expect(after >= before).toBe(true);
+  });
+
   it("setPinned flips pin without changing id", async () => {
     const bridge = createLtmBridge(join(ws, "ltm-pin"));
     const id = await bridge.addDecision({

@@ -2199,7 +2199,8 @@ export async function startGateway({
     return {
       enabled: mirror.enabled !== false,
       readSearch: mirror.readSearch !== false,
-      enginePrimary: mirror.enginePrimary === true,
+      // Align with DEFAULT_ENGINE_CONFIG (true) and UI: missing key = on.
+      enginePrimary: mirror.enginePrimary !== false,
     };
   };
   const sessionMirrorEnabled = () => sessionMirrorConfig().enabled;
@@ -2232,8 +2233,9 @@ export async function startGateway({
     try {
       const mirror = await ensureSessionMirror();
       if (!mirror) {
+        // infrastructure: SQLite/engine never opened — cannot dual-write (not a write failure).
         return sessionMirrorEnabled()
-          ? { ok: false, error: "mirror_unavailable" }
+          ? { ok: false, error: "mirror_unavailable", infrastructure: true }
           : { ok: true, skipped: true };
       }
       const session = store.getSession(sessionId);
@@ -2305,6 +2307,21 @@ export async function startGateway({
     }
     const result = await mirrorGatewaySession(sessionId);
     if (result.ok) return result;
+    // Primary without a working mirror store cannot be enforced — degrade gracefully.
+    // Real write failures after open still fail closed when must=true.
+    if (result.infrastructure || result.error === "mirror_unavailable") {
+      if (!sessionMirrorHandle) {
+        // one-shot log; avoid spamming every turn in tests / degraded installs
+        if (!globalThis.__kyreiMirrorInfraWarned) {
+          globalThis.__kyreiMirrorInfraWarned = true;
+          console.warn(
+            "[kyrei session-mirror] enginePrimary on but mirror unavailable; fail-open dual-write:",
+            result.error,
+          );
+        }
+      }
+      return { ok: true, skipped: true, warning: result.error };
+    }
     if (must) return result;
     return { ok: true, skipped: true, warning: result.error };
   };
@@ -6437,7 +6454,12 @@ export async function startGateway({
         const includeInvalidated = url.searchParams.get("includeInvalidated") === "1"
           || url.searchParams.get("includeInvalidated") === "true";
         const result = await listLtmDecisionsApi({ includeInvalidated });
-        return sendJson(res, result.ok ? 200 : result.error === "workspace_not_configured" ? 400 : 503, result);
+        const status = result.ok
+          ? 200
+          : result.error === "workspace_not_configured" || result.error === "ltm_disabled"
+            ? 400
+            : 503;
+        return sendJson(res, status, result);
       }
 
       if (path === "/api/memory/ltm/decisions/fetch" && req.method === "GET") {
@@ -6448,7 +6470,9 @@ export async function startGateway({
           ? 200
           : result.error === "not_found"
             ? 404
-            : result.error === "workspace_not_configured" || result.error === "id_required"
+            : result.error === "workspace_not_configured"
+              || result.error === "id_required"
+              || result.error === "ltm_disabled"
               ? 400
               : 503;
         return sendJson(res, status, result);
@@ -8867,28 +8891,40 @@ export async function startGateway({
           if (controllers.has(id) || sessionReservations.has(id)) {
             return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
           }
-          store.removeSession(id);
-          runtimeActivity.delete(id);
-          sessionProtectedAllowOnce.delete(id);
-          // A4c: delete from engine (required when enginePrimary).
-          try {
-            const mirror = await ensureSessionMirror();
-            if (mirror && typeof mirror.removeSession === "function") {
-              await mirror.removeSession(id);
-            } else if (sessionMirrorEnginePrimary() && sessionMirrorEnabled()) {
-              return sendJson(res, 503, {
-                code: "engine_mirror_write_failed",
-                error: "mirror_unavailable",
-              });
+          // A4c: remove engine before JSON when mirror is open so write failures
+          // never leave JSON deleted with a live engine row. If mirror never
+          // opens (infrastructure), remove JSON only (fail-open, no split-brain).
+          if (sessionMirrorEnginePrimary()) {
+            let mirror = null;
+            try {
+              mirror = await ensureSessionMirror();
+            } catch {
+              mirror = null;
             }
-          } catch (error) {
-            if (sessionMirrorEnginePrimary()) {
-              return sendJson(res, 503, {
-                code: "engine_mirror_write_failed",
-                error: error?.message ?? "engine_mirror_write_failed",
-              });
+            if (mirror && typeof mirror.removeSession === "function") {
+              try {
+                await mirror.removeSession(id);
+              } catch (error) {
+                return sendJson(res, 503, {
+                  code: "engine_mirror_write_failed",
+                  error: error?.message ?? "engine_mirror_write_failed",
+                });
+              }
+            }
+            store.removeSession(id);
+          } else {
+            store.removeSession(id);
+            try {
+              const mirror = await ensureSessionMirror();
+              if (mirror && typeof mirror.removeSession === "function") {
+                await mirror.removeSession(id);
+              }
+            } catch {
+              /* fail-open dual-write when not primary */
             }
           }
+          runtimeActivity.delete(id);
+          sessionProtectedAllowOnce.delete(id);
           return sendJson(res, 200, { ok: true });
         }
         if (!sessionMatch[2] && req.method === "PATCH") {

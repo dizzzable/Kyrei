@@ -14,6 +14,8 @@ const buildGBrainToolsMock = vi.fn();
 const buildPlanningToolsMock = vi.fn(() => ({}));
 const buildOpenVikingToolsMock = vi.fn(() => ({}));
 const buildMemorySearchToolsMock = vi.fn(() => ({}));
+const buildMemoryAskToolsMock = vi.fn(() => ({}));
+const buildMemoryWriteToolsMock = vi.fn(() => ({}));
 const buildSkillToolsMock = vi.fn();
 const buildModelMock = vi.fn();
 const buildProviderOptionsMock = vi.fn();
@@ -88,6 +90,14 @@ vi.mock("../tools/openviking.js", () => ({
 
 vi.mock("../tools/memory-search.js", () => ({
   buildMemorySearchTools: buildMemorySearchToolsMock,
+}));
+
+vi.mock("../tools/memory-ask.js", () => ({
+  buildMemoryAskTools: buildMemoryAskToolsMock,
+}));
+
+vi.mock("../tools/memory-write.js", () => ({
+  buildMemoryWriteTools: buildMemoryWriteToolsMock,
 }));
 
 vi.mock("../tools/web.js", () => ({
@@ -185,6 +195,8 @@ describe("runKyreiChat project context wiring", () => {
     buildPlanningToolsMock.mockReturnValue({});
     buildOpenVikingToolsMock.mockReturnValue({});
     buildMemorySearchToolsMock.mockReturnValue({});
+    buildMemoryAskToolsMock.mockReturnValue({});
+    buildMemoryWriteToolsMock.mockReturnValue({});
     buildWebToolsMock.mockReturnValue({});
     buildSkillToolsMock.mockReturnValue({});
     buildModelMock.mockReturnValue({ model: "mock" });
@@ -748,6 +760,7 @@ describe("runKyreiChat project context wiring", () => {
     expect(childOptions["abortSignal"]).toBeInstanceOf(AbortSignal);
     expect(childOptions["abortSignal"]).not.toBe(controller.signal);
     expect((childOptions["abortSignal"] as AbortSignal).aborted).toBe(false);
+    // memory_ask is allowlisted for children when built; mock returns {} so omit it here.
     expect(Object.keys(childOptions["tools"] as Record<string, unknown>).sort()).toEqual([
       "brain_search",
       "project_map",

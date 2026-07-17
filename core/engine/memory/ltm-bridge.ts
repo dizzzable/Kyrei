@@ -90,12 +90,13 @@ function nextDecisionId(records: ReadonlyArray<{ id?: unknown } | Record<string,
   return nextId("dec", max);
 }
 
-/** Atomic JSONL rewrite (temp + rename; Windows-safe fallback). */
+/** Atomic JSONL rewrite (same-dir temp + rename; Windows-safe fallback). */
 async function atomicWriteJsonl(path: string, records: ReadonlyArray<Record<string, unknown>>): Promise<void> {
   const dir = dirname(path);
   await mkdir(dir, { recursive: true });
   const body = records.length ? `${records.map((r) => JSON.stringify(r)).join("\n")}\n` : "";
-  const tmp = join(dir, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
+  // Stable tmp name (overwrite) so tests don't accumulate ENOTEMPTY leftovers.
+  const tmp = join(dir, `.${basename(path)}.tmp`);
   await writeFile(tmp, body, "utf8");
   try {
     await rename(tmp, path);
@@ -464,13 +465,26 @@ export function createLtmBridge(ltmDir: string) {
 
   /** Touch last_accessed_at for ranking boost after successful recall. */
   async function touchDecision(id: string): Promise<boolean> {
+    const n = await touchDecisions([id]);
+    return n > 0;
+  }
+
+  /** Batch touch — single lock + atomic rewrite (used by memory_search). */
+  async function touchDecisions(ids: readonly string[]): Promise<number> {
+    const want = new Set(ids.filter(Boolean));
+    if (!want.size) return 0;
     return withFileLock(decisionsPath, async () => {
       const records = await readDecisions();
-      const target = records.find((r) => r["id"] === id);
-      if (!target) return false;
-      target["last_accessed_at"] = new Date().toISOString();
-      await atomicWriteJsonl(decisionsPath, records);
-      return true;
+      const now = new Date().toISOString();
+      let n = 0;
+      for (const r of records) {
+        if (want.has(String(r["id"] ?? ""))) {
+          r["last_accessed_at"] = now;
+          n++;
+        }
+      }
+      if (n > 0) await atomicWriteJsonl(decisionsPath, records);
+      return n;
     });
   }
 
@@ -607,6 +621,7 @@ export function createLtmBridge(ltmDir: string) {
     fetchDecision,
     listDecisions,
     touchDecision,
+    touchDecisions,
     refreshRuntimeSnapshot,
   };
 }

@@ -891,6 +891,13 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                   onSaved={(next) => {
                     setProvider(next.provider);
                     setModel(next.model);
+                    // Rehydrate local engine SoT so Memory toggles cannot clobber
+                    // reliability/budget saved from UsageSettings.
+                    const nextEngine = { ...((next.engine ?? {}) as Record<string, unknown>) };
+                    setEngine(nextEngine);
+                    engineRef.current = nextEngine;
+                    setEngineText(JSON.stringify(nextEngine, null, 2));
+                    pendingEngineSave.current = null;
                     onSaved(next);
                     flash();
                   }}
@@ -903,6 +910,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                   onSaved={(next) => {
                     setProvider(next.provider);
                     setModel(next.model);
+                    const nextEngine = { ...((next.engine ?? {}) as Record<string, unknown>) };
+                    setEngine(nextEngine);
+                    engineRef.current = nextEngine;
+                    setEngineText(JSON.stringify(nextEngine, null, 2));
+                    pendingEngineSave.current = null;
                     onSaved(next);
                     flash();
                   }}

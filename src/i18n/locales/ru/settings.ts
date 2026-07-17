@@ -775,7 +775,7 @@ export const ruSettings = {
   "settings.memoryRecall.citeOrRefuse.hint": "При слабых hits memory_search честно отказывает. memory_ask всегда отказывает без доказательств.",
   "settings.ltmDecisions.label": "Решения (pin и история)",
   "settings.ltmDecisions.fieldHint": "Просмотр bi-temporal решений. Закрепляйте жёсткие факты; раскройте строку для истории SUPERSEDE.",
-  "settings.ltmDecisions.hint": "Активные решения: pin + confidence. Pin делает SUPERSEDE с pinned-копией (история сохраняется).",
+  "settings.ltmDecisions.hint": "Активные решения: pin + confidence. Pin меняется in-place (стабильный id, без SUPERSEDE-спама).",
   "settings.ltmDecisions.showSuperseded": "Показывать superseded",
   "settings.ltmDecisions.refresh": "Обновить",
   "settings.ltmDecisions.loading": "Загрузка…",

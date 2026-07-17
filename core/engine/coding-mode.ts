@@ -132,6 +132,9 @@ export const PLAN_MODE_BLOCKED_TOOLS: ReadonlySet<string> = new Set([
   "memory_write_notes",
   "memory_write_project",
   "memory_write_global",
+  // LTM decision mutations — plan mode is research/design; durable decisions after plan approval.
+  "record_decision",
+  "invalidate_decision",
   "brain_capture",
   "mcp_call",
   "openviking_add_message",
