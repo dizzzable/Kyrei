@@ -3207,6 +3207,43 @@ export async function startGateway({
     });
   };
 
+  /**
+   * OOB: create local SQLite files + .kyrei dirs without user clicking Rebuild.
+   * Fail-open — never blocks gateway start.
+   */
+  const bootstrapLocalDatabases = async (reason = "start") => {
+    try {
+      // Session mirror DB under app dataDir (chat dual-write).
+      await ensureSessionMirror().catch(() => null);
+      const mod = await getEngine();
+      if (typeof mod?.bootstrapGatewayLocalStores === "function") {
+        const gw = mod.bootstrapGatewayLocalStores(dataDir);
+        if (!gw.ok) {
+          console.warn("[kyrei bootstrap] session-mirror:", gw.sessionMirror?.error ?? "failed");
+        }
+      }
+      const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+      if (workspace && typeof mod?.bootstrapWorkspaceLocalStores === "function") {
+        const ws = await mod.bootstrapWorkspaceLocalStores({
+          workspace,
+          config: builtinMemoryIndexConfig(),
+          seedMemoryMd: true,
+        });
+        if (!ws.ok) {
+          console.warn(
+            `[kyrei bootstrap] workspace (${reason}):`,
+            ws.index?.error || ws.graph?.error || "partial",
+          );
+        } else if (ws.seededMemoryMd) {
+          // Seed file exists — project it so index is not empty on first open.
+          void reindexBuiltinMemoryIndex().catch(() => undefined);
+        }
+      }
+    } catch (error) {
+      console.warn("[kyrei bootstrap] skipped:", error?.message ?? error);
+    }
+  };
+
   /** Rebuild LTM runtime snapshot (active-context / last-recall) from the ledger. */
   const consolidateBuiltinLtm = async () => {
     const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
@@ -6407,12 +6444,17 @@ export async function startGateway({
             nextConfig = reconcileReadyModelAssignments(nextConfig, nextSecrets);
             nextConfig = reconcileReadyOrchestration(nextConfig, nextSecrets);
             nextSecrets = pruneProviderAccountSecrets(nextSecrets, nextConfig.providers);
+            const previousWorkspace = typeof config.workspace === "string" ? config.workspace : "";
             if (typeof body.workspace === "string") await skillsStore.setWorkspace(body.workspace);
             await saveConfig(nextConfig, nextSecrets);
             config = nextConfig;
             secrets = nextSecrets;
             invalidateAllProviderRuntimes();
             if (selectionExplicit) rebindUnreadyIdleSessions(config, secrets);
+            const nextWorkspace = typeof nextConfig.workspace === "string" ? nextConfig.workspace.trim() : "";
+            if (nextWorkspace && nextWorkspace !== previousWorkspace.trim()) {
+              void bootstrapLocalDatabases("workspace-set");
+            }
             return publicGatewayConfig(config, secrets);
           });
           return sendJson(res, 200, snapshot);
@@ -9456,6 +9498,8 @@ export async function startGateway({
   };
 
   const listenHost = normalizeProxyConfig(config.proxy).listenLan ? "0.0.0.0" : "127.0.0.1";
+  // Create local DBs (session-mirror + workspace index/graph) before accepting traffic.
+  await bootstrapLocalDatabases("start");
   return new Promise((resolve, reject) => {
     const onError = error => {
       if (error.code === "EADDRINUSE" && server.listening === false) {

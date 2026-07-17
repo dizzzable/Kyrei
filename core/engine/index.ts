@@ -277,6 +277,14 @@ export type { VaultConfig, VaultFile } from "./memory/vault.js";
 export { openMemoryIndex, closeMemoryIndex } from "./memory/index-backend.js";
 export type { MemoryIndexConfig, MemoryIndexBackend, OpenMemoryIndexResult } from "./memory/index-backend.js";
 export { MemoryIndexSession, flushMemoryIndexPoolForTests, memoryIndexPoolSizeForTests } from "./memory/index-session.js";
+export {
+  bootstrapGatewayLocalStores,
+  bootstrapWorkspaceLocalStores,
+} from "./memory/bootstrap-local-db.js";
+export type {
+  GatewayBootstrapResult,
+  WorkspaceBootstrapResult,
+} from "./memory/bootstrap-local-db.js";
 export { lexicalEmbed, LEXICAL_EMBED_MODEL, LEXICAL_EMBED_DIM } from "./memory/lexical-embed.js";
 export {
   createLexicalEmbedAdapter,
