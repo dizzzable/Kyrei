@@ -273,8 +273,10 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
     const existing = loadGraphState(db, workspace);
     const existingPaths = new Set(existing?.nodes.map((n) => n.path) ?? []);
 
-    // Discover all files (same ignore set as full rebuild)
-    const entries = await fg(["**/*"], {
+    // Discover all files (same ignore set as full rebuild). Keep the full
+    // relative path set for entry candidates (package.json, go.mod, …) while
+    // only parsing SOURCE_EXTENSIONS for import edges.
+    const entries = (await fg(["**/*"], {
       cwd: workspace,
       ignore: INDEX_IGNORE,
       onlyFiles: true,
@@ -282,11 +284,11 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
       followSymbolicLinks: false,
       unique: true,
       suppressErrors: true,
-    });
-    const files = entries
-      .map(normalizeRel)
-      .filter((path) => SOURCE_EXTENSIONS.some((extension) => path.toLowerCase().endsWith(extension)))
-      .slice(0, MAX_FILES);
+    })).map(normalizeRel);
+    const allFiles = entries.slice(0, MAX_FILES);
+    const files = allFiles.filter((path) => (
+      SOURCE_EXTENSIONS.some((extension) => path.toLowerCase().endsWith(extension))
+    ));
 
     const currentPaths = new Set(files);
 
@@ -347,26 +349,27 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
       replaceEdgesForFiles(db, toReindex, newEdges);
     }
 
-    // Build final index structure
+    // Build final index structure (fileCount/languages over full scan like full rebuild)
     const languages: Record<string, number> = {};
-    for (const path of files) {
+    for (const path of allFiles) {
       const lang = languageFor(path);
       languages[lang] = (languages[lang] ?? 0) + 1;
     }
 
     const topLevel = [...new Set(
-      files.map((path) => path.split("/")[0] ?? "").filter((segment): segment is string => Boolean(segment)),
+      allFiles.map((path) => path.split("/")[0] ?? "").filter((segment): segment is string => Boolean(segment)),
     )].sort().slice(0, 80);
 
     const index: ProjectIndex = {
       version: INDEX_VERSION,
       generatedAt: new Date().toISOString(),
       workspace,
-      fileCount: files.length,
-      truncated: entries.length > files.length,
+      fileCount: allFiles.length,
+      truncated: entries.length > allFiles.length,
       languages,
       topLevel,
-      entryCandidates: files.filter(isEntryCandidate).slice(0, 40),
+      entryCandidates: allFiles.filter(isEntryCandidate).slice(0, 40),
+      // Graph nodes remain source files (import analysis); entry candidates use allFiles.
       nodes: files.map((path) => ({ path, language: languageFor(path) })),
       edges: [], // will be loaded from DB
     };

@@ -58,7 +58,9 @@ describe("project intelligence index", () => {
 
   it("incremental: only re-parses changed files on second build", async () => {
     const index1 = await buildProjectIndexIncremental(workspace);
-    expect(index1.fileCount).toBe(3);
+    // 3 source files + package.json (entry candidate, not a graph node)
+    expect(index1.fileCount).toBe(4);
+    expect(index1.entryCandidates).toContain("package.json");
     expect(index1.edges.length).toBe(2); // entry→service, service→util
 
     // Modify one file (add new import)
@@ -69,7 +71,7 @@ describe("project intelligence index", () => {
     );
 
     const index2 = await buildProjectIndexIncremental(workspace);
-    expect(index2.fileCount).toBe(3); // same file count
+    expect(index2.fileCount).toBe(4); // same file count
     expect(index2.edges.length).toBe(3); // now entry→service, entry→util, service→util
 
     // Verify the new edge exists
@@ -78,13 +80,13 @@ describe("project intelligence index", () => {
 
   it("incremental: handles deleted files", async () => {
     const index1 = await buildProjectIndexIncremental(workspace);
-    expect(index1.fileCount).toBe(3);
+    expect(index1.fileCount).toBe(4);
 
     // Delete a file
     await rm(join(workspace, "src", "util.ts"));
 
     const index2 = await buildProjectIndexIncremental(workspace);
-    expect(index2.fileCount).toBe(2);
+    expect(index2.fileCount).toBe(3); // package.json + entry + service
     expect(index2.nodes.some(n => n.path === "src/util.ts")).toBe(false);
     // Edge service→util should be gone
     expect(index2.edges.some(e => e.to === "src/util.ts")).toBe(false);

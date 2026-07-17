@@ -224,6 +224,7 @@ export async function reindexWorkspaceMemoryIndex(opts: {
       configureEmbedAdapterFromConfig(config.embed as EmbedConfig);
     }
     stores = await openStores(opts.workspace, config);
+    const openedBackend = stores.backend;
     const result = await reindexProjectMemory({
       workspace: opts.workspace,
       memory: stores.memory,
@@ -233,8 +234,13 @@ export async function reindexWorkspaceMemoryIndex(opts: {
     });
     let sessionUpserted = 0;
     const sources = [...result.sources];
-    if (opts.sessions?.length) {
-      const projected = await projectSessionsIntoMemory(opts.sessions, {
+    // Cap session projection so Settings "Rebuild" cannot hang for hours on huge chat corpora.
+    const sessionCap = 20;
+    const sessions = opts.sessions?.length
+      ? opts.sessions.slice(0, sessionCap)
+      : undefined;
+    if (sessions?.length) {
+      const projected = await projectSessionsIntoMemory(sessions, {
         workspace: opts.workspace,
         memory: stores.memory,
         vectors: stores.vectors,
@@ -243,10 +249,15 @@ export async function reindexWorkspaceMemoryIndex(opts: {
       });
       sessionUpserted = projected.upserted;
       if (projected.upserted > 0) sources.push("session");
+      if ((opts.sessions?.length ?? 0) > sessionCap) sources.push("session_capped");
     }
     await stores.close();
     stores = null;
     const status = await inspectWorkspaceMemoryIndex({ workspace: opts.workspace, config });
+    // Surface degraded backend so operators know SQLite native failed (file store is durable now).
+    if (openedBackend === "file" && !status.message) {
+      status.message = "sqlite_unavailable_using_file_backend";
+    }
     return {
       ok: true,
       upserted: result.upserted + sessionUpserted,

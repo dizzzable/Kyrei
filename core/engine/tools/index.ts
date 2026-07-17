@@ -69,6 +69,11 @@ export interface BuildToolsOptions {
    * rebuildable FTS/vector index can refresh mid-turn.
    */
   onMemoryMutated?: () => void;
+  /**
+   * Awaitable index flush (project_index). Prefer this over debounced
+   * onMemoryMutated when the tool result must already be searchable.
+   */
+  flushMemoryIndex?: () => Promise<void>;
   /** After LTM appendEvent, optionally refresh runtime snapshot (throttled by caller). */
   onLtmEvent?: () => void;
   /**
@@ -531,7 +536,10 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
   };
 
   return {
-    ...buildProjectIntelTools(workspace, { onMemoryMutated: options.onMemoryMutated }),
+    ...buildProjectIntelTools(workspace, {
+      onMemoryMutated: options.onMemoryMutated,
+      flushMemoryIndex: options.flushMemoryIndex,
+    }),
     list_dir: tool({
       description: TOOL_DESCRIPTIONS.list_dir,
       inputSchema: z.object({

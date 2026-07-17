@@ -14,7 +14,11 @@ import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 
 export function buildProjectIntelTools(
   workspace: string,
-  options: { onMemoryMutated?: () => void } = {},
+  options: {
+    onMemoryMutated?: () => void;
+    /** Awaitable flush so graph-lite is searchable before the tool returns. */
+    flushMemoryIndex?: () => Promise<void>;
+  } = {},
 ): ToolSet {
   return {
     project_index: tool({
@@ -25,8 +29,12 @@ export function buildProjectIntelTools(
           // Try incremental SQLite-backed indexing first (Phase 3C)
           const index = await buildProjectIndexIncremental(workspace);
           await persistProjectIndex(workspace, index);
-          // Project graph lite into the rebuildable FTS memory index (MEMORY SoT stays files).
-          options.onMemoryMutated?.();
+          // Prefer awaited flush so Settings/search see graph-lite immediately (OOB).
+          if (options.flushMemoryIndex) {
+            await options.flushMemoryIndex();
+          } else {
+            options.onMemoryMutated?.();
+          }
           return `${formatProjectIndex(index, { edgeLimit: 80 })}\n\nSaved under .kyrei/intel/ for subsequent reads.`;
         } catch (err) {
           return `Indexing failed: ${err instanceof Error ? err.message : String(err)}`;

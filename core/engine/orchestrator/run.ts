@@ -265,6 +265,12 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const onMemoryMutated = (): void => {
     memoryIndex?.notifyMutated();
   };
+  /** project_index must land graph-lite in FTS before the tool returns (OOB). */
+  const flushMemoryIndex = async (): Promise<void> => {
+    if (!memoryIndex) return;
+    memoryIndex.notifyMutated();
+    await memoryIndex.reindexNow();
+  };
   // Throttle LTM runtime snapshot refresh after file events (not every keystroke-level write).
   let lastLtmSnapshotAt = 0;
   const onLtmEvent = (): void => {
@@ -334,6 +340,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         approvedToolCalls,
         onApprovalConsumed: consumeApprovedCall,
         onMemoryMutated,
+        flushMemoryIndex,
         onLtmEvent,
         ...(cfg.memory.ltm?.enabled ? { ltmDir: join(opts.workspace!, "ltm") } : {}),
         ...(reviewModel ? { reviewModel } : {}),
