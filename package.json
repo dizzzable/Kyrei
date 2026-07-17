@@ -223,26 +223,23 @@
     "pacman": {
       "artifactName": "${productName}-${version}-${arch}.pkg.tar.zst",
       "depends": [
-        "c-ares",
-        "ffmpeg",
+        "alsa-lib",
+        "at-spi2-core",
+        "dbus",
         "gtk3",
-        "libevent",
-        "libvpx",
-        "libxslt",
-        "libxss",
-        "minizip",
-        "nss",
-        "re2",
-        "snappy",
         "libnotify",
-        "libappindicator",
         "libsecret",
+        "libxkbcommon",
+        "libxss",
+        "libxtst",
+        "nss",
         "xdg-utils"
       ],
       "fpm": [
-        "--pacman-optional-depends=gnome-keyring: Secret Service for GNOME, Cinnamon, XFCE, MATE, Budgie, COSMIC, Pantheon, LXQt, and most Wayland WMs (Hyprland/Sway/niri)",
-        "--pacman-optional-depends=kwallet: KDE Plasma KWallet Secret Service",
-        "--pacman-optional-depends=keepassxc: alternative Secret Service provider when desktop keyring is unavailable"
+        "--pacman-optional-depends=gnome-keyring: Secret Service for GNOME and most Wayland WMs (Hyprland/Sway/niri) — required to save provider API keys",
+        "--pacman-optional-depends=kwallet: KDE Plasma KWallet Secret Service (alternative to gnome-keyring)",
+        "--pacman-optional-depends=keepassxc: alternative Secret Service provider when desktop keyring is unavailable",
+        "--pacman-optional-depends=xorg-xwayland: XWayland fallback for Electron on pure Wayland if native Ozone fails"
       ]
     }
   }

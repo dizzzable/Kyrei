@@ -68,8 +68,42 @@ KYREI_NO_SANDBOX_MESSAGE
   esac
 done
 
+# Graphical session required (TTY-only has neither display).
+if [ -z "\${DISPLAY:-}" ] && [ -z "\${WAYLAND_DISPLAY:-}" ]; then
+  cat >&2 <<'KYREI_NO_DISPLAY_MESSAGE'
+Kyrei needs a graphical desktop session (DISPLAY or WAYLAND_DISPLAY is empty).
+Kyrei нужна графическая сессия (нет DISPLAY / WAYLAND_DISPLAY).
+
+Start Kyrei from your desktop menu or from a terminal inside the logged-in
+Wayland/X11 session — not from a plain TTY or SSH without display forwarding.
+Запустите Kyrei из меню DE или из терминала внутри графической сессии.
+KYREI_NO_DISPLAY_MESSAGE
+  exit 1
+fi
+
+# Wayland: prefer Electron Ozone auto when the user has not set a hint.
+# Forces nothing if ELECTRON_OZONE_PLATFORM_HINT is already set (user override).
+# auto → native Wayland when possible, XWayland otherwise (common on Hyprland/Sway).
+if [ -n "\${WAYLAND_DISPLAY:-}" ] || [ "\${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+  if [ -z "\${ELECTRON_OZONE_PLATFORM_HINT+x}" ]; then
+    export ELECTRON_OZONE_PLATFORM_HINT=auto
+  fi
+fi
+
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
-exec "$APP_DIR/${electronExecutable}" "$@"
+ELECTRON_BIN="$APP_DIR/${electronExecutable}"
+if [ ! -x "$ELECTRON_BIN" ]; then
+  cat >&2 <<KYREI_MISSING_BIN_MESSAGE
+Kyrei electron binary is missing or not executable:
+  $ELECTRON_BIN
+
+Reinstall the package (Arch: sudo pacman -U ./Kyrei-*-x64.pkg.tar.zst).
+Бинарник Electron не найден или без +x — переустановите пакет.
+KYREI_MISSING_BIN_MESSAGE
+  exit 1
+fi
+
+exec "$ELECTRON_BIN" "\$@"
 `;
 }
 

@@ -26,12 +26,28 @@ describe("Linux root launcher", () => {
     expect(launcher).toContain('id -u)" -eq 0');
     expect(launcher).toContain("sudo only to install or update");
     expect(launcher).toContain("Kyrei нужно запускать от обычного пользователя");
-    expect(launcher).toContain('exec "$APP_DIR/kyrei-electron" "$@"');
     expect(launcher).toContain("Do not add --no-sandbox");
     expect(launcher).toContain('--no-sandbox|--no-sandbox=*)');
     expect(launcher).toContain("Kyrei refused --no-sandbox");
     expect(launcher).toContain("If this appeared while starting an AppImage");
     expect(launcher).not.toMatch(/exec .*--no-sandbox/);
+    // Wayland / display guards for Arch pure-Wayland sessions
+    expect(launcher).toContain("WAYLAND_DISPLAY");
+    expect(launcher).toContain("ELECTRON_OZONE_PLATFORM_HINT=auto");
+    expect(launcher).toContain("needs a graphical desktop session");
+    expect(launcher).toContain('exec "$ELECTRON_BIN" "$@"');
+    expect(launcher).toContain("kyrei-electron");
+  });
+
+  it("keeps Arch pacman depends installable (no dropped libappindicator)", async () => {
+    const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    const depends = packageJson.build?.pacman?.depends ?? [];
+    expect(depends).not.toContain("libappindicator");
+    expect(depends).toContain("libsecret");
+    expect(depends).toContain("at-spi2-core");
+    expect(depends).toContain("libxkbcommon");
+    expect(depends).toContain("alsa-lib");
+    expect(depends).toContain("dbus");
   });
 
   posixIt("rejects --no-sandbox=value before Electron receives it", async () => {

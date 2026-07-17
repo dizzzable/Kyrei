@@ -98,9 +98,10 @@ const FAMILY_PACKAGES = Object.freeze({
  * (`--pacman-optional-depends=pkg: description`).
  */
 export const LINUX_PACMAN_SECRET_OPTDEPENDS = Object.freeze([
-  "gnome-keyring: Secret Service for GNOME, Cinnamon, XFCE, MATE, Budgie, COSMIC, Pantheon, LXQt, and most Wayland WMs (Hyprland/Sway/niri)",
-  "kwallet: KDE Plasma KWallet Secret Service",
+  "gnome-keyring: Secret Service for GNOME and most Wayland WMs (Hyprland/Sway/niri) — required to save provider API keys",
+  "kwallet: KDE Plasma KWallet Secret Service (alternative to gnome-keyring)",
   "keepassxc: alternative Secret Service provider when desktop keyring is unavailable",
+  "xorg-xwayland: XWayland fallback for Electron on pure Wayland if native Ozone fails",
 ]);
 
 /**
