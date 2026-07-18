@@ -10,6 +10,7 @@ describe("provider templates", () => {
     const ids = PROVIDER_TEMPLATES.map((template) => template.id);
     expect(ids).toEqual(expect.arrayContaining([
       "openai",
+      "codex-lb",
       "anthropic",
       "gemini",
       "bedrock",

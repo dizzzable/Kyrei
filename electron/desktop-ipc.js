@@ -111,8 +111,14 @@ export function registerDesktopIpc({
       && typeof options.sessionVerificationUri === "string"
       ? options.sessionVerificationUri
       : undefined;
+    const codexAuthUri = options
+      && typeof options === "object"
+      && typeof options.codexAuthUri === "string"
+      ? options.codexAuthUri
+      : undefined;
     await openDesktopExternalUrl(shell, url, {
       ...(sessionVerificationUri ? { sessionVerificationUri } : {}),
+      ...(codexAuthUri ? { codexAuthUri } : {}),
     });
     return { ok: true };
   });

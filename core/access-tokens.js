@@ -21,6 +21,8 @@ import {
 
 const MAX_PRINCIPALS = 256;
 const MAX_LABEL = 120;
+const MAX_ALLOWED_MODELS = 512;
+const MAX_MODEL_REF = 640;
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const TOKEN_PREFIX = "kyrei_at_";
 
@@ -51,6 +53,53 @@ function positiveOrNull(value, max) {
   return Math.min(max, n);
 }
 
+/**
+ * Normalise a model route visible through the company gateway.
+ *
+ * The first slash is the provider boundary. Model ids themselves may contain
+ * slashes (for example a hosted open-weight model), so they are intentionally
+ * left opaque after that boundary.
+ */
+export function normalizeAllowedModelRefs(value) {
+  const rows = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const refs = [];
+  for (const raw of rows.slice(0, MAX_ALLOWED_MODELS)) {
+    const ref = text(raw, MAX_MODEL_REF);
+    const slash = ref.indexOf("/");
+    if (slash <= 0 || slash === ref.length - 1) continue;
+    const providerId = ref.slice(0, slash).toLowerCase();
+    const modelId = ref.slice(slash + 1);
+    if (!ID_RE.test(providerId) || !modelId || /[\u0000-\u001f\u007f]/.test(modelId)) continue;
+    const normalized = `${providerId}/${modelId}`;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    refs.push(normalized);
+  }
+  return refs;
+}
+
+function normalizeExpiresAt(value) {
+  if (value === null || value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || value.length > 80) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
+export function isPrincipalExpired(principal, now = Date.now()) {
+  const expiresAt = normalizeExpiresAt(principal?.expiresAt);
+  if (!expiresAt) return false;
+  const timestamp = Date.parse(expiresAt);
+  return Number.isFinite(timestamp) && timestamp <= now;
+}
+
+/** Empty scope preserves legacy unrestricted tokens. New owner flows select it explicitly. */
+export function isModelRefAllowed(principal, providerId, modelId) {
+  const allowedModels = normalizeAllowedModelRefs(principal?.allowedModels);
+  if (allowedModels.length === 0) return true;
+  return allowedModels.includes(`${String(providerId ?? "").toLowerCase()}/${String(modelId ?? "")}`);
+}
+
 export function hashAccessToken(token) {
   return createHash("sha256").update(String(token ?? ""), "utf8").digest("hex");
 }
@@ -74,6 +123,7 @@ function normalizePrincipal(raw, index = 0) {
   const prefix = text(source.prefix, 24) || "kyrei_at_…";
   const createdAt = text(source.createdAt, 40) || new Date().toISOString();
   const lastUsedAt = text(source.lastUsedAt, 40) || undefined;
+  const expiresAt = normalizeExpiresAt(source.expiresAt);
   const budget = normalizeUsageBudgetConfig({
     enabled: true,
     window: source.budgetWindow === "month" ? "month" : "day",
@@ -94,6 +144,8 @@ function normalizePrincipal(raw, index = 0) {
     softTokens: budget.softTokens,
     hardTokens: budget.hardTokens,
     budgetWindow: budget.window,
+    allowedModels: normalizeAllowedModelRefs(source.allowedModels),
+    ...(expiresAt ? { expiresAt } : {}),
   };
 }
 
@@ -179,6 +231,8 @@ export function createAccessPrincipal(options) {
     softTokens: budget.softTokens,
     hardTokens: budget.hardTokens,
     budgetWindow: budget.window,
+    allowedModels: options.allowedModels,
+    expiresAt: options.expiresAt,
   });
   return { principal, plain, hash };
 }
@@ -242,6 +296,9 @@ export function resolveAccessPrincipal(plain, control, hashes) {
     if (!principal.enabled) {
       throw new AccessTokenError("access_token_disabled", 403);
     }
+    if (isPrincipalExpired(principal)) {
+      throw new AccessTokenError("access_token_expired", 403);
+    }
     return { principal, id: principal.id };
   }
   return null;
@@ -285,6 +342,8 @@ export function patchPrincipal(principal, patch) {
     ...normalizePrincipal(principal),
     ...(source.label !== undefined ? { label: text(source.label, MAX_LABEL) || principal.label } : {}),
     ...(source.enabled !== undefined ? { enabled: source.enabled === true } : {}),
+    ...(source.allowedModels !== undefined ? { allowedModels: source.allowedModels } : {}),
+    ...(Object.hasOwn(source, "expiresAt") ? { expiresAt: source.expiresAt } : {}),
   };
   if (
     source.softCostUsd !== undefined

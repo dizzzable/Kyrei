@@ -1,6 +1,8 @@
 /**
  * Allow Kyrei GitHub release pages/downloads through shell.openExternal,
- * plus a tight experimental OAuth verification allowlist (device-flow only).
+ * plus tight OAuth allowlists for device flow and the official Codex browser
+ * sign-in. The latter is accepted only for the exact one-time URI returned by
+ * the local App Server.
  * Shared with renderer allowlist logic in src/lib/app-update.ts (same release rules).
  */
 
@@ -11,7 +13,7 @@ const REPO = "Kyrei";
 
 /**
  * @param {string} url
- * @param {{ sessionVerificationUri?: string }} [options]
+ * @param {{ sessionVerificationUri?: string, codexAuthUri?: string }} [options]
  * @returns {boolean}
  */
 export function isAllowedDesktopExternalUrl(url, options = {}) {
@@ -28,15 +30,18 @@ export function isAllowedDesktopExternalUrl(url, options = {}) {
     if (path === prefix || path.startsWith(`${prefix}/`)) return true;
   }
   // Experimental device verification: known hosts OR exact URI from an active session.
-  return isAllowedExperimentalAuthOpenUrl(url, {
+  if (isAllowedExperimentalAuthOpenUrl(url, {
     sessionVerificationUri: options.sessionVerificationUri,
-  });
+  })) return true;
+  if (options.codexAuthUri !== url) return false;
+  return parsed.hostname === "chatgpt.com" || parsed.hostname.endsWith(".chatgpt.com")
+    || parsed.hostname === "auth.openai.com";
 }
 
 /**
  * @param {{ openExternal: (url: string) => Promise<void> | void }} shell
  * @param {string} url
- * @param {{ sessionVerificationUri?: string }} [options]
+ * @param {{ sessionVerificationUri?: string, codexAuthUri?: string }} [options]
  */
 export async function openDesktopExternalUrl(shell, url, options = {}) {
   if (!shell || typeof shell.openExternal !== "function") {

@@ -58,6 +58,19 @@ describe("access-tokens", () => {
     });
   });
 
+  it("keeps an explicit model scope and can clear an expiry", () => {
+    const first = createAccessPrincipal({
+      label: "Scoped",
+      allowedModels: ["openai/gpt-main", "openai/gpt-main", "bad scope"],
+      expiresAt: "2030-01-01T00:00:00.000Z",
+    });
+    expect(first.principal.allowedModels).toEqual(["openai/gpt-main"]);
+    expect(first.principal.expiresAt).toBe("2030-01-01T00:00:00.000Z");
+
+    const cleared = patchPrincipal(first.principal, { expiresAt: null });
+    expect(cleared.expiresAt).toBeUndefined();
+  });
+
   it("evaluates per-principal budgets from ledger rows", () => {
     const { principal } = createAccessPrincipal({
       label: "Dev",

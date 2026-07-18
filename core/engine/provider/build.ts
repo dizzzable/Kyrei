@@ -44,6 +44,11 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
   };
 
   switch (opts.protocol) {
+    case "codex-app-server":
+      // ChatGPT/Codex is an agent runtime, not an OpenAI API credential. The
+      // gateway owns its documented App Server bridge, so never accidentally
+      // send a ChatGPT session to an HTTP-compatible provider adapter.
+      throw new Error("codex_app_server_runtime_only");
     case "openai-responses": {
       const provider = createOpenAI({
         baseURL,

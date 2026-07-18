@@ -9,6 +9,7 @@ export type SettingsSectionId =
   | "memory"
   | "sessions"
   | "usage"
+  | "organization"
   | "capacity"
   | "appearance"
   | "notifications"
@@ -27,6 +28,7 @@ export const SETTINGS_SECTIONS = [
   { id: "memory", labelKey: "settings.sections.memory" },
   { id: "sessions", labelKey: "settings.sections.sessions" },
   { id: "usage", labelKey: "settings.sections.usage" },
+  { id: "organization", labelKey: "settings.sections.organization" },
   { id: "capacity", labelKey: "settings.sections.capacity" },
   { id: "notifications", labelKey: "settings.sections.notifications" },
   { id: "providers", labelKey: "settings.sections.providers" },

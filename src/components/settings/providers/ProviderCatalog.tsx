@@ -52,7 +52,10 @@ export function ProviderCatalog({
         <div className="border-y border-border-soft">
           {configured.map((provider, index) => {
             const active = provider.id === activeProviderId;
-            const ready = provider.enabled && (!provider.requiresApiKey || provider.hasKey);
+            // Codex/ChatGPT owns one OAuth identity outside Kyrei's generic
+            // API-key pool. Its lifecycle is managed by the dedicated card.
+            const managedNativeProvider = provider.protocol === "codex-app-server";
+            const ready = provider.enabled && (managedNativeProvider || !provider.requiresApiKey || provider.hasKey);
             const statusLabel = !provider.enabled
               ? t("settings.providers.unavailable")
               : provider.requiresApiKey && !provider.hasKey
@@ -64,7 +67,7 @@ export function ProviderCatalog({
                   type="button"
                   className="group flex min-w-0 flex-1 items-center gap-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/45"
                   onClick={() => onConfigure(provider)}
-                  disabled={busy}
+                  disabled={busy || managedNativeProvider}
                   aria-label={t("settings.providers.editNamed", { name: provider.name })}
                 >
                   <span className="grid size-8 shrink-0 place-items-center rounded-md border border-border-soft bg-surface text-muted">
@@ -86,16 +89,18 @@ export function ProviderCatalog({
                   </span>
                   <ChevronRight className="size-3.5 shrink-0 text-muted transition-transform group-hover:translate-x-0.5" aria-hidden />
                 </button>
-                <IconButton
-                  size="icon-sm"
-                  tip={t("settings.providers.accounts.manageNamed", { name: provider.name })}
-                  disabled={busy}
-                  onClick={() => onManageAccounts(provider)}
-                  className={cn(provider.accountPool?.enabled && "text-primary")}
-                >
-                  <Network className="size-3.5" aria-hidden />
-                </IconButton>
-                {!active ? (
+                {!managedNativeProvider ? (
+                  <IconButton
+                    size="icon-sm"
+                    tip={t("settings.providers.accounts.manageNamed", { name: provider.name })}
+                    disabled={busy}
+                    onClick={() => onManageAccounts(provider)}
+                    className={cn(provider.accountPool?.enabled && "text-primary")}
+                  >
+                    <Network className="size-3.5" aria-hidden />
+                  </IconButton>
+                ) : null}
+                {!active && !managedNativeProvider ? (
                   <Button variant="ghost" size="sm" disabled={busy || !ready} onClick={() => onUseDefault(provider)}>
                     {t("settings.providers.useDefault")}
                   </Button>

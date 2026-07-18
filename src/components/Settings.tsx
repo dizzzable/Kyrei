@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Info,
   Keyboard,
+  KeyRound,
   Layers3,
   MessageSquare,
   Palette,
@@ -43,6 +44,7 @@ import { SkillsSettings } from "@/components/settings/SkillsSettings";
 import { SessionsSettings } from "@/components/settings/SessionsSettings";
 import { AboutUpdatePanel } from "@/components/settings/AboutUpdatePanel";
 import { UsageSettings } from "@/components/settings/UsageSettings";
+import { AccessTokensSettings } from "@/components/settings/AccessTokensSettings";
 import { CapacitySettings } from "@/components/settings/CapacitySettings";
 import { ExperimentalSettings } from "@/components/settings/ExperimentalSettings";
 import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
@@ -86,6 +88,7 @@ const SECTION_ICONS: Record<VisibleSettingsSectionId, ReactNode> = {
   memory: <BrainCircuit className="size-4" />,
   sessions: <Archive className="size-4" />,
   usage: <BarChart3 className="size-4" />,
+  organization: <KeyRound className="size-4" />,
   capacity: <Layers3 className="size-4" />,
   appearance: <Palette className="size-4" />,
   notifications: <Bell className="size-4" />,
@@ -1049,6 +1052,18 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                     engineRef.current = nextEngine;
                     setEngineText(JSON.stringify(nextEngine, null, 2));
                     pendingEngineSave.current = null;
+                    onSaved(next);
+                    flash();
+                  }}
+                />
+              )}
+
+              {visibleSection === "organization" && (
+                <AccessTokensSettings
+                  config={config}
+                  onSaved={(next) => {
+                    setProvider(next.provider);
+                    setModel(next.model);
                     onSaved(next);
                     flash();
                   }}

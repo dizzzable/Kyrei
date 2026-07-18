@@ -6,7 +6,7 @@
  * transport value. Per-resource providers remain editable and require input.
  */
 
-export const PROVIDER_TEMPLATES_VERSION = 4;
+export const PROVIDER_TEMPLATES_VERSION = 5;
 
 /** Shared blurb for OpenAI-compatible catalogues (OmniRoute-class APIs). */
 const OPENAI_COMPAT_DESC = "settings.providers.templates.openaiCompatible.description";
@@ -42,6 +42,19 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     baseURL: "https://api.openai.com/v1",
     // Seeded so first-run can Save after pasting a key without Discover.
     models: [{ id: "gpt-4o-mini" }, { id: "gpt-4o" }],
+  }),
+  // Optional corporate bridge. codex-lb retains ChatGPT OAuth accounts and
+  // upstream quota accounting on the administrator-controlled gateway; Kyrei
+  // receives only a per-client gateway key and speaks the documented Responses
+  // transport. The endpoint stays editable for a private deployment.
+  template({
+    id: "codex-lb",
+    name: "codex-lb (ChatGPT pool)",
+    descriptionKey: "settings.providers.templates.codexLb.description",
+    docsURL: "https://soju06.github.io/codex-lb/",
+    protocol: "openai-responses",
+    baseURL: "http://127.0.0.1:2455/backend-api/codex",
+    models: [{ id: "gpt-5.6-sol" }],
   }),
   template({
     id: "anthropic",

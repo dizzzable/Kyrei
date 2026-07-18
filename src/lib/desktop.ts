@@ -65,7 +65,7 @@ interface KyreiDesktopBridge {
   shell?: {
     openExternal: (
       url: string,
-      options?: { sessionVerificationUri?: string },
+      options?: { sessionVerificationUri?: string; codexAuthUri?: string },
     ) => Promise<{ ok: boolean }>;
   };
   appearance?: {
@@ -124,7 +124,7 @@ export const desktopRuntime = {
 
 export const desktopShell = {
   available: () => Boolean(bridge()?.shell?.openExternal),
-  openExternal: async (url: string, options?: { sessionVerificationUri?: string }) => {
+  openExternal: async (url: string, options?: { sessionVerificationUri?: string; codexAuthUri?: string }) => {
     const api = bridge()?.shell;
     if (!api?.openExternal) throw unavailable();
     return api.openExternal(url, options);

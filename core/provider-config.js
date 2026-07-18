@@ -50,6 +50,7 @@ export const SUPPORTED_PROVIDER_PROTOCOLS = [
   "google-generative-ai",
   "amazon-bedrock",
   "google-vertex",
+  "codex-app-server",
 ];
 const DEFAULT_PROVIDER_ID = "default-openai-compatible";
 const DEFAULT_PROTOCOL = "openai-chat";
@@ -69,6 +70,7 @@ const DEFAULT_BASE_URLS = {
   "google-generative-ai": "https://generativelanguage.googleapis.com/v1beta",
   "amazon-bedrock": "https://bedrock-runtime.us-east-1.amazonaws.com",
   "google-vertex": "https://aiplatform.googleapis.com",
+  "codex-app-server": "https://chatgpt.com/codex",
 };
 
 function object(value) {

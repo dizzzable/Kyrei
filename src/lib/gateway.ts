@@ -33,6 +33,9 @@ import type {
   KiroCliLoginInput,
   KiroCliLoginSnapshot,
   KiroCliModelCatalog,
+  CodexChatgptConnectorStatus,
+  CodexChatgptLoginMode,
+  CodexChatgptLoginSnapshot,
   LocalPostgresRuntimeStatus,
   ProviderCredentialsInput,
   ProviderAccountInput,
@@ -184,11 +187,32 @@ export interface AccessPrincipal {
   softTokens: number | null;
   hardTokens: number | null;
   budgetWindow: "day" | "month";
+  /** Empty keeps the legacy unrestricted route scope. */
+  allowedModels: string[];
+  expiresAt?: string;
 }
 
 export interface AccessControlPublic {
   requireToken: boolean;
   principals: AccessPrincipal[];
+}
+
+export interface AccessTokenUsage {
+  id: string;
+  requestCount: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+export interface CompanyGatewayInfo {
+  proxy: {
+    enabled: boolean;
+    listenLan: boolean;
+    requireAccessToken: boolean;
+    restartRequired: boolean;
+  };
+  endpoints: Array<{ kind: "loopback" | "lan"; baseUrl: string }>;
+  modelRefFormat: "providerId/modelId";
 }
 
 const launchParams = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
@@ -613,6 +637,24 @@ export const gateway = {
     json<KiroCliModelCatalog>("/api/connectors/kiro/models"),
   logoutKiroCli: () =>
     json<{ loggedOut: true }>("/api/connectors/kiro/logout", { method: "POST", body: "{}" }),
+  getCodexChatgptConnector: () =>
+    json<CodexChatgptConnectorStatus>("/api/connectors/codex"),
+  startCodexChatgptLogin: (mode: CodexChatgptLoginMode) =>
+    json<{ login: CodexChatgptLoginSnapshot }>("/api/connectors/codex/login", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }).then((result) => result.login),
+  getCodexChatgptLogin: (id: string) =>
+    json<{ login: CodexChatgptLoginSnapshot }>(`/api/connectors/codex/login/${encodeURIComponent(id)}`)
+      .then((result) => result.login),
+  cancelCodexChatgptLogin: (id: string) =>
+    json<{ login: CodexChatgptLoginSnapshot }>(`/api/connectors/codex/login/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }).then((result) => result.login),
+  logoutCodexChatgpt: () =>
+    json<{ loggedOut: true }>("/api/connectors/codex/logout", { method: "POST", body: "{}" }),
+  activateCodexChatgpt: () =>
+    json<AppConfig>("/api/connectors/codex/activate", { method: "POST", body: "{}" }),
   getKiroOrganizationPool: () =>
     json<KiroOrganizationPoolSnapshot>("/api/connectors/kiro/organization"),
   updateKiroOrganizationPool: (
@@ -924,6 +966,10 @@ export const gateway = {
     ).then((r) => r.events),
 
   getAccessControl: () => json<AccessControlPublic>("/api/access-tokens"),
+  getAccessTokenUsage: (days = 30) => json<{ days: number; principals: AccessTokenUsage[] }>(
+    `/api/access-tokens/usage?days=${encodeURIComponent(String(days))}`,
+  ),
+  getCompanyGateway: () => json<CompanyGatewayInfo>("/api/company-gateway"),
   createAccessToken: (input: {
     label?: string;
     budgetWindow?: "day" | "month";
@@ -931,6 +977,8 @@ export const gateway = {
     hardCostUsd?: number | null;
     softTokens?: number | null;
     hardTokens?: number | null;
+    allowedModels?: string[];
+    expiresAt?: string | null;
   }) =>
     json<{ principal: AccessPrincipal; token: string; accessControl: AccessControlPublic }>(
       "/api/access-tokens",
@@ -941,7 +989,10 @@ export const gateway = {
       method: "PUT",
       body: JSON.stringify({ requireToken }),
     }),
-  patchAccessToken: (id: string, patch: Partial<AccessPrincipal> & { budgetWindow?: "day" | "month" }) =>
+  patchAccessToken: (id: string, patch: Omit<Partial<AccessPrincipal>, "expiresAt"> & {
+    budgetWindow?: "day" | "month";
+    expiresAt?: string | null;
+  }) =>
     json<{ principal: AccessPrincipal; accessControl: AccessControlPublic }>(
       `/api/access-tokens/${encodeURIComponent(id)}`,
       { method: "PATCH", body: JSON.stringify(patch) },

@@ -558,7 +558,9 @@ export type ProviderProtocol =
   | "anthropic-messages"
   | "google-generative-ai"
   | "amazon-bedrock"
-  | "google-vertex";
+  | "google-vertex"
+  /** Official local Codex App Server; executed by the local gateway. */
+  | "codex-app-server";
 
 /** Write-only provider credentials. The gateway never returns these values. */
 export interface ProviderCredentialsInput {
@@ -788,6 +790,35 @@ export interface KiroCliModelCatalog {
   count: number;
 }
 
+export type CodexChatgptLoginMode = "browser" | "device";
+export type CodexChatgptLoginStatus = "running" | "succeeded" | "failed" | "cancelled" | "timed-out";
+
+/** Public sign-in state from official Codex App Server; never contains tokens. */
+export interface CodexChatgptLoginSnapshot {
+  id: string;
+  mode: CodexChatgptLoginMode;
+  status: CodexChatgptLoginStatus;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+  authUrl?: string;
+  verificationUrl?: string;
+  userCode?: string;
+  planType?: string;
+  error?: string;
+}
+
+/** Sanitized official ChatGPT/Codex connector state. */
+export interface CodexChatgptConnectorStatus {
+  installed: boolean;
+  version: string | null;
+  authenticated: boolean;
+  authMode: "chatgpt" | "none";
+  planType: string | null;
+  activeLogin?: CodexChatgptLoginSnapshot;
+  error?: string;
+}
+
 export interface AppConfig {
   /** Compatibility fields for legacy renderer surfaces; describe the active provider. */
   provider: string;
@@ -834,6 +865,9 @@ export interface AppConfig {
       softTokens: number | null;
       hardTokens: number | null;
       budgetWindow: "day" | "month";
+      /** Empty means all currently configured gateway model routes. */
+      allowedModels: string[];
+      expiresAt?: string;
     }>;
   };
   /** OpenAI-compatible /v1 proxy + optional LAN bind. */

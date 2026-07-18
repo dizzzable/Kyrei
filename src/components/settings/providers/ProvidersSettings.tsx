@@ -11,6 +11,7 @@ import type {
   ProviderTemplate,
 } from "@/lib/types";
 import { KiroCliConnectorCard } from "./KiroCliConnectorCard";
+import { CodexChatgptConnectorCard } from "./CodexChatgptConnectorCard";
 import { KiroOrganizationPoolCard } from "./KiroOrganizationPoolCard";
 import { ProviderCatalog } from "./ProviderCatalog";
 import { ProviderAccountPoolDialog } from "./ProviderAccountPoolDialog";
@@ -225,6 +226,8 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
         <h2 className="text-[14px] font-semibold text-foreground">{t("settings.providers.pageTitle")}</h2>
         <p className="mt-1 text-[11px] leading-5 text-muted">{t("settings.providers.pageDescription")}</p>
       </header>
+
+      <CodexChatgptConnectorCard onActivated={onSaved} />
 
       <KiroCliConnectorCard />
 

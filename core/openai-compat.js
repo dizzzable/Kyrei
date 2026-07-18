@@ -35,9 +35,15 @@ export function normalizeProxyConfig(raw) {
  * List models visible to the OpenAI-compat catalog.
  * Ids are `providerId/modelId` plus bare modelId for the active model.
  * @param {{ providers?: Array<{ id: string, name?: string, enabled?: boolean, models?: Array<{ id: string, name?: string }> }>, activeProviderId?: string, activeModelId?: string }} config
+ * @param {{ allowedModels?: string[] }} [options] optional employee-key scope
  */
-export function listCompatModels(config) {
+export function listCompatModels(config, options = {}) {
   const providers = Array.isArray(config?.providers) ? config.providers : [];
+  const allowedModels = new Set(
+    Array.isArray(options?.allowedModels)
+      ? options.allowedModels.filter((value) => typeof value === "string" && value.includes("/"))
+      : [],
+  );
   const models = [];
   const seen = new Set();
   for (const provider of providers) {
@@ -45,6 +51,7 @@ export function listCompatModels(config) {
     for (const model of provider.models ?? []) {
       if (!model?.id) continue;
       const compound = `${provider.id}/${model.id}`;
+      if (allowedModels.size > 0 && !allowedModels.has(compound)) continue;
       if (!seen.has(compound)) {
         seen.add(compound);
         models.push({

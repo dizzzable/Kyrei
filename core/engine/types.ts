@@ -904,7 +904,9 @@ export type ProviderProtocol =
   | "anthropic-messages"
   | "google-generative-ai"
   | "amazon-bedrock"
-  | "google-vertex";
+  | "google-vertex"
+  /** Official local Codex App Server; executed by the gateway, not AI SDK. */
+  | "codex-app-server";
 
 /** Protocol-scoped credentials loaded only by the local gateway secret store. */
 export interface ProviderCredentials {

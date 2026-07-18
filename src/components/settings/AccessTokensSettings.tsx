@@ -1,5 +1,5 @@
-import { Copy, KeyRound, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { Copy, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button, Input, Switch } from "@/components/ui";
 import { useI18n } from "@/i18n";
@@ -7,6 +7,8 @@ import {
   gateway,
   type AccessControlPublic,
   type AccessPrincipal,
+  type AccessTokenUsage,
+  type CompanyGatewayInfo,
 } from "@/lib/gateway";
 import type { AppConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -16,13 +18,29 @@ interface AccessTokensSettingsProps {
   onSaved?: (config: AppConfig) => void;
 }
 
+function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
 export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsProps) {
   const { t } = useI18n();
   const [control, setControl] = useState<AccessControlPublic | null>(null);
+  const [company, setCompany] = useState<CompanyGatewayInfo | null>(null);
+  const [usage, setUsage] = useState<AccessTokenUsage[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [busy, setBusy] = useState(false);
   const [label, setLabel] = useState("");
+  const [scopeAllModels, setScopeAllModels] = useState(false);
+  const [allowedModels, setAllowedModels] = useState<string[]>([]);
+  const [expiresAt, setExpiresAt] = useState("");
   const [revealed, setRevealed] = useState<{ id: string; token: string } | null>(null);
+  const [editingScopeId, setEditingScopeId] = useState<string | null>(null);
+  const [editingScopeAll, setEditingScopeAll] = useState(false);
+  const [editingAllowedModels, setEditingAllowedModels] = useState<string[]>([]);
+  const [editingExpiresAt, setEditingExpiresAt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [proxyDraft, setProxyDraft] = useState(() => ({
     enabled: config?.proxy?.enabled !== false,
@@ -38,15 +56,38 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
     });
   }, [config?.proxy]);
 
+  const modelRoutes = useMemo(() => (config?.providers ?? []).flatMap((provider) => (
+    provider.enabled === false
+      ? []
+      : (provider.models ?? []).map((model) => ({
+        ref: `${provider.id}/${model.id}`,
+        label: `${provider.name} · ${model.name || model.id}`,
+      }))
+  )), [config?.providers]);
+
+  useEffect(() => {
+    if (allowedModels.length || !config?.activeProviderId || !config.activeModelId) return;
+    const activeRef = `${config.activeProviderId}/${config.activeModelId}`;
+    if (modelRoutes.some((route) => route.ref === activeRef)) setAllowedModels([activeRef]);
+  }, [allowedModels.length, config?.activeModelId, config?.activeProviderId, modelRoutes]);
+
   const load = useCallback(async () => {
     setStatus("loading");
     setError(null);
     try {
-      const next = await gateway.getAccessControl();
+      const [next, companyInfo, usageInfo] = await Promise.all([
+        gateway.getAccessControl(),
+        gateway.getCompanyGateway(),
+        gateway.getAccessTokenUsage(),
+      ]);
       setControl(next);
+      setCompany(companyInfo);
+      setUsage(usageInfo.principals);
       setStatus("ready");
     } catch {
       setControl(null);
+      setCompany(null);
+      setUsage([]);
       setStatus("error");
     }
   }, []);
@@ -61,10 +102,13 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
     try {
       const result = await gateway.createAccessToken({
         label: label.trim() || t("settings.accessTokens.defaultLabel"),
+        ...(scopeAllModels ? {} : { allowedModels }),
+        ...(expiresAt ? { expiresAt: new Date(`${expiresAt}T00:00:00`).toISOString() } : {}),
       });
       setControl(result.accessControl);
       setRevealed({ id: result.principal.id, token: result.token });
       setLabel("");
+      void load();
     } catch {
       setError(t("settings.accessTokens.failed"));
     } finally {
@@ -91,6 +135,32 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
     try {
       const result = await gateway.patchAccessToken(principal.id, { enabled });
       setControl(result.accessControl);
+    } catch {
+      setError(t("settings.accessTokens.failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startScopeEdit = (principal: AccessPrincipal) => {
+    setEditingScopeId(principal.id);
+    setEditingScopeAll(principal.allowedModels.length === 0);
+    setEditingAllowedModels(principal.allowedModels.filter((ref) => modelRoutes.some((route) => route.ref === ref)));
+    setEditingExpiresAt(principal.expiresAt?.slice(0, 10) ?? "");
+  };
+
+  const saveScope = async (principal: AccessPrincipal) => {
+    if (!editingScopeAll && editingAllowedModels.length === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await gateway.patchAccessToken(principal.id, {
+        allowedModels: editingScopeAll ? [] : editingAllowedModels,
+        expiresAt: editingExpiresAt ? new Date(`${editingExpiresAt}T00:00:00`).toISOString() : null,
+      });
+      setControl(result.accessControl);
+      setEditingScopeId(null);
+      void load();
     } catch {
       setError(t("settings.accessTokens.failed"));
     } finally {
@@ -128,8 +198,12 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
 
   const copyToken = async () => {
     if (!revealed?.token) return;
+    await copyValue(revealed.token);
+  };
+
+  const copyValue = async (value: string) => {
     try {
-      await navigator.clipboard.writeText(revealed.token);
+      await navigator.clipboard.writeText(value);
     } catch {
       /* ignore */
     }
@@ -148,6 +222,7 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
         },
       } as Parameters<typeof gateway.setConfig>[0]);
       onSaved?.(next);
+      void load();
     } catch {
       setError(t("settings.accessTokens.failed"));
     } finally {
@@ -155,16 +230,32 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
     }
   };
 
+  const usageByPrincipal = new Map(usage.map((summary) => [summary.id, summary]));
+  const toggleAllowedModel = (ref: string, checked: boolean) => {
+    setAllowedModels((current) => (
+      checked
+        ? [...new Set([...current, ref])]
+        : current.filter((value) => value !== ref)
+    ));
+  };
+  const toggleEditingAllowedModel = (ref: string, checked: boolean) => {
+    setEditingAllowedModels((current) => (
+      checked
+        ? [...new Set([...current, ref])]
+        : current.filter((value) => value !== ref)
+    ));
+  };
+
   return (
-    <section className="max-w-4xl space-y-4 border-t border-border-soft pt-6" aria-labelledby="access-tokens-title">
+    <section className="max-w-4xl space-y-4" aria-labelledby="access-tokens-title">
       <div className="flex items-start gap-3">
         <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-border-soft bg-surface text-muted">
           <KeyRound className="size-4" aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
-          <h3 id="access-tokens-title" className="text-[12px] font-semibold text-foreground">
+          <h2 id="access-tokens-title" className="text-[14px] font-semibold text-foreground">
             {t("settings.accessTokens.title")}
-          </h3>
+          </h2>
           <p className="mt-1 max-w-2xl text-[10.5px] leading-4 text-muted">{t("settings.accessTokens.hint")}</p>
         </div>
         <Button variant="outline" size="icon-sm" disabled={status === "loading"} onClick={() => void load()} aria-label={t("settings.accessTokens.refresh")}>
@@ -194,9 +285,14 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
         <div className="space-y-2 rounded-lg border border-border-soft bg-surface/45 p-3">
           <h4 className="text-[11px] font-semibold text-foreground">{t("settings.proxy.title")}</h4>
           <p className="text-[10px] leading-4 text-muted">{t("settings.proxy.hint")}</p>
-          <p className="rounded-md border border-border-soft bg-bg/40 px-2 py-1.5 font-mono text-[10px] text-secondary">
-            {t("settings.proxy.endpoint", { port: "8765" })}
-          </p>
+          <div className="space-y-1.5">
+            {(company?.endpoints ?? []).map((endpoint) => (
+              <div key={endpoint.baseUrl} className="flex items-center gap-2 rounded-md border border-border-soft bg-bg/40 px-2 py-1.5">
+                <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-secondary">{endpoint.baseUrl}</code>
+                <Button size="sm" variant="ghost" onClick={() => void copyValue(endpoint.baseUrl)}>{t("settings.accessTokens.copy")}</Button>
+              </div>
+            ))}
+          </div>
           <div className="flex flex-wrap items-center gap-4">
             <label className="inline-flex items-center gap-2 text-[10.5px] text-secondary">
               <Switch
@@ -231,10 +327,12 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
             </Button>
           </div>
           <p className="text-[10px] leading-4 text-faint">{t("settings.proxy.restartHint")}</p>
+          {company?.proxy.restartRequired ? <p className="text-[10.5px] text-warning">{t("settings.proxy.restartRequired")}</p> : null}
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border-soft bg-surface/35 p-3">
+      <div className="space-y-3 rounded-lg border border-border-soft bg-surface/35 p-3">
+        <div className="flex flex-wrap items-end gap-2">
         <label className="min-w-[12rem] flex-1 space-y-1">
           <span className="text-[10px] text-muted">{t("settings.accessTokens.label")}</span>
           <Input
@@ -244,10 +342,42 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
             onChange={(event) => setLabel(event.target.value)}
           />
         </label>
-        <Button size="sm" disabled={busy} onClick={() => void create()}>
+        <label className="min-w-[10rem] space-y-1">
+          <span className="text-[10px] text-muted">{t("settings.accessTokens.expiresAt")}</span>
+          <Input type="date" value={expiresAt} disabled={busy} onChange={(event) => setExpiresAt(event.target.value)} />
+        </label>
+        <Button size="sm" disabled={busy || (!scopeAllModels && allowedModels.length === 0)} onClick={() => void create()}>
           <Plus className="size-3.5" aria-hidden />
           {t("settings.accessTokens.create")}
         </Button>
+        </div>
+        <div className="rounded-md border border-border-soft bg-bg/25 p-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="block text-[10.5px] font-medium text-foreground">{t("settings.accessTokens.scopeTitle")}</span>
+              <span className="mt-0.5 block text-[10px] leading-4 text-muted">{t("settings.accessTokens.scopeHint")}</span>
+            </div>
+            <label className="inline-flex shrink-0 items-center gap-2 text-[10px] text-secondary">
+              {t("settings.accessTokens.scopeAll")}
+              <Switch checked={scopeAllModels} disabled={busy} onCheckedChange={setScopeAllModels} />
+            </label>
+          </div>
+          {!scopeAllModels ? (
+            <div className="mt-2 grid gap-1 sm:grid-cols-2">
+              {modelRoutes.map((route) => (
+                <label key={route.ref} className="flex min-w-0 items-center gap-2 rounded px-1.5 py-1 text-[10px] text-secondary hover:bg-elevated">
+                  <input
+                    type="checkbox"
+                    checked={allowedModels.includes(route.ref)}
+                    disabled={busy}
+                    onChange={(event) => toggleAllowedModel(route.ref, event.target.checked)}
+                  />
+                  <span className="truncate" title={route.ref}>{route.label}</span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {revealed ? (
@@ -286,6 +416,21 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
                   {principal.prefix} · {principal.id}
                   {principal.lastUsedAt ? ` · ${t("settings.accessTokens.lastUsed")}: ${principal.lastUsedAt.slice(0, 10)}` : ""}
                 </span>
+                <span className="mt-0.5 block truncate text-[10px] text-muted" title={principal.allowedModels.join(", ")}>
+                  {principal.allowedModels.length
+                    ? principal.allowedModels.join(" · ")
+                    : t("settings.accessTokens.scopeAll")}
+                  {principal.expiresAt ? ` · ${t("settings.accessTokens.expiresAt")}: ${principal.expiresAt.slice(0, 10)}` : ""}
+                </span>
+                <span className="mt-0.5 block text-[10px] text-faint">
+                  {(() => {
+                    const summary = usageByPrincipal.get(principal.id);
+                    return t("settings.accessTokens.usage", {
+                      requests: summary?.requestCount ?? 0,
+                      tokens: formatTokens(summary?.totalTokens ?? 0),
+                    });
+                  })()}
+                </span>
               </div>
               <Switch
                 checked={principal.enabled}
@@ -296,9 +441,50 @@ export function AccessTokensSettings({ config, onSaved }: AccessTokensSettingsPr
               <Button size="icon-sm" variant="ghost" disabled={busy} onClick={() => void regen(principal)} aria-label={t("settings.accessTokens.regenerate")}>
                 <RefreshCw className="size-3.5" />
               </Button>
+              <Button size="icon-sm" variant="ghost" disabled={busy} onClick={() => startScopeEdit(principal)} aria-label={t("settings.accessTokens.manageScope")}>
+                <Pencil className="size-3.5" />
+              </Button>
               <Button size="icon-sm" variant="ghost" disabled={busy} onClick={() => void remove(principal)} aria-label={t("settings.accessTokens.delete")}>
                 <Trash2 className="size-3.5" />
               </Button>
+              {editingScopeId === principal.id ? (
+                <div className="w-full space-y-2 rounded-md border border-border-soft bg-bg/35 p-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[10.5px] font-medium text-foreground">{t("settings.accessTokens.scopeTitle")}</span>
+                    <label className="inline-flex items-center gap-2 text-[10px] text-secondary">
+                      {t("settings.accessTokens.scopeAll")}
+                      <Switch checked={editingScopeAll} disabled={busy} onCheckedChange={setEditingScopeAll} />
+                    </label>
+                  </div>
+                  {!editingScopeAll ? (
+                    <div className="grid gap-1 sm:grid-cols-2">
+                      {modelRoutes.map((route) => (
+                        <label key={route.ref} className="flex min-w-0 items-center gap-2 rounded px-1.5 py-1 text-[10px] text-secondary hover:bg-elevated">
+                          <input
+                            type="checkbox"
+                            checked={editingAllowedModels.includes(route.ref)}
+                            disabled={busy}
+                            onChange={(event) => toggleEditingAllowedModel(route.ref, event.target.checked)}
+                          />
+                          <span className="truncate" title={route.ref}>{route.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="space-y-1">
+                      <span className="text-[10px] text-muted">{t("settings.accessTokens.expiresAt")}</span>
+                      <Input type="date" value={editingExpiresAt} disabled={busy} onChange={(event) => setEditingExpiresAt(event.target.value)} />
+                    </label>
+                    <Button size="sm" disabled={busy || (!editingScopeAll && editingAllowedModels.length === 0)} onClick={() => void saveScope(principal)}>
+                      {t("settings.save")}
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditingScopeId(null)}>
+                      {t("common.cancel")}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
             </li>
           ))
         )}

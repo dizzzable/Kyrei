@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
+import { networkInterfaces } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, relative } from "node:path";
 import {
   SessionStore,
@@ -111,6 +112,13 @@ import { ProviderAccountPoolRouter } from "./provider-account-pool.js";
 import { KiroCliConnector } from "./kiro-cli-connector.js";
 import { createKiroConnectorApi } from "./kiro-connector-api.js";
 import {
+  CODEX_CHATGPT_BASE_URL,
+  CODEX_CHATGPT_DEFAULT_MODEL,
+  CODEX_CHATGPT_PROVIDER_ID,
+  CodexAppServerConnector,
+} from "./codex-app-server-connector.js";
+import { createCodexConnectorApi } from "./codex-connector-api.js";
+import {
   MAX_KIRO_ORGANIZATION_ACCOUNTS,
   KiroOrganizationConfigError,
   normalizeKiroOrganizationAccountSecret,
@@ -158,7 +166,9 @@ import {
   createAccessPrincipal,
   evaluatePrincipalBudget,
   extractAccessTokenFromRequest,
+  isModelRefAllowed,
   normalizeAccessControl,
+  normalizeAllowedModelRefs,
   normalizeAccessTokenHashes,
   patchPrincipal,
   publicAccessControl,
@@ -1064,6 +1074,15 @@ export function requestErrorStatus(error) {
     || code.startsWith("kiro_cli_models_")
   ) return 502;
   if (code.startsWith("kiro_cli_")) return 400;
+  if (code === "codex_app_server_login_not_found") return 404;
+  if (code === "codex_app_server_login_active") return 409;
+  if (code === "codex_app_server_timeout" || code === "codex_app_server_login_timed_out") return 504;
+  if (
+    code === "codex_app_server_not_installed"
+    || code === "codex_app_server_npm_runtime_unavailable"
+    || code === "codex_app_server_unavailable"
+  ) return 503;
+  if (code.startsWith("codex_app_server_")) return 400;
   if (code.endsWith("_not_found") || code.endsWith("-not-found")) return 404;
   if (code.endsWith("_state_corrupt") || code.endsWith("_state_invalid") || code.endsWith("_journal_corrupt")) return 500;
   if (code.endsWith("_store_busy") || code.endsWith("_lock_busy")) return 503;
@@ -2083,6 +2102,9 @@ export async function startGateway({
   requireProtectedSecrets = false,
   openPath,
   kiroConnector = new KiroCliConnector(),
+  codexConnector = new CodexAppServerConnector({
+    version: process.env.KYREI_BUILD_ID ?? process.env.npm_package_version ?? "development",
+  }),
   kiroOrganizationWorker,
   commandRunner,
   localPostgres,
@@ -2109,6 +2131,7 @@ export async function startGateway({
     ? Math.min(30_000, Math.max(10, Math.floor(activeTurnSettleTimeoutMs)))
     : 2_000;
   const kiroApi = createKiroConnectorApi(kiroConnector);
+  const codexApi = createCodexConnectorApi(codexConnector);
   // The local port is not an authentication boundary: any web page can target
   // loopback. Every API request carries this per-launch capability token.
   const gatewayToken = typeof authToken === "string" && authToken.length >= 32
@@ -2364,6 +2387,70 @@ export async function startGateway({
     if (!principal) return null;
     const events = await usageLedger.readEvents({ limit: 50_000 });
     return evaluatePrincipalBudget(principal, events);
+  }
+  /**
+   * Validate a key scope at the owner boundary. The persisted principal keeps
+   * only opaque `providerId/modelId` references; provider credentials never
+   * enter access-token metadata or the employee-facing proxy.
+   */
+  function validateAccessTokenModelScope(value) {
+    if (!Array.isArray(value)) throw new AccessTokenError("access_token_scope_invalid", 400);
+    const normalized = normalizeAllowedModelRefs(value);
+    if (normalized.length !== value.length) {
+      throw new AccessTokenError("access_token_scope_invalid", 400);
+    }
+    for (const ref of normalized) {
+      const slash = ref.indexOf("/");
+      const providerId = ref.slice(0, slash);
+      const modelId = ref.slice(slash + 1);
+      const provider = config.providers.find((candidate) => candidate.id === providerId);
+      if (!provider?.models?.some((model) => model.id === modelId)) {
+        throw new AccessTokenError("access_token_scope_model_unknown", 400);
+      }
+    }
+    return normalized;
+  }
+  function validateAccessTokenExpiry(value) {
+    if (value === null || value === "") return null;
+    if (typeof value !== "string" || value.length > 80) {
+      throw new AccessTokenError("access_token_expiry_invalid", 400);
+    }
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp)) throw new AccessTokenError("access_token_expiry_invalid", 400);
+    return new Date(timestamp).toISOString();
+  }
+  /** Owner-only connection details for a private LAN/VPN deployment. */
+  function publicCompanyGateway() {
+    const proxy = normalizeProxyConfig(config.proxy);
+    const address = typeof server.address === "function" ? server.address() : null;
+    const port = address && typeof address === "object" && Number.isInteger(address.port)
+      ? address.port
+      : 8765;
+    const boundAddress = address && typeof address === "object" ? address.address : "127.0.0.1";
+    const lanBound = boundAddress === "0.0.0.0" || boundAddress === "::";
+    const endpoints = [{ kind: "loopback", baseUrl: `http://127.0.0.1:${port}/v1` }];
+    if (lanBound) {
+      const seen = new Set();
+      for (const entries of Object.values(networkInterfaces())) {
+        for (const entry of entries ?? []) {
+          if (!entry || entry.internal || (entry.family !== "IPv4" && entry.family !== 4)) continue;
+          const ip = entry.address;
+          if (!ip || seen.has(ip)) continue;
+          seen.add(ip);
+          endpoints.push({ kind: "lan", baseUrl: `http://${ip}:${port}/v1` });
+        }
+      }
+    }
+    return {
+      proxy: {
+        enabled: proxy.enabled,
+        listenLan: proxy.listenLan,
+        requireAccessToken: proxy.requireAccessToken,
+        restartRequired: proxy.listenLan !== lanBound,
+      },
+      endpoints,
+      modelRefFormat: "providerId/modelId",
+    };
   }
   const kiroOrganizationBroker = new KiroOrganizationBroker({
     config: config.kiroOrganization,
@@ -6453,14 +6540,42 @@ export async function startGateway({
         readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         onSkillUsed: id => skillsStore.recordUsage(id).then(() => undefined).catch(() => undefined),
       };
-      const mod = await getEngine();
       throwIfAborted(controller.signal);
-      const result = await mod.runKyreiChat({
-        ...common,
-        abortSignal: controller.signal,
-        config: await effectiveEngineConfigForSession(sessionId),
-        ...(safeModelParams ? { modelParams: safeModelParams } : {}),
-      });
+      let result;
+      if (mainTarget.protocol === "codex-app-server") {
+        // Codex App Server is a complete native agent runtime. Do not pipe its
+        // ChatGPT session through the AI SDK, and do not silently pretend that
+        // a Kyrei team role was executed when it was not.
+        if (team) throw new Error("codex_app_server_team_unsupported");
+        const codexImages = Array.isArray(storedUser?.imageAttachments)
+          ? storedUser.imageAttachments.map((image) => ({
+              path: join(attachmentsRoot(), image.relPath),
+            }))
+          : [];
+        result = await codexConnector.runTurn({
+          threadId: session.codexThreadId,
+          prompt: typeof text === "string" ? text : "",
+          images: codexImages,
+          workspace: storedUser?.workspace || config.workspace,
+          model: mainTarget.model,
+          signal: controller.signal,
+          onThread: async (codexThreadId) => {
+            // The opaque Codex thread id is enough to resume a ChatGPT-backed
+            // session after a Kyrei restart; it is not an OAuth credential.
+            store.upsertSession({ id: sessionId, codexThreadId, updatedAt: new Date().toISOString() });
+            await store.flush();
+          },
+          onEvent: common.emit,
+        });
+      } else {
+        const mod = await getEngine();
+        result = await mod.runKyreiChat({
+          ...common,
+          abortSignal: controller.signal,
+          config: await effectiveEngineConfigForSession(sessionId),
+          ...(safeModelParams ? { modelParams: safeModelParams } : {}),
+        });
+      }
       // Wave E: remember last harness snapshot for Usage settings (no secrets).
       if (result?.harness && typeof result.harness === "object") {
         lastHarnessMetrics = sanitizeHarnessMetrics(result.harness);
@@ -6685,7 +6800,9 @@ export async function startGateway({
 
       // ── OpenAI-compatible proxy (/v1) ────────────────────────────────
       if (proxyCfg.enabled && path === "/v1/models" && req.method === "GET") {
-        return sendJson(res, 200, listCompatModels(config));
+        return sendJson(res, 200, listCompatModels(config, {
+          allowedModels: v1Principal?.principal?.allowedModels,
+        }));
       }
       if (proxyCfg.enabled && path === "/v1/chat/completions" && req.method === "POST") {
         const body = await readBody(req);
@@ -6720,6 +6837,16 @@ export async function startGateway({
         }
 
         const ref = resolveCompatModelRef(parsed.model, config);
+        if (v1Principal?.principal && !isModelRefAllowed(v1Principal.principal, ref.providerId, ref.modelId)) {
+          return sendJson(res, 403, {
+            error: {
+              message: "access_token_model_not_allowed",
+              type: "insufficient_permissions",
+              code: "access_token_model_not_allowed",
+            },
+            code: "access_token_model_not_allowed",
+          });
+        }
         let target;
         try {
           target = privateRuntimeTargetForConfig(config, secrets, ref.providerId, ref.modelId, {
@@ -6729,6 +6856,15 @@ export async function startGateway({
           const code = error?.code || error?.message || "model_not_found";
           return sendJson(res, 404, {
             error: { message: String(code), type: "invalid_request_error", code: "model_not_found" },
+          });
+        }
+        if (target.protocol === "codex-app-server") {
+          return sendJson(res, 400, {
+            error: {
+              message: "codex_app_server_not_openai_compatible",
+              type: "invalid_request_error",
+              code: "native_agent_provider",
+            },
           });
         }
 
@@ -6927,6 +7063,10 @@ export async function startGateway({
         }
       }
 
+      if (req.method === "GET" && path === "/api/company-gateway") {
+        return sendJson(res, 200, publicCompanyGateway());
+      }
+
       const teamRunMatch = path.match(/^\/api\/team-runs\/([^/]+)$/);
       if (teamRunMatch && req.method === "GET") {
         let runId = "";
@@ -6972,6 +7112,27 @@ export async function startGateway({
       }
 
       // ── Access tokens (employee principals) ─────────────────────────
+      if (path === "/api/access-tokens/usage" && req.method === "GET") {
+        const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days")) || 30));
+        const sinceMs = Date.now() - days * 24 * 60 * 60_000;
+        const events = await usageLedger.readEvents({ limit: 50_000, sinceMs });
+        const summaries = new Map(accessControlState().principals.map((principal) => [principal.id, {
+          id: principal.id,
+          requestCount: 0,
+          totalTokens: 0,
+          costUsd: 0,
+        }]));
+        for (const event of events) {
+          if (!event.accessTokenId) continue;
+          const summary = summaries.get(event.accessTokenId);
+          if (!summary) continue;
+          summary.requestCount += 1;
+          summary.totalTokens += Number(event.totalTokens) || 0;
+          summary.costUsd += Number(event.costUsd) || 0;
+        }
+        return sendJson(res, 200, { days, principals: [...summaries.values()] });
+      }
+
       if (path === "/api/access-tokens") {
         if (req.method === "GET") {
           return sendJson(res, 200, publicAccessControl(config.accessControl));
@@ -6985,6 +7146,12 @@ export async function startGateway({
           const created = createAccessPrincipal({
             label: typeof body.label === "string" ? body.label : "User",
             existing: control.principals,
+            ...(body.allowedModels !== undefined
+              ? { allowedModels: validateAccessTokenModelScope(body.allowedModels) }
+              : {}),
+            ...(body.expiresAt !== undefined
+              ? { expiresAt: validateAccessTokenExpiry(body.expiresAt) }
+              : {}),
             budget: {
               window: body.budgetWindow === "month" ? "month" : "day",
               softCostUsd: body.softCostUsd,
@@ -7050,7 +7217,16 @@ export async function startGateway({
 
         if (req.method === "PATCH" && !action) {
           const body = await readBody(req);
-          const nextPrincipal = patchPrincipal(existing, body);
+          const patch = {
+            ...body,
+            ...(body.allowedModels !== undefined
+              ? { allowedModels: validateAccessTokenModelScope(body.allowedModels) }
+              : {}),
+            ...(body.expiresAt !== undefined
+              ? { expiresAt: validateAccessTokenExpiry(body.expiresAt) }
+              : {}),
+          };
+          const nextPrincipal = patchPrincipal(existing, patch);
           const nextControl = normalizeAccessControl({
             ...control,
             principals: control.principals.map((row) => (row.id === principalId ? nextPrincipal : row)),
@@ -8960,6 +9136,60 @@ export async function startGateway({
         if (req.method === "DELETE") return sendJson(res, 200, kiroApi.cancelLogin(loginId));
       }
 
+      // Official ChatGPT / Codex. This is deliberately separate from OpenAI
+      // API-provider profiles: the Codex CLI owns OAuth and refresh tokens.
+      if (path === "/api/connectors/codex" && req.method === "GET") {
+        return sendJson(res, 200, await codexApi.status());
+      }
+      if (path === "/api/connectors/codex/login" && req.method === "POST") {
+        return sendJson(res, 202, await codexApi.startLogin(await readBody(req)));
+      }
+      if (path === "/api/connectors/codex/logout" && req.method === "POST") {
+        return sendJson(res, 200, await codexApi.logout());
+      }
+      const codexLoginMatch = path.match(/^\/api\/connectors\/codex\/login\/([^/]+)$/);
+      if (codexLoginMatch) {
+        const loginId = decodeURIComponent(codexLoginMatch[1]);
+        if (req.method === "GET") return sendJson(res, 200, codexApi.loginStatus(loginId));
+        if (req.method === "DELETE") return sendJson(res, 200, await codexApi.cancelLogin(loginId));
+      }
+      if (path === "/api/connectors/codex/activate" && req.method === "POST") {
+        assertOnlyFields(await readBody(req), new Set());
+        const account = await codexApi.status();
+        if (!account.installed) {
+          const error = new Error("codex_app_server_not_installed");
+          error.code = "codex_app_server_not_installed";
+          throw error;
+        }
+        if (!account.authenticated) {
+          const error = new Error("codex_app_server_not_authenticated");
+          error.code = "codex_app_server_not_authenticated";
+          throw error;
+        }
+        const snapshot = await mutateConfig(async () => {
+          const provider = {
+            id: CODEX_CHATGPT_PROVIDER_ID,
+            name: "OpenAI Codex (ChatGPT)",
+            protocol: "codex-app-server",
+            baseURL: CODEX_CHATGPT_BASE_URL,
+            models: [{ id: CODEX_CHATGPT_DEFAULT_MODEL, name: "ChatGPT plan default" }],
+            enabled: true,
+            requiresApiKey: false,
+          };
+          const updated = upsertProvider(config, provider, CODEX_CHATGPT_PROVIDER_ID);
+          const nextConfig = selectExistingProviderModel(
+            updated.config,
+            CODEX_CHATGPT_PROVIDER_ID,
+            CODEX_CHATGPT_DEFAULT_MODEL,
+          );
+          await saveConfig(nextConfig, secrets);
+          config = nextConfig;
+          invalidateProviderRuntime(CODEX_CHATGPT_PROVIDER_ID);
+          return publicGatewayConfig(config, secrets);
+        });
+        return sendJson(res, 200, snapshot);
+      }
+
       if (req.method === "POST" && path === "/api/providers/discover") {
         const body = await readBody(req);
         const profile = body.profile && typeof body.profile === "object"
@@ -8967,6 +9197,9 @@ export async function startGateway({
           : body.provider && typeof body.provider === "object"
             ? body.provider
             : body;
+        if (profile.protocol === "codex-app-server") {
+          throw new ProviderConfigError("codex_app_server_managed_connector_only");
+        }
         const suppliedCredentials = normalizeProviderSecret(
           body.credentials && typeof body.credentials === "object"
             ? body.credentials
@@ -9004,8 +9237,11 @@ export async function startGateway({
         if (req.method === "POST") {
           const body = await readBody(req);
           const snapshot = await mutateConfig(async () => {
-            const input = body.provider && typeof body.provider === "object" ? body.provider : body;
-            const provider = validateProviderInput(input, {
+          const input = body.provider && typeof body.provider === "object" ? body.provider : body;
+          if (input.protocol === "codex-app-server") {
+            throw new ProviderConfigError("codex_app_server_managed_connector_only");
+          }
+          const provider = validateProviderInput(input, {
               creating: true,
               verifyLiveCapabilities: liveCapabilityVerifier(undefined),
             });
@@ -9058,6 +9294,11 @@ export async function startGateway({
       const providerPoolMatch = path.match(/^\/api\/providers\/([^/]+)\/pool$/);
       if (providerPoolMatch) {
         const providerId = decodeURIComponent(providerPoolMatch[1]);
+        const existing = config.providers.find((provider) => provider.id === providerId);
+        if (!existing) throw new ProviderConfigError("provider_not_found");
+        if (existing.protocol === "codex-app-server") {
+          throw new ProviderConfigError("codex_app_server_managed_connector_only");
+        }
         if (req.method === "GET") return sendJson(res, 200, publicProviderAccountPool(providerId));
         if (req.method === "PATCH") {
           const body = await readBody(req);
@@ -9084,6 +9325,11 @@ export async function startGateway({
       const providerAccountsMatch = path.match(/^\/api\/providers\/([^/]+)\/accounts$/);
       if (providerAccountsMatch) {
         const providerId = decodeURIComponent(providerAccountsMatch[1]);
+        const existing = config.providers.find((provider) => provider.id === providerId);
+        if (!existing) throw new ProviderConfigError("provider_not_found");
+        if (existing.protocol === "codex-app-server") {
+          throw new ProviderConfigError("codex_app_server_managed_connector_only");
+        }
         if (req.method === "GET") return sendJson(res, 200, publicProviderAccountPool(providerId));
         if (req.method === "POST") {
           const body = await readBody(req);
@@ -9143,10 +9389,16 @@ export async function startGateway({
         const action = providerAccountMatch[3] ?? "";
         const existing = config.providers.find((provider) => provider.id === providerId);
         if (!existing) throw new ProviderConfigError("provider_not_found");
+        if (existing.protocol === "codex-app-server") {
+          throw new ProviderConfigError("codex_app_server_managed_connector_only");
+        }
         const currentPool = normalizeProviderAccountPool(existing.accountPool, existing.models);
         const currentAccount = currentPool.members.find((account) => account.id === accountId);
         if (!currentAccount) throw new ProviderConfigError("provider_account_not_found");
         if (action === "/discover" && req.method === "POST") {
+          if (existing.protocol === "codex-app-server") {
+            throw new ProviderConfigError("codex_app_server_managed_connector_only");
+          }
           const credentials = existing.requiresApiKey
             ? getProviderAccountCredentials(secrets, providerId, accountId)
             : {};
@@ -9276,6 +9528,9 @@ export async function startGateway({
           const body = await readBody(req);
           const existing = config.providers.find((provider) => provider.id === providerId);
           if (!existing) return sendJson(res, 404, { code: "provider_not_found", error: "provider_not_found" });
+          if (existing.protocol === "codex-app-server") {
+            throw new ProviderConfigError("codex_app_server_managed_connector_only");
+          }
           const credentials = existing.requiresApiKey ? secrets.providers[providerId] ?? {} : {};
           if (existing.requiresApiKey && !hasStoredProviderCredentials(existing, credentials)) {
             throw new ProviderConfigError("provider_credentials_required");
@@ -9357,6 +9612,9 @@ export async function startGateway({
           const snapshot = await mutateConfig(async () => {
             const existing = config.providers.find((provider) => provider.id === providerId);
             if (!existing) throw new ProviderConfigError("provider_not_found");
+            if (existing.protocol === "codex-app-server") {
+              throw new ProviderConfigError("codex_app_server_managed_connector_only");
+            }
             const patch = body.provider && typeof body.provider === "object" ? body.provider : body;
             const updatedProvider = validateProviderInput({ ...existing, ...patch }, {
               providerId,
@@ -11000,7 +11258,10 @@ export async function startGateway({
       if (!controller.signal.aborted) controller.abort(new Error("gateway_shutdown"));
     }
     closePromise = (async () => {
-      const connectorClose = Promise.resolve(kiroApi.close()).catch(() => undefined);
+      const connectorClose = Promise.all([
+        Promise.resolve(kiroApi.close()).catch(() => undefined),
+        Promise.resolve(codexApi.close()).catch(() => undefined),
+      ]);
       const organizationClose = Promise.resolve(kiroOrganizationBroker.close()).catch(() => undefined);
       // Cooperative providers settle normally; incompatible transports are
       // fenced after the bounded grace period and their latest public draft is

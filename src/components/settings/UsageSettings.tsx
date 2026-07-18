@@ -1,7 +1,6 @@
 import { BarChart3, LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { AccessTokensSettings } from "@/components/settings/AccessTokensSettings";
 import { Button, Input, Switch } from "@/components/ui";
 import { useI18n } from "@/i18n";
 import { gateway, type UsageBudgetConfig, type UsageSummary } from "@/lib/gateway";
@@ -501,7 +500,6 @@ export function UsageSettings({ config, getCurrentEngine, onSaved }: UsageSettin
 
       <p className="text-[10px] leading-4 text-faint">{t("settings.usage.governanceNote")}</p>
 
-      <AccessTokensSettings config={config} onSaved={onSaved} />
     </section>
   );
 }
