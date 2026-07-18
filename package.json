@@ -153,7 +153,6 @@
       "output": "dist/app",
       "buildResources": "build"
     },
-    "electronDist": "node_modules/electron/dist",
     "win": {
       "target": [
         {

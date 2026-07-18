@@ -60,6 +60,43 @@ async function installedNpmCli() {
 }
 
 /**
+ * Use the Electron binary installed by npm only for a native, local package.
+ * CI release jobs spell out their target architecture (and macOS builds two
+ * architectures), so they must retain electron-builder's platform download.
+ *
+ * @param {string[]} builderArgs
+ * @param {string | undefined} electronDist
+ */
+export function withLocalElectronDist(builderArgs, electronDist) {
+  const hasExplicitArchitecture = builderArgs.some(argument =>
+    ["--x64", "--arm64", "--ia32", "--universal"].includes(argument),
+  );
+  const hasElectronDist = builderArgs.some(argument =>
+    argument === "--config.electronDist" || argument.startsWith("--config.electronDist="),
+  );
+
+  if (!electronDist || hasExplicitArchitecture || hasElectronDist) {
+    return builderArgs;
+  }
+
+  return [...builderArgs, `--config.electronDist=${electronDist}`];
+}
+
+async function installedElectronDist(rootDir, builderArgs) {
+  if (builderArgs.some(argument => ["--x64", "--arm64", "--ia32", "--universal"].includes(argument))) {
+    return undefined;
+  }
+
+  const candidate = join(rootDir, "node_modules", "electron", "dist");
+  try {
+    await access(candidate);
+    return candidate;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Package Kyrei with native modules compiled for Electron, then restore the
  * workspace copy for the Node runtime used by tests and development scripts.
  * electron-builder's non-forced rebuild may reuse better-sqlite3's Node ABI
@@ -84,6 +121,7 @@ export async function packageElectron({
   const electronBuilderCli = join(rootDir, "node_modules", "electron-builder", "cli.js");
   const version = electronVersion ?? await installedElectronVersion(rootDir);
   const npmCli = npmCliPath ?? await installedNpmCli();
+  const electronDist = await installedElectronDist(rootDir, builderArgs);
 
   await run(process.execPath, [npmCli, "run", "package:prepare"], { cwd: rootDir });
 
@@ -99,7 +137,7 @@ export async function packageElectron({
       "-v",
       version,
     ], { cwd: rootDir });
-    await run(process.execPath, [electronBuilderCli, ...builderArgs], { cwd: rootDir });
+    await run(process.execPath, [electronBuilderCli, ...withLocalElectronDist(builderArgs, electronDist)], { cwd: rootDir });
   } catch (error) {
     packagingError = error;
   }
