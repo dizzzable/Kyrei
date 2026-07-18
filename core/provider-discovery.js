@@ -187,11 +187,6 @@ function parseEndpoint(baseURL, protocol) {
   return endpoint;
 }
 
-function isHttpsFqdn(url) {
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return url.protocol === "https:" && isIP(host) === 0 && host.includes(".");
-}
-
 function normalizedOrigin(url) {
   return new URL(url.origin).href.replace(/\/+$/, "");
 }
@@ -217,13 +212,14 @@ function redirectLocation(headers) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-async function resolveTarget(url, resolveHost, { allowBenchmarkNetwork = false } = {}) {
+async function resolveTarget(url, resolveHost, { trustedEndpoint = false } = {}) {
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (!host) throw discoveryError("provider_base_url_invalid");
   if (isIP(host)) {
     const policy = addressPolicy(host);
-    // User-configured baseURL may target loopback or RFC1918 LAN model servers.
-    if (policy !== "public" && !isTrustedLocalPolicy(policy)) {
+    // The gateway passes trustedEndpoint only after the user explicitly enters
+    // this provider endpoint. The standalone discovery helper stays SSRF-safe.
+    if (!trustedEndpoint && policy !== "public" && !isTrustedLocalPolicy(policy)) {
       throw discoveryError("provider_discovery_target_blocked");
     }
     return {
@@ -243,7 +239,12 @@ async function resolveTarget(url, resolveHost, { allowBenchmarkNetwork = false }
   if (!Array.isArray(addresses) || !addresses.length) throw discoveryError("provider_discovery_unavailable");
   const localhost = host === "localhost" || host.endsWith(".localhost");
   const policies = addresses.map((entry) => addressPolicy(entry.address));
-  if (localhost) {
+  if (trustedEndpoint) {
+    // A provider URL is an explicit user trust decision. Keep resolving and
+    // pinning every connection so DNS cannot change mid-request, but do not
+    // force users through a second network-range checkbox for their own VPN,
+    // LAN, Fake-IP proxy, or self-hosted endpoint.
+  } else if (localhost) {
     if (policies.some((policy) => policy !== "loopback")) throw discoveryError("provider_discovery_target_blocked");
   } else {
     if (policies.some((policy) => policy === "blocked")) {
@@ -255,12 +256,9 @@ async function resolveTarget(url, resolveHost, { allowBenchmarkNetwork = false }
     // Refuse mixed public+private DNS (SSRF pivot risk).
     if (hasPublic && hasPrivate) throw discoveryError("provider_discovery_target_blocked");
     if (hasPrivate && hasBenchmark) throw discoveryError("provider_discovery_target_blocked");
-    if (hasBenchmark) {
-      if (!allowBenchmarkNetwork) throw discoveryError("provider_discovery_benchmark_opt_in_required");
-      if (!isHttpsFqdn(url)) throw discoveryError("provider_discovery_target_blocked");
-    }
-    // Pure private LAN hostname (e.g. nas.home → 192.168.x) or pure public/benchmark.
-    if (!hasPublic && !hasPrivate && !hasBenchmark) {
+    if (hasBenchmark) throw discoveryError("provider_discovery_target_blocked");
+    // Pure private LAN hostname (e.g. nas.home → 192.168.x) or pure public.
+    if (!hasPublic && !hasPrivate) {
       throw discoveryError("provider_discovery_target_blocked");
     }
   }
@@ -450,9 +448,7 @@ function safeHeaders(value, apiKey, protocol) {
 }
 
 function assertAllowedDiscoveryOrigin(endpoint, pinnedAddress, options) {
-  if (options.allowBenchmarkNetwork === true && !isHttpsFqdn(endpoint)) {
-    throw discoveryError("provider_discovery_target_blocked");
-  }
+  if (options.trustedEndpoint === true) return;
   // HTTP is allowed only for trusted local targets (loopback or RFC1918 LAN).
   // Public internet discovery requires an exact-origin opt-in.
   if (endpoint.protocol !== "https:" && !pinnedAddress.loopback && !pinnedAddress.privateLan) {
@@ -472,7 +468,7 @@ async function performDiscovery(options, signal) {
   const origin = normalizedOrigin(endpoint);
   for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
     const pinnedAddress = await resolveTarget(endpoint, resolveHost, {
-      allowBenchmarkNetwork: options.allowBenchmarkNetwork === true,
+      trustedEndpoint: options.trustedEndpoint === true,
     });
     assertAllowedDiscoveryOrigin(endpoint, pinnedAddress, options);
     if (signal.aborted) throw new Error("aborted");

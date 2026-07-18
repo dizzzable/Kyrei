@@ -45,16 +45,12 @@ export function normalizeSubscriptionShieldConfig(raw) {
   const mode = modes.has(modeRaw) ? modeRaw : "stealth";
   const enabled = source.enabled === false || mode === "off" ? false : true;
   const minIntervalMs = Number(source.minIntervalMs);
-  const connectTimeoutMs = Number(source.connectTimeoutMs);
   const headerTimeoutMs = Number(source.headerTimeoutMs);
   const inactivityTimeoutMs = Number(source.inactivityTimeoutMs);
   const maxConnectionsPerOrigin = Number(source.maxConnectionsPerOrigin);
-  const normalizedLegacyTimeout = Number.isFinite(connectTimeoutMs)
-    ? Math.max(0, Math.min(120_000, Math.floor(connectTimeoutMs)))
-    : 0;
   const normalizedHeaderTimeout = Number.isFinite(headerTimeoutMs)
     ? Math.max(0, Math.min(120_000, Math.floor(headerTimeoutMs)))
-    : normalizedLegacyTimeout;
+    : 0;
   const normalizedInactivityTimeout = Number.isFinite(inactivityTimeoutMs)
     ? Math.max(0, Math.min(120_000, Math.floor(inactivityTimeoutMs)))
     : 0;

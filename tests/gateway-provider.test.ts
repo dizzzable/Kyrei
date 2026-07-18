@@ -564,7 +564,6 @@ describe("gateway provider registry", () => {
           protocol: "openai-chat",
           baseURL: "https://models.example/v1",
           requiresApiKey: true,
-          allowBenchmarkNetwork: true,
         },
         apiKey: credential,
       }),
@@ -573,12 +572,11 @@ describe("gateway provider registry", () => {
     expect(JSON.stringify(draft)).not.toContain(credential);
     const afterDraftDiscovery = await request("/api/config");
     expect(afterDraftDiscovery).toMatchObject(before);
-    expect(JSON.stringify(afterDraftDiscovery)).not.toContain("allowBenchmarkNetwork");
     expect(providerDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
       protocol: "openai-chat",
       baseURL: "https://models.example/v1",
       credentials: { apiKey: credential },
-      allowBenchmarkNetwork: true,
+      trustedEndpoint: true,
     }));
 
     await request("/api/providers/discover", {
@@ -615,13 +613,13 @@ describe("gateway provider registry", () => {
     const saved = await request<{ models: Array<{ id: string }> }>("/api/providers/saved-provider/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ allowBenchmarkNetwork: true }),
+      body: JSON.stringify({}),
     });
     expect(saved.models).toEqual([{ id: "discovered-model", name: "Discovered" }]);
     expect(providerDiscovery).toHaveBeenLastCalledWith(expect.objectContaining({
       baseURL: "https://saved.example/v1",
       credentials: { apiKey: credential },
-      allowBenchmarkNetwork: true,
+      trustedEndpoint: true,
     }));
 
     const anthropic = await request<{ models: Array<{ id: string }>; count: number }>("/api/providers/discover", {

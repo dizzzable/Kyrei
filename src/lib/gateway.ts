@@ -8,6 +8,8 @@ import type {
   GBrainInitializationResult,
   GBrainRuntimeStatus,
   McpRuntimeStatus,
+  ProjectMcpConfig,
+  ProjectMcpConfigStatus,
   MemoryIndexReindexResult,
   MemoryIndexRuntimeStatus,
   MemoryAtlasSnapshot,
@@ -277,6 +279,11 @@ export const gateway = {
   getConfig: () => json<AppConfig>("/api/config"),
   getGBrainStatus: () => json<GBrainRuntimeStatus>("/api/memory/gbrain"),
   getMcpStatus: () => json<McpRuntimeStatus>("/api/memory/mcp"),
+  getProjectMcpConfig: () => json<ProjectMcpConfigStatus>("/api/mcp/project"),
+  saveProjectMcpConfig: (config: ProjectMcpConfig) =>
+    json<ProjectMcpConfigStatus>("/api/mcp/project", { method: "PUT", body: JSON.stringify({ config }) }),
+  setProjectMcpTrust: (trusted: boolean) =>
+    json<ProjectMcpConfigStatus>("/api/mcp/project/trust", { method: "POST", body: JSON.stringify({ trusted }) }),
   getLocalPostgresStatus: () => json<LocalPostgresRuntimeStatus>("/api/memory/local-postgres"),
   ensureLocalPostgres: () => json<LocalPostgresRuntimeStatus>("/api/memory/local-postgres/ensure", { method: "POST" }),
   initializeGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/initialize", { method: "POST" }),
@@ -527,10 +534,10 @@ export const gateway = {
       method: "POST",
       body: JSON.stringify({ profile, ...(credentials ? { credentials } : {}) }),
     }),
-  discoverSavedProvider: (id: string, options: { allowBenchmarkNetwork?: boolean } = {}) =>
+  discoverSavedProvider: (id: string) =>
     json<ProviderDiscoveryResult>(`/api/providers/${encodeURIComponent(id)}/discover`, {
       method: "POST",
-      body: JSON.stringify({ allowBenchmarkNetwork: options.allowBenchmarkNetwork === true }),
+      body: JSON.stringify({}),
     }),
   resetProviderRuntime: (id: string, accountId?: string) =>
     json<{ ok: true; scope: "provider" | "account"; accountId?: string; runtime: ProviderAccountPoolSnapshot }>(
@@ -811,6 +818,19 @@ export const gateway = {
         body: JSON.stringify(opts?.messageId ? { messageId: opts.messageId } : {}),
       },
     ),
+  /** Continue the task in a clean context window without duplicating history. */
+  continueSession: (id: string) =>
+    json<{
+      id: string;
+      session: SessionInfo;
+      messageCount?: number;
+      packet?: {
+        sourceSessionId: string;
+        createdAt: string;
+        verifiedMutationCount: number;
+        hasRollingSummary: boolean;
+      };
+    }>(`/api/sessions/${encodeURIComponent(id)}/continue`, { method: "POST" }),
   setSessionArchived: (id: string, archived: boolean) =>
     json<{ ok: boolean; session?: SessionInfo; curator?: Record<string, unknown> }>(
       `/api/sessions/${encodeURIComponent(id)}`,

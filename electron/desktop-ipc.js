@@ -6,6 +6,7 @@ export const DESKTOP_CHANNELS = Object.freeze({
   workspaceChoose: "kyrei:workspace:choose",
   workspaceValidate: "kyrei:workspace:validate",
   openExternal: "kyrei:shell:openExternal",
+  windowTheme: "kyrei:window:theme",
   updateGetStatus: "kyrei:update:getStatus",
   updateCheck: "kyrei:update:check",
   updateDownload: "kyrei:update:download",
@@ -23,6 +24,10 @@ const PUSH_CHANNELS = new Set([
   DESKTOP_CHANNELS.terminalEvent,
   DESKTOP_CHANNELS.updateEvent,
 ]);
+
+function isOverlayColor(value) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+}
 
 /**
  * Register the narrow desktop capability surface used by the sandboxed
@@ -110,6 +115,22 @@ export function registerDesktopIpc({
       ...(sessionVerificationUri ? { sessionVerificationUri } : {}),
     });
     return { ok: true };
+  });
+
+  handle(DESKTOP_CHANNELS.windowTheme, ({ event }, input = {}) => {
+    const color = input?.color;
+    const symbolColor = input?.symbolColor;
+    if (!isOverlayColor(color) || !isOverlayColor(symbolColor)) {
+      throw new Error("window_theme_color_invalid");
+    }
+    const owner = typeof getWindow === "function" ? getWindow(event.sender) : undefined;
+    if (!owner || (typeof owner.isDestroyed === "function" && owner.isDestroyed())) return false;
+    // Only Windows/Linux title-bar overlays support this. macOS owns its
+    // traffic-light controls; a no-op there keeps the renderer portable.
+    if (typeof owner.setTitleBarOverlay !== "function") return false;
+    owner.setTitleBarOverlay({ color, symbolColor, height: 34 });
+    if (typeof owner.setBackgroundColor === "function") owner.setBackgroundColor(color);
+    return true;
   });
 
   const disabledStatus = () => ({

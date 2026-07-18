@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { ModelCapabilityMetadata, ProviderProfile, ProviderTemplate } from "@/lib/types";
 import {
   canUseStoredCredentialsForDiscovery,
-  consumeBenchmarkNetworkPermission,
   createDraftFromProfile,
   createDraftFromTemplate,
   shouldDefaultUseAsDefault,
@@ -114,12 +113,7 @@ describe("provider setup drafts", () => {
       ...configured,
       models: [{ id: "gpt-4o-mini", capabilities: liveCapabilities }],
     }, false);
-    draft.allowBenchmarkNetwork = true;
-    draft.allowInsecureHttp = true;
-
     const proxy = updateProviderDraftEndpoint(draft, { baseURL: "https://api.xpiki.com/v1" });
-    expect(proxy.allowBenchmarkNetwork).toBe(false);
-    expect(proxy.allowInsecureHttp).toBe(false);
     expect(proxy.hasStoredCredentials).toBe(false);
     expect(proxy.availableModels[0]?.capabilities).toBeUndefined();
     expect(mergeDiscoveredModels(proxy, [{ id: "gpt-4o-mini" }]).availableModels[0]?.capabilities).toBeUndefined();
@@ -128,18 +122,18 @@ describe("provider setup drafts", () => {
     expect(anthropic.availableModels[0]?.capabilities).toBeUndefined();
   });
 
-  it("persists exact-origin HTTP trust in the provider contract, not as a global discovery switch", () => {
+  it("keeps the typed endpoint free of secondary network trust switches", () => {
     const draft = createDraftFromProfile({
       ...configured,
       baseURL: "http://93.184.216.34:8080/v1",
-      allowInsecureHttp: true,
     }, false);
 
     expect(draftDiscoveryInput(draft)).toMatchObject({
       baseURL: "http://93.184.216.34:8080/v1",
-      allowInsecureHttp: true,
     });
-    expect(draftProviderInput(draft)).toMatchObject({ allowInsecureHttp: true });
+    expect(draftDiscoveryInput(draft)).not.toHaveProperty("allowInsecureHttp");
+    expect(draftDiscoveryInput(draft)).not.toHaveProperty("allowBenchmarkNetwork");
+    expect(draftProviderInput(draft)).not.toHaveProperty("allowInsecureHttp");
   });
 
   it("creates a custom draft without performing any persistence", () => {
@@ -160,19 +154,6 @@ describe("provider setup drafts", () => {
     expect(shouldDefaultUseAsDefault([
       { enabled: true, requiresApiKey: false, hasKey: false, hasStoredCredentials: false },
     ])).toBe(false);
-  });
-
-  it("consumes benchmark-network permission after one discovery attempt", () => {
-    const draft = createDraftFromProfile(configured, false);
-    draft.allowBenchmarkNetwork = true;
-
-    const firstAttempt = draftDiscoveryInput(draft);
-    const afterAttempt = consumeBenchmarkNetworkPermission(draft);
-    const secondAttempt = draftDiscoveryInput(afterAttempt);
-
-    expect(firstAttempt).toMatchObject({ allowBenchmarkNetwork: true });
-    expect(secondAttempt).not.toHaveProperty("allowBenchmarkNetwork");
-    expect(draftProviderInput(afterAttempt)).not.toHaveProperty("allowBenchmarkNetwork");
   });
 
   it("keeps stored specialised credentials when every write-only field is blank", () => {

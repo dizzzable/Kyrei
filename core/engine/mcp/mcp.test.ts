@@ -53,6 +53,26 @@ describe("normalizeMcpConfig", () => {
   });
 });
 
+describe("MCP workspace binding", () => {
+  it("starts stdio servers in the Kyrei workspace unless the user chose a cwd", () => {
+    const manager = createMcpManager({
+      workspace: "/projects/kyrei",
+      config: normalizeMcpConfig({
+        enabled: true,
+        servers: [
+          { id: "workspace-default", command: "node" },
+          { id: "explicit", command: "node", cwd: "/tooling" },
+        ],
+      }),
+    });
+
+    expect(manager.config.servers).toEqual([
+      expect.objectContaining({ id: "workspace-default", cwd: "/projects/kyrei" }),
+      expect.objectContaining({ id: "explicit", cwd: "/tooling" }),
+    ]);
+  });
+});
+
 describe("MCP permissions", () => {
   it("defaults mcp_call to ask and mcp_list_tools to allow", () => {
     const cfg = DEFAULT_ENGINE_CONFIG.permissions;

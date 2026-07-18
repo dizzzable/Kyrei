@@ -637,6 +637,8 @@ export interface EngineConfig {
     maxServers: number;
     maxToolsPerServer: number;
     maxResultChars: number;
+    /** Workspace paths whose `.kyrei/mcp.json` the user approved explicitly. */
+    projectTrust: string[];
   };
   /**
    * Opt-in inbound messaging webhook (gateway). No Slack/Telegram SDK —
@@ -852,6 +854,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     maxServers: 8,
     maxToolsPerServer: 64,
     maxResultChars: 24_000,
+    projectTrust: [],
   },
   skills: {
     curator: {
@@ -1160,6 +1163,11 @@ export interface RunKyreiChatOpts {
   /** Optional multi-provider team available to the acting session model. */
   team?: RuntimeTeamSpec;
   workspace?: string;
+  /**
+   * Gateway-owned bounded reference packet for a clean session that continues
+   * an earlier chat. It is historical data, not a replacement for the chat SoT.
+   */
+  continuationContext?: string;
   /**
    * Optional completion condition for the goal verifier. When set (and
    * reliability.goalVerify is on), a cheap post-turn judge checks whether the

@@ -40,7 +40,7 @@ describe("normalizeSubscriptionShield", () => {
     });
   });
 
-  it("accepts explicit header/inactivity timeouts and 0 disables them", () => {
+  it("accepts explicit header/inactivity timeouts and ignores the legacy hard cutoff", () => {
     expect(normalizeSubscriptionShield({
       headerTimeoutMs: 11_000,
       inactivityTimeoutMs: 17_000,
@@ -48,6 +48,11 @@ describe("normalizeSubscriptionShield", () => {
     })).toMatchObject({
       headerTimeoutMs: 11_000,
       inactivityTimeoutMs: 17_000,
+    });
+    expect(normalizeSubscriptionShield({ connectTimeoutMs: 30_000 })).toMatchObject({
+      // Older installs stored this default. It must not terminate modern work.
+      headerTimeoutMs: 0,
+      connectTimeoutMs: 0,
     });
     expect(normalizeSubscriptionShield({
       connectTimeoutMs: 0,
@@ -162,6 +167,22 @@ describe("wrapFetchWithSubscriptionShield", () => {
     await vi.runAllTicks();
     await vi.advanceTimersByTimeAsync(60);
     await pending;
+  });
+
+  it("does not let a saved legacy connect timeout abort a slow response", async () => {
+    vi.useFakeTimers();
+    const baseFetch = vi.fn(() => new Promise<Response>((resolve) => {
+      setTimeout(() => resolve(new Response("{}", { status: 200 })), 75);
+    })) as unknown as typeof fetch;
+    const fetchImpl = wrapFetchWithSubscriptionShield({
+      // 0.7.0 and earlier saved this default for every provider request.
+      config: { enabled: true, mode: "stealth", minIntervalMs: 0, connectTimeoutMs: 50 },
+      baseFetch,
+    });
+
+    const pending = fetchImpl!("https://api.example.com/v1/chat");
+    await vi.advanceTimersByTimeAsync(80);
+    await expect(pending).resolves.toMatchObject({ status: 200 });
   });
 
   it("times out on silent response bodies after headers", async () => {

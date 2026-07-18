@@ -15,7 +15,7 @@ describe("session store localization migration", () => {
       messages: { used: [{ role: "user", content: "Keep the explicit title" }] },
     });
 
-    expect(migrated.schemaVersion).toBe(7);
+    expect(migrated.schemaVersion).toBe(8);
     // normalizeSessionRecord always materializes archived: false for active chats.
     expect(migrated.sessions).toEqual([
       { id: "empty-ru", title: "", archived: false },

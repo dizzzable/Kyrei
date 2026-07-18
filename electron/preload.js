@@ -11,6 +11,7 @@ const CHANNELS = Object.freeze({
   workspaceChoose: "kyrei:workspace:choose",
   workspaceValidate: "kyrei:workspace:validate",
   openExternal: "kyrei:shell:openExternal",
+  windowTheme: "kyrei:window:theme",
   updateGetStatus: "kyrei:update:getStatus",
   updateCheck: "kyrei:update:check",
   updateDownload: "kyrei:update:download",
@@ -69,6 +70,9 @@ contextBridge.exposeInMainWorld("kyrei", {
   },
   shell: {
     openExternal: (url, options) => ipcRenderer.invoke(CHANNELS.openExternal, url, options),
+  },
+  appearance: {
+    setWindowTheme: (input) => ipcRenderer.invoke(CHANNELS.windowTheme, input),
   },
   update: {
     getStatus: () => ipcRenderer.invoke(CHANNELS.updateGetStatus),

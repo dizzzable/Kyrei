@@ -12,6 +12,7 @@ import {
 
 const publicResolver: HostResolver = async () => [{ address: "93.184.216.34", family: 4 }];
 const privateResolver: HostResolver = async () => [{ address: "127.0.0.1", family: 4 }];
+const fakeIpResolver: HostResolver = async () => [{ address: "198.18.0.127", family: 4 }];
 
 function response(body: string, init: { status?: number; contentType?: string; location?: string } = {}): BrowserResponse {
   const headers = new Map<string, string>();
@@ -45,6 +46,13 @@ describe("agent web reader — SSRF boundary", () => {
     expect(isPrivateAddress("::ffff:7f00:1")).toBe(true);
     expect(isPrivateAddress("::ffff:0a00:1")).toBe(true);
     expect(isPrivateAddress("8.8.8.8")).toBe(false);
+  });
+
+  it("allows a hostname through a benchmark Fake-IP route but not a literal address", async () => {
+    await expect(assertPublicWebUrl("https://docs.example.com/reference", fakeIpResolver))
+      .resolves.toMatchObject({ hostname: "docs.example.com" });
+    await expect(assertPublicWebUrl("https://198.18.0.127/reference", publicResolver))
+      .rejects.toThrow("private network");
   });
 });
 

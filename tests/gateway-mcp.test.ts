@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startGateway } from "../core/gateway.js";
@@ -7,22 +7,28 @@ import { startGateway } from "../core/gateway.js";
 describe("gateway MCP diagnostics", () => {
   let dataDir = "";
   let server: { port: number; token: string; close(): Promise<void> };
-  const inspectServers = vi.fn(async () => [
-    { id: "filesystem", command: "npx", ok: true, toolCount: 3 },
-  ]);
   const close = vi.fn(async () => undefined);
   const normalizeMcpConfig = vi.fn((raw: Record<string, unknown>) => ({
     enabled: raw.enabled === true,
-    servers: [{ id: "filesystem", command: "npx", enabled: true }],
+    servers: Array.isArray(raw.servers) ? raw.servers : [],
     timeoutMs: 30_000,
     maxServers: 8,
     maxToolsPerServer: 64,
     maxResultChars: 24_000,
   }));
+  const createMcpManager = vi.fn((input: { config: { servers: Array<{ id: string; command?: string; source?: "global" | "project" }> } }) => ({
+    inspectServers: async () => input.config.servers.map((server) => ({
+      id: server.id,
+      command: server.command ?? "",
+      ...(server.source ? { source: server.source } : {}),
+      ok: true,
+      toolCount: 3,
+    })),
+    close,
+  }));
 
   beforeEach(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "kyrei-gateway-mcp-"));
-    inspectServers.mockClear();
     close.mockClear();
     server = await startGateway({
       dataDir,
@@ -30,7 +36,7 @@ describe("gateway MCP diagnostics", () => {
       engineLoader: async () => ({
         runKyreiChat: vi.fn(),
         normalizeMcpConfig,
-        createMcpManager: vi.fn(() => ({ inspectServers, close })),
+        createMcpManager,
       }),
     });
   });
@@ -70,12 +76,62 @@ describe("gateway MCP diagnostics", () => {
       state: string;
       servers: Array<{ id: string; toolCount: number; ok: boolean }>;
     }>("/api/memory/mcp");
-    expect(status).toEqual({
+    expect(status).toMatchObject({
       enabled: true,
       state: "ready",
-      servers: [{ id: "filesystem", command: "npx", ok: true, toolCount: 3 }],
+      servers: [{ id: "filesystem", command: "npx", source: "global", ok: true, toolCount: 3 }],
     });
-    expect(inspectServers).toHaveBeenCalledTimes(1);
+    expect(createMcpManager).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads a trusted project MCP file beside global servers without leaking it to another workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kyrei-gateway-mcp-workspace-"));
+    try {
+      await mkdir(join(workspace, ".kyrei"));
+      await writeFile(join(workspace, ".kyrei", "mcp.json"), JSON.stringify({
+        version: 1,
+        enabled: true,
+        servers: [{ id: "project-db", command: "node" }],
+      }), "utf8");
+      const current = await request<{ engine?: Record<string, unknown> }>("/api/config");
+      await request("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          workspace,
+          engine: {
+            ...(current.engine ?? {}),
+            mcp: { enabled: true, servers: [{ id: "global-docs", command: "npx" }] },
+          },
+        }),
+      });
+
+      const beforeTrust = await request<{
+        enabled: boolean;
+        servers: Array<{ id: string }>;
+        project: { exists: boolean; trusted: boolean };
+      }>("/api/memory/mcp");
+      expect(beforeTrust.project.exists).toBe(true);
+      expect(beforeTrust.project.trusted).toBe(false);
+      expect(beforeTrust.servers.map((server) => server.id)).toEqual(["global-docs"]);
+
+      const trusted = await request<{ trusted: boolean }>("/api/mcp/project/trust", {
+        method: "POST",
+        body: JSON.stringify({ trusted: true }),
+      });
+      expect(trusted.trusted).toBe(true);
+
+      const afterTrust = await request<{
+        servers: Array<{ id: string; source?: string }>;
+        project: { trusted: boolean };
+      }>("/api/memory/mcp");
+      expect(afterTrust.project.trusted).toBe(true);
+      expect(afterTrust.servers).toEqual([
+        { id: "global-docs", command: "npx", source: "global", ok: true, toolCount: 3 },
+        { id: "project-db", command: "node", source: "project", ok: true, toolCount: 3 },
+      ]);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 });

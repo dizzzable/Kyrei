@@ -306,6 +306,7 @@ const McpConfigSchema = z.object({
   maxServers: z.number().int().min(1).max(16).default(DEFAULT_ENGINE_CONFIG.mcp.maxServers),
   maxToolsPerServer: z.number().int().min(1).max(200).default(DEFAULT_ENGINE_CONFIG.mcp.maxToolsPerServer),
   maxResultChars: z.number().int().min(1_000).max(200_000).default(DEFAULT_ENGINE_CONFIG.mcp.maxResultChars),
+  projectTrust: z.array(z.string().trim().min(1).max(1_024)).max(128).default(DEFAULT_ENGINE_CONFIG.mcp.projectTrust ?? []),
 });
 
 const MessagingConfigSchema = z.object({

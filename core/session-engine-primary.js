@@ -49,7 +49,9 @@ export function engineSessionToGateway(rec) {
     typeof meta.forkedAt === "string" && Number.isFinite(Date.parse(meta.forkedAt))
       ? meta.forkedAt
       : undefined;
-  const lineageKind = meta.lineageKind === "branch" ? "branch" : undefined;
+  const lineageKind = meta.lineageKind === "branch" || meta.lineageKind === "continuation"
+    ? meta.lineageKind
+    : undefined;
   return {
     id: rec.id,
     title: typeof rec.title === "string" ? rec.title : "",
@@ -67,6 +69,13 @@ export function engineSessionToGateway(rec) {
     ...(forkedFromMessageId ? { forkedFromMessageId } : {}),
     ...(forkedAt ? { forkedAt } : {}),
     ...(lineageKind ? { lineageKind } : {}),
+    ...(typeof meta.continuationSourceSessionId === "string" && meta.continuationSourceSessionId
+      ? { continuationSourceSessionId: meta.continuationSourceSessionId }
+      : {}),
+    ...(Number(meta.continuationPacketVersion) === 1 ? { continuationPacketVersion: 1 } : {}),
+    ...(typeof meta.continuationCreatedAt === "string" && meta.continuationCreatedAt
+      ? { continuationCreatedAt: meta.continuationCreatedAt }
+      : {}),
     source: "engine-mirror",
   };
 }

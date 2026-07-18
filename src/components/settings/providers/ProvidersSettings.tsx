@@ -109,7 +109,7 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
     const original = current.editingId ? config.providers.find((provider) => provider.id === current.editingId) : undefined;
     const unchangedSavedProfile = original && canUseStoredCredentialsForDiscovery(original, current);
     const result = unchangedSavedProfile
-      ? await gateway.discoverSavedProvider(original.id, { allowBenchmarkNetwork: current.allowBenchmarkNetwork })
+      ? await gateway.discoverSavedProvider(original.id)
       : await gateway.discoverProvider(
         draftDiscoveryInput(current),
         providerDraftHasCredentialInput(current) ? providerDraftCredentials(current) : undefined,

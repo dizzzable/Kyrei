@@ -133,6 +133,23 @@ vi.mock("./system-prompt.js", () => ({
   buildSystemPromptParts: buildSystemPromptPartsMock,
 }));
 
+vi.mock("../prompt/cache-packing.js", () => ({
+  packSystemForCache: (parts: { stable?: string; volatile?: string } | undefined) => ({
+    instructions: [parts?.stable, parts?.volatile].filter(Boolean).join("\n\n"),
+    cacheBreakpoints: false,
+  }),
+  mergeProviderOptions: (
+    base: Record<string, Record<string, unknown>> | undefined,
+    extra: Record<string, Record<string, unknown>> | undefined,
+  ) => {
+    if (!base) return extra;
+    if (!extra) return base;
+    const merged = { ...base };
+    for (const [key, value] of Object.entries(extra)) merged[key] = { ...(merged[key] ?? {}), ...value };
+    return merged;
+  },
+}));
+
 vi.mock("./stop-conditions.js", () => ({
   buildStopWhen: () => "stop-when",
 }));
@@ -218,7 +235,7 @@ describe("runKyreiChat project context wiring", () => {
       stream: (async function* () {})(),
       responseMessages: Promise.resolve([]),
     });
-    openStreamMock.mockImplementation(async (_count: number, hasTools: boolean, start: (ci: number, useTools: boolean) => unknown) => start(0, hasTools));
+    openStreamMock.mockImplementation(async (_count: number, hasTools: boolean, start: (ci: number, useTools: boolean) => unknown) => await start(0, hasTools));
     bridgeStreamMock.mockResolvedValue({ text: "ok", parts: [], status: "complete" });
   });
 
@@ -249,6 +266,27 @@ describe("runKyreiChat project context wiring", () => {
     const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(streamOptions.instructions).toBe("system prompt");
     expect(streamOptions).not.toHaveProperty("system");
+  });
+
+  it("puts a clean-session continuation packet ahead of project context without altering chat messages", async () => {
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "continue" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+      continuationContext: "<<layer:SESSION_CONTINUATION_REFERENCE>>\ncheckpoint",
+    });
+
+    expect(buildSystemPromptPartsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectContext: "<<layer:SESSION_CONTINUATION_REFERENCE>>\ncheckpoint\n\nPROJECT_CTX",
+      }),
+    );
+    const streamOptions = streamTextMock.mock.calls[0]?.[0] as { messages?: unknown[] };
+    expect(streamOptions.messages).toEqual([{ role: "user", content: "continue" }]);
   });
 
   it("wires LTM decisions, plan-as-files, and OpenViking when each flag is on", async () => {
@@ -410,10 +448,10 @@ describe("runKyreiChat project context wiring", () => {
     openStreamMock.mockImplementationOnce(async (
       _count: number,
       hasTools: boolean,
-      start: (ci: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+      start: (ci: number, useTools: boolean) => Promise<{ stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> }>,
     ) => {
-      start(0, hasTools);
-      return { ...start(1, hasTools), candidateIndex: 1 };
+      await start(0, hasTools);
+      return { ...(await start(1, hasTools)), candidateIndex: 1 };
     });
     const { runKyreiChat } = await import("./run.js");
     await runKyreiChat({
@@ -427,8 +465,8 @@ describe("runKyreiChat project context wiring", () => {
       modelParams: { contextWindowOverride: 96_000, maxOutputOverride: 12_000 },
     });
 
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ model: "mock-model", window: 96_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ model: "fallback-model", window: 128_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ model: "mock-model", window: 75_808, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ model: "fallback-model", window: 111_616, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
     expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 12_000 });
     expect(streamTextMock.mock.calls[1]?.[0]).toMatchObject({ maxOutputTokens: 8_192 });
   });
@@ -441,10 +479,10 @@ describe("runKyreiChat project context wiring", () => {
     openStreamMock.mockImplementationOnce(async (
       _count: number,
       hasTools: boolean,
-      start: (ci: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+      start: (ci: number, useTools: boolean) => Promise<{ stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> }>,
     ) => {
-      start(0, hasTools);
-      return { ...start(1, hasTools), candidateIndex: 1 };
+      await start(0, hasTools);
+      return { ...(await start(1, hasTools)), candidateIndex: 1 };
     });
     const { runKyreiChat } = await import("./run.js");
     await runKyreiChat({
@@ -467,8 +505,8 @@ describe("runKyreiChat project context wiring", () => {
       }],
     });
 
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ model: "primary-model", window: 90_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
-    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ model: "fallback-model", window: 40_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ model: "primary-model", window: 72_808, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ model: "fallback-model", window: 27_808, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
     expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 9_000 });
     expect(streamTextMock.mock.calls[1]?.[0]).toMatchObject({ maxOutputTokens: 4_000 });
   });
@@ -510,8 +548,59 @@ describe("runKyreiChat project context wiring", () => {
       },
     });
 
-    expect(makePrepareStepMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ model: "mock-model", window: 128_000, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
+    expect(makePrepareStepMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ model: "mock-model", window: 111_616, ccr: expect.anything(), workspace: "/workspace", sessionId: undefined }));
     expect(streamTextMock.mock.calls[0]?.[0]).toMatchObject({ maxOutputTokens: 8_192 });
+  });
+
+  it("compacts the initial restored history before the first provider request", async () => {
+    const compacted = [{ role: "user", content: "compact context" }];
+    makePrepareStepMock.mockReturnValueOnce(async () => ({ messages: compacted }));
+    const { runKyreiChat } = await import("./run.js");
+
+    await runKyreiChat({
+      emit: () => {},
+      messages: [
+        { role: "user", content: "old large context" },
+        { role: "assistant", content: "old response" },
+        { role: "user", content: "continue" },
+      ],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+      workspace: "/workspace",
+    });
+
+    const options = streamTextMock.mock.calls[0]?.[0] as { messages?: unknown };
+    expect(options.messages).toEqual(compacted);
+    expect(makePrepareStepMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ window: 111_616 }),
+    );
+  });
+
+  it("keeps an OpenAI Responses prompt-cache key stable for one session", async () => {
+    buildProviderOptionsMock.mockReturnValueOnce({ openai: { reasoningEffort: "high" } });
+    const { runKyreiChat } = await import("./run.js");
+
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "continue" }],
+      providerBase: "https://api.openai.com/v1",
+      providerProtocol: "openai-responses",
+      apiKey: "key",
+      model: "gpt-5.6-sol",
+      workspace: "/workspace",
+      sessionId: "sess:cache/test",
+      modelParams: { effort: "high" },
+    });
+
+    const options = streamTextMock.mock.calls[0]?.[0] as { providerOptions?: Record<string, Record<string, unknown>> };
+    expect(options.providerOptions).toEqual({
+      openai: {
+        reasoningEffort: "high",
+        promptCacheKey: "kyrei:v2:sess_cache_test:gpt-5.6-sol",
+      },
+    });
   });
 
   it("fails open when project context assembly throws", async () => {
@@ -1046,11 +1135,11 @@ describe("runKyreiChat project context wiring", () => {
     openStreamMock.mockImplementationOnce(async (
       count: number,
       hasTools: boolean,
-      start: (candidate: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+      start: (candidate: number, useTools: boolean) => Promise<{ stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> }>,
     ) => {
       expect(count).toBe(2);
-      start(0, hasTools);
-      return { ...start(1, hasTools), candidateIndex: 1 };
+      await start(0, hasTools);
+      return { ...(await start(1, hasTools)), candidateIndex: 1 };
     });
 
     const { runKyreiChat } = await import("./run.js");
@@ -1121,7 +1210,7 @@ describe("runKyreiChat project context wiring", () => {
     openStreamMock.mockImplementationOnce(async (
       count: number,
       hasTools: boolean,
-      start: (candidate: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+      start: (candidate: number, useTools: boolean) => Promise<{ stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> }>,
       options: {
         attemptLifecycle: {
           acquire(candidate: number): unknown | null;
@@ -1137,7 +1226,7 @@ describe("runKyreiChat project context wiring", () => {
     ) => {
       expect(count).toBe(2);
       const firstHandle = options.attemptLifecycle.acquire(0);
-      start(0, hasTools);
+      await start(0, hasTools);
       options.attemptLifecycle.release(firstHandle, {
         candidateIndex: 0,
         outcome: "retryable-error",
@@ -1146,7 +1235,7 @@ describe("runKyreiChat project context wiring", () => {
         retryAfterMs: 2_000,
       });
       const secondHandle = options.attemptLifecycle.acquire(1);
-      const selected = start(1, hasTools);
+      const selected = await start(1, hasTools);
       options.attemptLifecycle.release(secondHandle, {
         candidateIndex: 1,
         outcome: "success",
@@ -1226,9 +1315,9 @@ describe("runKyreiChat project context wiring", () => {
     openStreamMock.mockImplementationOnce(async (
       _count: number,
       hasTools: boolean,
-      start: (candidate: number, useTools: boolean) => { stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> },
+      start: (candidate: number, useTools: boolean) => Promise<{ stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> }>,
     ) => ({
-      ...start(0, hasTools),
+      ...(await start(0, hasTools)),
       candidateIndex: 0,
       attempts: [{ candidateIndex: 0, outcome: "terminal-error", phase: "probe", statusCode: 401 }],
     }));

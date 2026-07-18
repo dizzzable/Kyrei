@@ -25,7 +25,7 @@ export interface SubscriptionShieldConfig {
   mode: SubscriptionShieldMode;
   /** Minimum gap between request starts for the same pace key (ms). */
   minIntervalMs: number;
-  /** Legacy alias for the header timeout; kept for old saved configs. */
+  /** Legacy persisted field. It is retained for round-tripping only. */
   connectTimeoutMs: number;
   /** Timeout while waiting for response headers (ms); 0 disables. */
   headerTimeoutMs: number;
@@ -89,8 +89,11 @@ export function normalizeSubscriptionShield(raw: unknown): SubscriptionShieldCon
     ? modeRaw as SubscriptionShieldMode
     : DEFAULTS.mode;
   const enabled = source.enabled === false || mode === "off" ? false : source.enabled !== false;
-  const legacyTimeoutMs = clampInt(source.connectTimeoutMs, DEFAULTS.connectTimeoutMs, 0, 120_000);
-  const headerTimeoutMs = clampInt(source.headerTimeoutMs, legacyTimeoutMs, 0, 120_000);
+  // Before 0.7.1 this field defaulted to a hard 30-second request abort.
+  // Never promote that saved legacy default into the new header timer: a slow
+  // provider is not a failed agent. Only the explicit current field may opt
+  // into a hard transport cutoff.
+  const headerTimeoutMs = clampInt(source.headerTimeoutMs, DEFAULTS.headerTimeoutMs, 0, 120_000);
   const inactivityTimeoutMs = clampInt(source.inactivityTimeoutMs, DEFAULTS.inactivityTimeoutMs, 0, 120_000);
   return {
     enabled: enabled && mode !== "off",

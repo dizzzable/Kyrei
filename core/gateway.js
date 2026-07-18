@@ -42,6 +42,13 @@ import {
   SessionCheckpointError,
 } from "./session-checkpoints.js";
 import {
+  buildContinuationPacket,
+  readContinuationPacket,
+  readRollingContextSummary,
+  renderContinuationContext,
+  writeContinuationPacket,
+} from "./session-continuation.js";
+import {
   normalizePromptImages,
   persistPromptImages,
   imageAttachmentDisplayText,
@@ -49,6 +56,12 @@ import {
   attachmentDirFor,
 } from "./image-attachments.js";
 import { permissionRuleFromApproval, mergePermissionRule } from "./permission-promote.js";
+import {
+  PROJECT_MCP_RELATIVE_PATH,
+  mergeMcpScopes,
+  readProjectMcpConfig,
+  writeProjectMcpConfig,
+} from "./mcp-project-config.js";
 import { SkillsStore } from "./skills-store.js";
 import {
   curateSkills,
@@ -2124,15 +2137,6 @@ export async function startGateway({
     const normalized = normalizeStoredModelCapabilities(value);
     return normalized ? digestJson(normalized) : "";
   };
-  const insecureDiscoveryOrigins = (provider) => {
-    if (provider?.allowInsecureHttp !== true) return [];
-    try {
-      const url = new URL(String(provider.baseURL ?? ""));
-      return url.protocol === "http:" ? [url.origin] : [];
-    } catch {
-      return [];
-    }
-  };
   const pruneCapabilityReceipts = () => {
     const now = Date.now();
     for (const [key, receipt] of capabilityReceipts) {
@@ -2633,7 +2637,16 @@ export async function startGateway({
     ...(typeof session.forkedAt === "string" && session.forkedAt
       ? { forkedAt: session.forkedAt }
       : {}),
-    ...(session.lineageKind === "branch" ? { lineageKind: "branch" } : {}),
+    ...(session.lineageKind === "branch" || session.lineageKind === "continuation"
+      ? { lineageKind: session.lineageKind }
+      : {}),
+    ...(typeof session.continuationSourceSessionId === "string" && session.continuationSourceSessionId
+      ? { continuationSourceSessionId: session.continuationSourceSessionId }
+      : {}),
+    ...(Number(session.continuationPacketVersion) === 1 ? { continuationPacketVersion: 1 } : {}),
+    ...(typeof session.continuationCreatedAt === "string" && session.continuationCreatedAt
+      ? { continuationCreatedAt: session.continuationCreatedAt }
+      : {}),
   });
   const mirrorSessionMessages = (sessionId) => store.getMessages(sessionId).map((message) => ({
     id: message.id,
@@ -3284,6 +3297,80 @@ export async function startGateway({
     if (!engine) engine = await engineLoader();
     return engine;
   };
+
+  // A `.kyrei/mcp.json` belongs to a workspace, but a checked-out repository
+  // is untrusted input. Keep the approval in user data, keyed by a canonical
+  // path, so opening a new project can never silently spawn its MCP commands.
+  const mcpWorkspaceKey = (workspace) => {
+    const normalized = String(workspace ?? "").trim().replaceAll("\\", "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  const projectMcpSnapshot = async () => {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace) {
+      return {
+        workspace: "",
+        path: PROJECT_MCP_RELATIVE_PATH,
+        exists: false,
+        valid: true,
+        trusted: false,
+        config: { version: 1, enabled: false, servers: [] },
+      };
+    }
+    try {
+      const snapshot = await readProjectMcpConfig(workspace);
+      const engine = isPlainRecord(config.engine) ? config.engine : {};
+      const mcp = isPlainRecord(engine.mcp) ? engine.mcp : {};
+      const trustedWorkspaces = Array.isArray(mcp.projectTrust) ? mcp.projectTrust : [];
+      return {
+        ...snapshot,
+        trusted: trustedWorkspaces.some((entry) => mcpWorkspaceKey(entry) === mcpWorkspaceKey(snapshot.workspace)),
+      };
+    } catch (error) {
+      return {
+        workspace,
+        path: PROJECT_MCP_RELATIVE_PATH,
+        exists: false,
+        valid: false,
+        trusted: false,
+        config: { version: 1, enabled: false, servers: [] },
+        error: error?.code ?? "project_mcp_unavailable",
+      };
+    }
+  };
+  const effectiveMcpRawConfig = async (engineValue = config.engine) => {
+    const engine = isPlainRecord(engineValue) ? engineValue : {};
+    const mcp = isPlainRecord(engine.mcp) ? engine.mcp : {};
+    const project = await projectMcpSnapshot();
+    return {
+      raw: mergeMcpScopes(mcp, project, { projectTrusted: project.trusted }),
+      project,
+    };
+  };
+  const effectiveEngineConfigForSession = async (sessionId) => {
+    const engine = engineConfigForSession(sessionId);
+    const effectiveMcp = await effectiveMcpRawConfig(engine);
+    return { ...engine, mcp: effectiveMcp.raw };
+  };
+  const setProjectMcpTrust = async (workspace, trusted) => mutateConfig(async () => {
+    const currentEngine = isPlainRecord(config.engine) ? config.engine : {};
+    const currentMcp = isPlainRecord(currentEngine.mcp) ? currentEngine.mcp : {};
+    const key = mcpWorkspaceKey(workspace);
+    const previous = Array.isArray(currentMcp.projectTrust) ? currentMcp.projectTrust : [];
+    const nextTrust = previous
+      .map((entry) => typeof entry === "string" ? entry.trim() : "")
+      .filter(Boolean)
+      .filter((entry) => mcpWorkspaceKey(entry) !== key);
+    if (trusted && key) nextTrust.push(workspace);
+    const nextEngine = validateEngineConfigBoundary({
+      ...currentEngine,
+      mcp: { ...currentMcp, projectTrust: nextTrust.slice(-128) },
+    });
+    const nextConfig = { ...config, engine: nextEngine };
+    await saveConfig(nextConfig, secrets);
+    config = nextConfig;
+    return projectMcpSnapshot();
+  });
   // A crash or app update may stop an active job between sessions. The state
   // file deliberately stays "running" in that case, so a later gateway boot
   // resumes the exact immutable session plan without repeating completed work.
@@ -3396,7 +3483,15 @@ export async function startGateway({
   const inspectMcp = async () => {
     const engine = isPlainRecord(config.engine) ? config.engine : {};
     const raw = isPlainRecord(engine.mcp) ? engine.mcp : {};
-    if (raw.enabled !== true) return { enabled: false, state: "disabled", servers: [] };
+    const effective = await effectiveMcpRawConfig(engine);
+    if (raw.enabled !== true) {
+      return {
+        enabled: false,
+        state: "disabled",
+        servers: [],
+        project: effective.project,
+      };
+    }
     let mod;
     try {
       mod = await getEngine();
@@ -3406,10 +3501,15 @@ export async function startGateway({
     if (typeof mod?.normalizeMcpConfig !== "function" || typeof mod?.createMcpManager !== "function") {
       return { enabled: true, state: "error", servers: [], message: "adapter_unavailable" };
     }
-    const mcpConfig = mod.normalizeMcpConfig(raw);
-    if (!mcpConfig.servers.length) return { enabled: true, state: "no_servers", servers: [], message: "no_servers" };
+    const mcpConfig = mod.normalizeMcpConfig(effective.raw);
+    if (!mcpConfig.servers.length) {
+      return { enabled: true, state: "no_servers", servers: [], message: "no_servers", project: effective.project };
+    }
     const manager = mod.createMcpManager({
       config: mcpConfig,
+      ...(typeof config.workspace === "string" && config.workspace.trim()
+        ? { workspace: config.workspace.trim() }
+        : {}),
       sensitiveValues: runtimeSensitiveValues(),
     });
     try {
@@ -3421,6 +3521,7 @@ export async function startGateway({
           ...server,
           ...(server.error ? { error: redactSensitiveText(server.error, runtimeSensitiveValues()) } : {}),
         })),
+        project: effective.project,
       };
     } finally {
       await manager.close().catch(() => undefined);
@@ -5931,6 +6032,15 @@ export async function startGateway({
     return out;
   }
 
+  async function continuationContextFor(sessionId) {
+    const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+    if (!workspace) return "";
+    const session = store.getSession(sessionId);
+    if (session?.lineageKind !== "continuation") return "";
+    const packet = await readContinuationPacket(workspace, sessionId);
+    return packet ? renderContinuationContext(packet, runtimeSensitiveValues()) : "";
+  }
+
   function createSession({ title = "", source = "chat" } = {}) {
     const id = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date().toISOString();
@@ -6277,7 +6387,10 @@ export async function startGateway({
         preferredAccountId: session.providerAccountId,
         signal: controller.signal,
       });
-      const turnMessages = await convoFor(sessionId);
+      const [turnMessages, continuationContext] = await Promise.all([
+        convoFor(sessionId),
+        continuationContextFor(sessionId),
+      ]);
       // Wave F: always pass a goal for harness (plan gate / goal-verify) from the
       // latest user turn when the client did not set one. No secrets — chat text only.
       let derivedGoal = "";
@@ -6319,6 +6432,7 @@ export async function startGateway({
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
         ...(team ? { team } : {}),
         ...(derivedGoal ? { goal: derivedGoal } : {}),
+        ...(continuationContext ? { continuationContext } : {}),
         workspace: config.workspace,
         globalMemoryDir: join(dataDir, "memory"),
         sessionMirrorDir: join(dataDir, "session-mirror"),
@@ -6344,7 +6458,7 @@ export async function startGateway({
       const result = await mod.runKyreiChat({
         ...common,
         abortSignal: controller.signal,
-        config: engineConfigForSession(sessionId),
+        config: await effectiveEngineConfigForSession(sessionId),
         ...(safeModelParams ? { modelParams: safeModelParams } : {}),
       });
       // Wave E: remember last harness snapshot for Usage settings (no secrets).
@@ -7539,6 +7653,38 @@ export async function startGateway({
         return sendJson(res, 200, await inspectMcp());
       }
 
+      if (path === "/api/mcp/project" && req.method === "GET") {
+        return sendJson(res, 200, await projectMcpSnapshot());
+      }
+
+      if (path === "/api/mcp/project" && req.method === "PUT") {
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) return sendJson(res, 400, { code: "workspace_not_configured", error: "workspace_not_configured" });
+        const body = await readBody(req);
+        try {
+          const saved = await writeProjectMcpConfig(workspace, body?.config ?? body);
+          // Saving through Kyrei is an explicit user action. It is therefore
+          // also the consent point for this exact workspace's project MCP.
+          const project = await setProjectMcpTrust(saved.workspace, true);
+          return sendJson(res, 200, project);
+        } catch (error) {
+          return sendJson(res, 400, {
+            code: error?.code ?? "project_mcp_write_failed",
+            error: error?.code ?? "project_mcp_write_failed",
+          });
+        }
+      }
+
+      if (path === "/api/mcp/project/trust" && req.method === "POST") {
+        const body = await readBody(req);
+        const project = await projectMcpSnapshot();
+        if (!project.workspace) return sendJson(res, 400, { code: "workspace_not_configured", error: "workspace_not_configured" });
+        if (!project.exists || !project.valid) {
+          return sendJson(res, 409, { code: "project_mcp_config_unavailable", error: "project_mcp_config_unavailable" });
+        }
+        return sendJson(res, 200, await setProjectMcpTrust(project.workspace, body?.trusted === true));
+      }
+
       if (path === "/api/memory/local-postgres" && req.method === "GET") {
         return sendJson(res, 200, localPostgres?.getStatus?.() ?? {
           state: "unavailable",
@@ -8216,7 +8362,8 @@ export async function startGateway({
           }
           const engineConfig = isPlainRecord(config.engine) ? config.engine : {};
           const memory = isPlainRecord(engineConfig.memory) ? engineConfig.memory : {};
-          const mcp = isPlainRecord(engineConfig.mcp) ? engineConfig.mcp : {};
+          const effectiveMcp = await effectiveMcpRawConfig(engineConfig);
+          const mcp = effectiveMcp.raw;
           const delegation = isPlainRecord(engineConfig.delegation) ? engineConfig.delegation : {};
           const index = isPlainRecord(memory.index) ? memory.index : {};
           const gbrain = isPlainRecord(memory.gbrain) ? memory.gbrain : {};
@@ -8838,8 +8985,7 @@ export async function startGateway({
           baseURL: profile.baseURL,
           headers: profile.headers,
           credentials,
-          allowBenchmarkNetwork: profile.allowBenchmarkNetwork === true,
-          allowInsecureHttpOrigins: insecureDiscoveryOrigins(profile),
+          trustedEndpoint: true,
         });
         rememberDiscoveredCapabilities({ protocol: profile.protocol, baseURL: profile.baseURL, models });
         return sendJson(res, 200, { models, count: models.length });
@@ -9013,7 +9159,7 @@ export async function startGateway({
             baseURL: existing.baseURL,
             headers: existing.headers,
             credentials,
-            allowInsecureHttpOrigins: insecureDiscoveryOrigins(existing),
+            trustedEndpoint: true,
           });
           rememberDiscoveredCapabilities({ protocol: existing.protocol, baseURL: existing.baseURL, models });
           return sendJson(res, 200, { models, count: models.length });
@@ -9140,8 +9286,7 @@ export async function startGateway({
             baseURL: existing.baseURL,
             headers: existing.headers,
             credentials,
-            allowBenchmarkNetwork: Boolean(body && typeof body === "object" && !Array.isArray(body) && body.allowBenchmarkNetwork === true),
-            allowInsecureHttpOrigins: insecureDiscoveryOrigins(existing),
+            trustedEndpoint: true,
           });
           rememberDiscoveredCapabilities({ protocol: existing.protocol, baseURL: existing.baseURL, models });
           return sendJson(res, 200, { models, count: models.length });
@@ -9923,6 +10068,81 @@ export async function startGateway({
             code,
             error: error?.message ?? "fork_failed",
           });
+        }
+      }
+
+      // Continue a task in a clean context window. Unlike a fork, this does
+      // not copy historical messages: the next model call receives a bounded,
+      // durable reference packet derived from the parent session.
+      const continuationMatch = path.match(/^\/api\/sessions\/([^/]+)\/continue$/);
+      if (continuationMatch && req.method === "POST") {
+        const parentId = decodeURIComponent(continuationMatch[1]);
+        const parent = store.getSession(parentId);
+        if (!parent) {
+          return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+        }
+        if (controllers.has(parentId) || sessionReservations.has(parentId)) {
+          return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+        }
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) {
+          return sendJson(res, 409, {
+            code: "continuation_workspace_required",
+            error: "continuation_workspace_required",
+          });
+        }
+        assertGatewayAcceptingMutations();
+        let result;
+        try {
+          result = store.createContinuation(parentId);
+          if (!result?.session) {
+            return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+          }
+          const [contextSummary] = await Promise.all([
+            readRollingContextSummary(workspace, parentId),
+          ]);
+          const packet = buildContinuationPacket({
+            continuationSessionId: result.session.id,
+            sourceSessionId: parentId,
+            messages: store.getMessages(parentId),
+            contextSummary,
+            sensitiveValues: runtimeSensitiveValues(),
+          });
+          await writeContinuationPacket(workspace, packet);
+          await store.flush();
+          const commit = await commitSessionToEngine(result.session.id);
+          if (!commit.ok && sessionMirrorEnginePrimary()) {
+            try {
+              await removeGatewaySessionFromMirror(result.session.id);
+            } catch {
+              /* best-effort */
+            }
+            store.removeSession(result.session.id);
+            await store.flush().catch(() => {});
+            return sendJson(res, 503, {
+              code: "engine_mirror_write_failed",
+              error: commit.error ?? "engine_mirror_write_failed",
+            });
+          }
+          return sendJson(res, 200, {
+            id: result.session.id,
+            session: result.session,
+            messageCount: 0,
+            packet: {
+              sourceSessionId: packet.sourceSessionId,
+              createdAt: packet.createdAt,
+              verifiedMutationCount: packet.verifiedMutations.length,
+              hasRollingSummary: Boolean(packet.rollingSummary),
+            },
+            ...(sessionMirrorEnginePrimary() ? { engineCommitted: true } : {}),
+          });
+        } catch (error) {
+          if (result?.session?.id) {
+            store.removeSession(result.session.id);
+            await store.flush().catch(() => {});
+          }
+          const code = error?.code ?? "continuation_checkpoint_failed";
+          return sendJson(res, 500, { code, error: error?.message ?? code });
         }
       }
 

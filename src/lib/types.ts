@@ -100,12 +100,16 @@ export interface SessionInfo {
    */
   archived?: boolean;
   archivedAt?: string;
-  /** User fork lineage (branch). Independent of subagent parent ids. */
+  /** User-created lineage, independent of subagent parent ids. */
   parentSessionId?: string;
   rootSessionId?: string;
   forkedFromMessageId?: string;
   forkedAt?: string;
-  lineageKind?: "branch";
+  lineageKind?: "branch" | "continuation";
+  /** Compact context handoff used by a clean continuation session. */
+  continuationSourceSessionId?: string;
+  continuationPacketVersion?: 1;
+  continuationCreatedAt?: string;
   /** Runtime turn status from the gateway (absent = idle). */
   status?: "idle" | "working";
   source?: "chat" | "cron" | "import";
@@ -716,10 +720,6 @@ export interface ProviderDiscoveryInput {
   protocol: ProviderProtocol;
   baseURL: string;
   requiresApiKey: boolean;
-  /** Persisted only for the exact public HTTP origin configured by the user. */
-  allowInsecureHttp?: boolean;
-  /** Temporary opt-in for a trusted HTTPS hostname mapped to 198.18.0.0/15. */
-  allowBenchmarkNetwork?: boolean;
   models?: ProviderModel[];
 }
 
@@ -1273,11 +1273,31 @@ export interface McpRuntimeStatus {
     id: string;
     command: string;
     transport?: "stdio" | "streamable-http" | "unsupported";
+    source?: "global" | "project";
     ok: boolean;
     toolCount: number;
     error?: string;
   }>;
   message?: string;
+  project?: ProjectMcpConfigStatus;
+}
+
+/** Portable project MCP document stored at `.kyrei/mcp.json`. */
+export interface ProjectMcpConfig {
+  version: 1;
+  enabled: boolean;
+  servers: Array<Record<string, unknown>>;
+}
+
+/** User-safe view of the current workspace MCP document and its trust state. */
+export interface ProjectMcpConfigStatus {
+  workspace: string;
+  path: string;
+  exists: boolean;
+  valid: boolean;
+  trusted: boolean;
+  config: ProjectMcpConfig;
+  error?: string;
 }
 
 /** Loopback-only embedded Postgres used as the Team memory bus. */

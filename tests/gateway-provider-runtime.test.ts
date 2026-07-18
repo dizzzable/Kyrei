@@ -32,7 +32,6 @@ beforeEach(async () => {
         baseURL: "http://93.184.216.34:8080/v1",
         models: [{ id: "manual-model", name: "Manual model" }],
         enabled: true,
-        allowInsecureHttp: true,
         requiresApiKey: false,
       },
       activate: false,
@@ -56,7 +55,7 @@ describe("custom provider runtime boundary", () => {
     expect(providerDiscovery).toHaveBeenCalledWith(expect.objectContaining({
       providerId: "self-hosted-ip",
       baseURL: "http://93.184.216.34:8080/v1",
-      allowInsecureHttpOrigins: ["http://93.184.216.34:8080"],
+      trustedEndpoint: true,
     }));
   });
 

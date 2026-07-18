@@ -108,9 +108,26 @@ export function extractHeuristicHandoff(
     }
   }
   
-  // Extract keyFiles from recent tool calls (write_file/edit_file/run_command with files)
+  // Extract *completed* local writes from tool receipts. Tool-call intent alone
+  // is not proof: it may be denied, awaiting approval, or interrupted.
   const keyFiles: Array<{ path: string; why: string }> = [];
   const seenFiles = new Set<string>();
+  const completedToolCalls = new Set<string>();
+  const toolFailures: string[] = [];
+  for (const message of messages) {
+    if (message?.role !== "tool" || !Array.isArray(message.content)) continue;
+    for (const part of message.content as Array<Record<string, unknown>>) {
+      const callId = typeof part.toolCallId === "string" ? part.toolCallId : "";
+      if (!callId) continue;
+      if (part.type === "tool-result" && !part.error) completedToolCalls.add(callId);
+      if (part.type === "tool-error") {
+        const text = typeof part.errorText === "string"
+          ? part.errorText
+          : typeof part.error === "string" ? part.error : "tool_error";
+        toolFailures.push(text.slice(0, 400));
+      }
+    }
+  }
   
   for (let i = messages.length - 1; i >= Math.max(0, messages.length - 10); i--) {
     const m = messages[i];
@@ -118,12 +135,23 @@ export function extractHeuristicHandoff(
     const parts = Array.isArray(m.content) ? m.content : [];
     for (const p of parts) {
       if (typeof p === "object" && p && "type" in p && p.type === "tool-call") {
-        const tc = p as { toolName?: string; args?: Record<string, unknown> };
+        const tc = p as { toolName?: string; toolCallId?: string; args?: Record<string, unknown>; input?: Record<string, unknown> };
+        if (!completedToolCalls.has(String(tc.toolCallId ?? ""))) continue;
         if (tc.toolName === "write_file" || tc.toolName === "edit_file") {
-          const filePath = typeof tc.args?.file === "string" ? tc.args.file : null;
-          if (filePath && !seenFiles.has(filePath)) {
-            seenFiles.add(filePath);
-            keyFiles.push({ path: filePath, why: tc.toolName === "write_file" ? "created" : "modified" });
+          const args = tc.input && typeof tc.input === "object" ? tc.input : tc.args;
+          const candidates = [
+            args?.path,
+            args?.file,
+            ...(Array.isArray(args?.patch)
+              ? args.patch.flatMap((patch) => patch && typeof patch === "object"
+                ? [patch.file, patch.dest]
+                : [])
+              : []),
+          ];
+          for (const candidate of candidates) {
+            if (typeof candidate !== "string" || !candidate || seenFiles.has(candidate)) continue;
+            seenFiles.add(candidate);
+            keyFiles.push({ path: candidate, why: tc.toolName === "write_file" ? "created" : "modified" });
             if (keyFiles.length >= 10) break;
           }
         }
@@ -139,10 +167,10 @@ export function extractHeuristicHandoff(
     trigger,
     intent,
     constraints: [],
-    done: [],
+    done: keyFiles.map((file) => `${file.why === "created" ? "Created" : "Modified"}: ${file.path} (completed Kyrei tool receipt)`),
     nextActions: [],
     keyFiles,
     decisions: [],
-    openQuestions: [],
+    openQuestions: toolFailures.slice(-5).map((failure) => `Recent tool failure: ${failure}`),
   };
 }

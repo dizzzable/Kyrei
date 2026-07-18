@@ -22,6 +22,8 @@ export interface McpServerConfig {
   configuredTransport?: string;
   reason?: string;
   enabled?: boolean;
+  /** Configuration layer selected this server from. Never accepted as authority from a tool. */
+  source?: "global" | "project";
 }
 
 export interface McpConfig {
@@ -33,6 +35,8 @@ export interface McpConfig {
   maxToolsPerServer: number;
   /** Max tool result characters returned to the model. */
   maxResultChars: number;
+  /** Canonical workspaces whose repository MCP file the user explicitly approved. */
+  projectTrust?: string[];
 }
 
 export interface McpToolInfo {
@@ -58,4 +62,5 @@ export const DEFAULT_MCP_CONFIG: McpConfig = {
   maxServers: 8,
   maxToolsPerServer: 64,
   maxResultChars: 24_000,
+  projectTrust: [],
 };

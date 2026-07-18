@@ -1,11 +1,25 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { packageElectron } from "../scripts/package-electron.mjs";
+import { packageElectron, withLocalElectronDist } from "../scripts/package-electron.mjs";
 
 type CommandCall = [string, string[], { cwd: string }];
 
 describe("Electron packaging", () => {
+  it("uses a local Electron binary only for native package commands", () => {
+    const electronDist = "C:\\kyrei\\node_modules\\electron\\dist";
+
+    expect(withLocalElectronDist(["--win"], electronDist)).toEqual([
+      "--win",
+      `--config.electronDist=${electronDist}`,
+    ]);
+    expect(withLocalElectronDist(["--win", "--x64"], electronDist)).toEqual(["--win", "--x64"]);
+    expect(withLocalElectronDist(["--win", "--config.electronDist=custom"], electronDist)).toEqual([
+      "--win",
+      "--config.electronDist=custom",
+    ]);
+  });
+
   it("force-rebuilds native modules for Electron and restores the Node ABI afterwards", async () => {
     const calls: CommandCall[] = [];
     const run = vi.fn(async (...args: CommandCall) => {

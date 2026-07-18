@@ -34,6 +34,7 @@ import {
   dropdownMenuRow,
 } from "@/components/ui";
 import { cn } from "@/lib/utils";
+import { shouldRestoreComposerFocus } from "@/lib/composer-focus";
 import { useI18n } from "@/i18n";
 import type { ProviderProfile, SkillInfo } from "@/lib/types";
 
@@ -113,6 +114,7 @@ export function Composer({
   const micSupported = isSpeechRecognitionSupported();
   const speechSupported = isSpeechSynthesisSupported();
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const restoreComposerFocus = useRef(false);
   const history = useRef<string[]>([]);
   const browse = useRef<number | null>(null);
   const draining = useRef(false);
@@ -245,6 +247,36 @@ export function Composer({
     const cap = expanded ? Math.round(window.innerHeight * 0.55) : 220;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
   }, [value, expanded]);
+
+  // Electron can temporarily hand focus to a native surface during a renderer
+  // update. Keep an already active composer active when the window returns,
+  // without taking focus from Settings or another modal.
+  useEffect(() => {
+    const rememberComposerFocus = () => {
+      restoreComposerFocus.current = document.activeElement === ref.current;
+    };
+    const restoreAfterWindowFocus = () => {
+      window.requestAnimationFrame(() => {
+        const input = ref.current;
+        const shell = document.querySelector<HTMLElement>(".app-shell");
+        if (input && shouldRestoreComposerFocus({
+          hadComposerFocus: restoreComposerFocus.current,
+          disabled: Boolean(disabled),
+          documentHasFocus: document.hasFocus(),
+          shellIsInert: shell?.hasAttribute("inert") ?? false,
+        })) {
+          input.focus({ preventScroll: true });
+        }
+        restoreComposerFocus.current = false;
+      });
+    };
+    window.addEventListener("blur", rememberComposerFocus);
+    window.addEventListener("focus", restoreAfterWindowFocus);
+    return () => {
+      window.removeEventListener("blur", rememberComposerFocus);
+      window.removeEventListener("focus", restoreAfterWindowFocus);
+    };
+  }, [disabled]);
 
   // Auto-drain the queue one prompt at a time whenever the session goes idle.
   useEffect(() => {
@@ -605,7 +637,13 @@ export function Composer({
           </div>
         )}
 
-        <div className="composer-card rounded-[10px] border border-border-soft px-2.5 py-2 transition-all focus-within:border-(--ui-composer-focus)">
+        <div
+          className="composer-card rounded-[10px] border border-border-soft px-2.5 py-2 transition-all focus-within:border-(--ui-composer-focus)"
+          onPointerDownCapture={(event) => {
+            if (disabled || (event.target as Element).closest("button, a, input, select, [role=button]")) return;
+            window.requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+          }}
+        >
           {attachments.length > 0 && (
             <ul className="mb-1.5 flex flex-wrap gap-1.5">
               {attachments.map((item) => (

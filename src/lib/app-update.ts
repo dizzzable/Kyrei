@@ -13,6 +13,17 @@ export function shouldHighlightUpdate(phase?: string): boolean {
   return phase === "available" || phase === "downloaded";
 }
 
+/**
+ * A stable identity for the one-time in-app update notice.
+ *
+ * The phase is intentionally part of the key: a downloaded update deserves a
+ * fresh, actionable notice even if the user has already seen its availability.
+ */
+export function updateAttentionKey(phase?: string, latestVersion?: string): string | undefined {
+  const version = normalizeVersion(latestVersion ?? "");
+  return shouldHighlightUpdate(phase) && version ? `${phase}:${version}` : undefined;
+}
+
 export type UpdateCheckResult =
   | {
     status: "up_to_date";
