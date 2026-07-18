@@ -231,6 +231,7 @@ export const enShell = {
   "shell.error.fallback": "Something went wrong",
   "shell.error.capabilityUnavailable": "The desktop gateway is unavailable. Start Kyrei from the desktop application and try again.",
   "shell.error.providerNotConfigured": "Connect a model provider before sending a message.",
+  "shell.error.healHandoff": "Kyrei paused this run after repeated tool failures. Partial progress and local diagnostics were saved; review the latest tool error and resume when ready.",
   "shell.error.prefix": "Error: {message}",
   "shell.status.missions": "Missions",
   "shell.status.missionsOpen": "Open mission control",

@@ -3,7 +3,12 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, relative } from "node:path";
-import { SessionStore, SessionApprovalError, isSessionMessageId } from "./session-store.js";
+import {
+  SessionStore,
+  SessionApprovalError,
+  isSessionMessageId,
+  sanitizeLegacyHealHandoffMessage,
+} from "./session-store.js";
 import {
   engineMessageToGateway,
   engineSessionToGateway,
@@ -235,11 +240,12 @@ function internalModelMessages(value) {
 
 function publicStoredMessages(messages) {
   return (Array.isArray(messages) ? messages : []).map(message => {
+    const sanitizedMessage = sanitizeLegacyHealHandoffMessage(message);
     const {
       modelMessages: _privateModelMessages,
       approvalModelParams: _privateApprovalModelParams,
       ...publicMessage
-    } = message ?? {};
+    } = sanitizedMessage ?? {};
     return publicMessage;
   });
 }

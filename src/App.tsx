@@ -19,7 +19,17 @@ import { useShellPreferences } from "@/components/shell/shell-preferences";
 import { useI18n } from "@/i18n";
 import type { TranslationKey } from "@/i18n/catalog";
 import type { Translator } from "@/i18n/types";
-import { approvalRequest, approvalResolved, appendReasoning, appendText, toolComplete, toolProgress, toolStart } from "@/lib/chat-messages";
+import {
+  approvalRequest,
+  approvalResolved,
+  appendReasoning,
+  appendText,
+  hasLegacyHealHandoff,
+  redactLegacyHealHandoff,
+  toolComplete,
+  toolProgress,
+  toolStart,
+} from "@/lib/chat-messages";
 import { GatewayRequestError, gateway } from "@/lib/gateway";
 import { actionForCombo } from "@/store/keybinds";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
@@ -561,6 +571,8 @@ export function App() {
           const errorCode = (event.payload as { code?: string }).code;
           const message = errorCode === "provider_not_configured"
             ? translate("shell.error.providerNotConfigured")
+            : errorCode === "heal_handoff"
+              ? translate("shell.error.healHandoff")
             : translate("shell.error.prefix", { message: payload.message || translate("shell.error.fallback") });
           updatePending((parts) => appendText(parts, `\n\n${message}`));
           // The following durable message.complete frame owns the transition
@@ -1396,13 +1408,20 @@ function hydrateStoredMessages(
   translate?: Translator<TranslationKey>,
 ): ChatMessage[] {
   return stored.map((message) => {
-    const persistedParts = message.parts?.length
+    const sourceParts = message.parts?.length
       ? message.parts
       : message.content
         ? [{ type: "text", text: message.content }]
         : [];
+    const hadLegacyHealHandoff = (typeof message.content === "string" && hasLegacyHealHandoff(message.content))
+      || sourceParts.some((part) => part.type === "text" && hasLegacyHealHandoff(part.text));
+    const persistedParts = sourceParts
+      .map((part) => part.type === "text" ? { ...part, text: redactLegacyHealHandoff(part.text) } : part)
+      .filter((part) => part.type !== "text" || part.text.length > 0);
     const errorText = message.errorCode === "provider_not_configured"
       ? translate?.("shell.error.providerNotConfigured")
+      : message.errorCode === "heal_handoff" || hadLegacyHealHandoff
+        ? translate?.("shell.error.healHandoff")
       : message.errorMessage
         ? translate?.("shell.error.prefix", { message: message.errorMessage })
         : message.turnStatus === "error"
@@ -1413,6 +1432,9 @@ function hydrateStoredMessages(
       : errorText
         ? [{ type: "text", text: errorText }]
         : []) as MessagePart[];
+    if (errorText && (message.errorCode === "heal_handoff" || hadLegacyHealHandoff) && persistedParts.length > 0) {
+      parts = appendText(parts, `\n\n${errorText}`);
+    }
     // Surface image attachment labels on user turns when parts are text-only.
     if (
       message.role === "user"

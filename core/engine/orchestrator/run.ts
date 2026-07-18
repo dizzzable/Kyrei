@@ -1043,9 +1043,9 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         }
       }
       opts.emit({
-        type: "message.delta",
+        type: "error",
         payload: {
-          text: `\n\nKYREI_FAILURE_HANDOFF\n[heal-handoff] consecutive tool failures (3-strike) — handoff written: ${healHandoffPath}\nStop thrashing identical retries; human takes the wheel.`,
+          code: "heal_handoff",
         },
       });
     } catch (error) {

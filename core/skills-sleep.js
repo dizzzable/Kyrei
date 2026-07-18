@@ -127,6 +127,7 @@ export function digestMessagesToTrajectory(messages, meta = {}) {
   }
 
   const status = typeof meta.status === "string" ? meta.status : "";
+  if (status === "heal_handoff") healHandoff = true;
   const success = status === "complete" || status === "done"
     ? true
     : status === "heal_handoff" || status === "error" || status === "failed"

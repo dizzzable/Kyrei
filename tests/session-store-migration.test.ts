@@ -132,6 +132,38 @@ describe("session store localization migration", () => {
     ]);
   });
 
+  it("migrates a leaked heal handoff block into structured assistant metadata", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    const leaked = [
+      "Partial finding",
+      "",
+      "KYREI_FAILURE_HANDOFF",
+      "[heal-handoff] consecutive tool failures (3-strike) — handoff written: /home/user/.kyrei/handoff/private.md",
+      "Stop thrashing identical retries; human takes the wheel.",
+    ].join("\n");
+    const migrated = store.migrate({
+      schemaVersion: 7,
+      sessions: [{ id: "session", title: "Recovered" }],
+      messages: {
+        session: [{
+          role: "assistant",
+          content: leaked,
+          parts: [{ type: "text", text: leaked }],
+        }],
+      },
+    });
+
+    expect(migrated.messages.session[0]).toMatchObject({
+      role: "assistant",
+      content: "Partial finding",
+      parts: [{ type: "text", text: "Partial finding" }],
+      errorCode: "heal_handoff",
+      turnStatus: "heal_handoff",
+    });
+    expect(JSON.stringify(migrated.messages.session[0])).not.toContain("private.md");
+    expect(JSON.stringify(migrated.messages.session[0])).not.toContain("KYREI_FAILURE_HANDOFF");
+  });
+
   it("plans and commits a rewind at a user message with ordered snapshot ids", () => {
     const store = new SessionStore({ runtimeDir: "." });
     store.upsertSession({ id: "session", title: "Chat" });

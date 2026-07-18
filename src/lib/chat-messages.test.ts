@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { approvalRequest, approvalResolved, appendReasoning, appendText, messageText, toolComplete, toolStart } from "@/lib/chat-messages";
+import {
+  approvalRequest,
+  approvalResolved,
+  appendReasoning,
+  appendText,
+  hasLegacyHealHandoff,
+  messageText,
+  redactLegacyHealHandoff,
+  toolComplete,
+  toolStart,
+} from "@/lib/chat-messages";
 import type { MessagePart, ToolPart } from "@/lib/types";
 
 const tools = (parts: MessagePart[]): ToolPart[] => parts.filter((p): p is ToolPart => p.type === "tool");
@@ -84,6 +94,26 @@ describe("appendText / appendReasoning coalescing", () => {
     const textParts = parts.filter(p => p.type === "text");
     expect(textParts).toHaveLength(2);
     expect(textParts.map(p => (p as { text: string }).text)).toEqual(["before", "after"]);
+  });
+});
+
+describe("legacy heal handoff redaction", () => {
+  const leaked = [
+    "Partial answer",
+    "",
+    "KYREI_FAILURE_HANDOFF",
+    "[heal-handoff] consecutive tool failures (3-strike) — handoff written: /home/user/.kyrei/handoff/private.md",
+    "Stop thrashing identical retries; human takes the wheel.",
+  ].join("\n");
+
+  it("removes the internal marker and local path from persisted text", () => {
+    expect(hasLegacyHealHandoff(leaked)).toBe(true);
+    expect(redactLegacyHealHandoff(leaked)).toBe("Partial answer");
+  });
+
+  it("leaves normal assistant text untouched", () => {
+    expect(hasLegacyHealHandoff("Normal answer")).toBe(false);
+    expect(redactLegacyHealHandoff("Normal answer")).toBe("Normal answer");
   });
 });
 

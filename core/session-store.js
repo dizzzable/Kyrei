@@ -21,6 +21,7 @@ import {
 
 const SCHEMA_VERSION = 7;
 const MESSAGE_ID_RE = /^msg-[a-zA-Z0-9_-]{8,80}$/;
+const LEGACY_HEAL_HANDOFF_MARKER = "KYREI_FAILURE_HANDOFF";
 
 export class SessionApprovalError extends Error {
   constructor(code) {
@@ -42,8 +43,44 @@ function normalizedMessageId(value, sessionId, index) {
   return `msg-legacy-${safeSession}-${index}`;
 }
 
+function redactLegacyHealHandoffText(text) {
+  const markerIndex = text.indexOf(LEGACY_HEAL_HANDOFF_MARKER);
+  return markerIndex < 0 ? text : text.slice(0, markerIndex).trimEnd();
+}
+
+/** Convert leaked pre-0.6.2 control-plane text into durable structured state. */
+export function sanitizeLegacyHealHandoffMessage(value) {
+  if (!value || typeof value !== "object" || value.role !== "assistant") return value;
+  let found = false;
+  let content = value.content;
+  if (typeof content === "string" && content.includes(LEGACY_HEAL_HANDOFF_MARKER)) {
+    found = true;
+    content = redactLegacyHealHandoffText(content);
+  }
+  const parts = Array.isArray(value.parts)
+    ? value.parts.flatMap(part => {
+        if (!part || typeof part !== "object" || part.type !== "text" || typeof part.text !== "string") {
+          return [part];
+        }
+        if (!part.text.includes(LEGACY_HEAL_HANDOFF_MARKER)) return [part];
+        found = true;
+        const text = redactLegacyHealHandoffText(part.text);
+        return text ? [{ ...part, text }] : [];
+      })
+    : value.parts;
+  if (!found) return value;
+  return {
+    ...value,
+    ...(typeof content === "string" ? { content } : {}),
+    ...(Array.isArray(parts) ? { parts } : {}),
+    errorCode: typeof value.errorCode === "string" && value.errorCode ? value.errorCode : "heal_handoff",
+    turnStatus: typeof value.turnStatus === "string" && value.turnStatus ? value.turnStatus : "heal_handoff",
+  };
+}
+
 function normalizeStoredMessage(value, sessionId, index) {
-  const source = value && typeof value === "object" ? value : {};
+  const rawSource = value && typeof value === "object" ? value : {};
+  const source = sanitizeLegacyHealHandoffMessage(rawSource);
   const at = typeof source.at === "string" && Number.isFinite(Date.parse(source.at))
     ? source.at
     : new Date().toISOString();

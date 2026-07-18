@@ -1,5 +1,21 @@
 import type { ApprovalPart, MessagePart, ToolPart } from "@/lib/types";
 
+const LEGACY_HEAL_HANDOFF_MARKER = "KYREI_FAILURE_HANDOFF";
+
+export function hasLegacyHealHandoff(text: string): boolean {
+  return text.includes(LEGACY_HEAL_HANDOFF_MARKER);
+}
+
+/**
+ * Older engine builds appended an internal handoff marker and an absolute file
+ * path to assistant text. The marker was always the final block, so retain the
+ * useful partial answer and remove the private control-plane tail.
+ */
+export function redactLegacyHealHandoff(text: string): string {
+  const markerIndex = text.indexOf(LEGACY_HEAL_HANDOFF_MARKER);
+  return markerIndex < 0 ? text : text.slice(0, markerIndex).trimEnd();
+}
+
 /**
  * Pure reducers that fold a gateway event's delta into a message's parts.
  * Immutable — always return a new array (adapted from Hermes' chat-messages).

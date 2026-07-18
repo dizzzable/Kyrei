@@ -223,14 +223,34 @@ describe("heal tracker", () => {
 });
 
 describe("toolOutcomesFromSteps / shouldHealHandoff", () => {
-  it("reads tool-error and tool-result from step content", () => {
+  it("counts each model step once and lets progress win within a parallel batch", () => {
     const outcomes = toolOutcomesFromSteps([
-      { content: [{ type: "tool-error" }, { type: "tool-result" }] },
+      { content: [{ type: "tool-error" }, { type: "tool-error" }, { type: "tool-result" }] },
       { content: [{ type: "tool-error" }] },
     ]);
-    expect(outcomes).toEqual([false, true, false]);
+    expect(outcomes).toEqual([true, false]);
     expect(shouldHealHandoff([false, false, false])).toBe(true);
     expect(shouldHealHandoff([false, false, true])).toBe(false);
+  });
+
+  it("does not treat three parallel tool-errors as three retries", () => {
+    const outcomes = toolOutcomesFromSteps([
+      { content: [{ type: "tool-error" }, { type: "tool-error" }, { type: "tool-error" }] },
+    ]);
+
+    expect(outcomes).toEqual([false]);
+    expect(shouldHealHandoff(outcomes)).toBe(false);
+  });
+
+  it("still hands off after three separate failure-only steps", () => {
+    const outcomes = toolOutcomesFromSteps([
+      { content: [{ type: "tool-error" }] },
+      { content: [{ type: "tool-error" }] },
+      { content: [{ type: "tool-error" }] },
+    ]);
+
+    expect(outcomes).toEqual([false, false, false]);
+    expect(shouldHealHandoff(outcomes)).toBe(true);
   });
 });
 

@@ -236,6 +236,41 @@ describe("gateway active-turn durability", () => {
     });
   });
 
+  it("persists a heal handoff as a structured error without leaking its local artifact path", async () => {
+    await start({
+      engineLoader: async () => ({
+        listModels: () => [],
+        runKyreiChat: async (options: Record<string, any>) => {
+          options.emit({ type: "message.delta", payload: { text: "Partial finding" } });
+          options.emit({ type: "error", payload: { code: "heal_handoff" } });
+          options.emit({ type: "message.complete", payload: { text: "Partial finding", status: "heal_handoff" } });
+          return {
+            text: "Partial finding",
+            parts: [{ type: "text", text: "Partial finding" }],
+            status: "heal_handoff",
+            healHandoffPath: "/home/user/.kyrei/handoff/private.md",
+          };
+        },
+      }),
+    });
+    const session = await createSession();
+    await sendPrompt(session.id);
+
+    await vi.waitFor(async () => {
+      const history = await messages(session.id);
+      const assistant = history.at(-1);
+      expect(assistant).toMatchObject({
+        role: "assistant",
+        content: "Partial finding",
+        errorCode: "heal_handoff",
+        pending: false,
+        turnStatus: "heal_handoff",
+      });
+      expect(JSON.stringify(assistant)).not.toContain("KYREI_FAILURE_HANDOFF");
+      expect(JSON.stringify(assistant)).not.toContain("private.md");
+    });
+  });
+
   it("keeps terminal-only output when the provider omits an aggregate result", async () => {
     await start({
       engineLoader: async () => ({

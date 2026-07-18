@@ -153,9 +153,10 @@ export function createHealTracker(maxFailures = 3) {
 }
 
 /**
- * Extract ordered tool success/failure booleans from AI SDK step history.
- * Hard tool-errors count as failure; tool-results count as success.
- * Soft string-returned denials are successes (model can still self-heal).
+ * Extract one ordered tool outcome per AI SDK model step.
+ * A parallel tool batch is one attempt, not one retry per call. Any successful
+ * result in that batch counts as progress and resets the failure streak.
+ * Soft string-returned denials remain successes (the model can still self-heal).
  */
 export function toolOutcomesFromSteps(
   steps: ReadonlyArray<{
@@ -165,16 +166,12 @@ export function toolOutcomesFromSteps(
 ): boolean[] {
   const outcomes: boolean[] = [];
   for (const step of steps) {
-    const content = step.content;
-    if (Array.isArray(content) && content.length) {
-      for (const part of content) {
-        if (part?.type === "tool-error") outcomes.push(false);
-        else if (part?.type === "tool-result") outcomes.push(true);
-      }
-      continue;
-    }
-    // Fallback when only successful results are exposed on the step.
-    for (const _ of step.toolResults ?? []) outcomes.push(true);
+    const content = Array.isArray(step.content) ? step.content : [];
+    const hasResult = content.some((part) => part?.type === "tool-result")
+      || (step.toolResults?.length ?? 0) > 0;
+    const hasError = content.some((part) => part?.type === "tool-error");
+    if (hasResult) outcomes.push(true);
+    else if (hasError) outcomes.push(false);
   }
   return outcomes;
 }

@@ -232,6 +232,7 @@ export const ruShell = {
   "shell.error.fallback": "Произошла ошибка",
   "shell.error.capabilityUnavailable": "Шлюз рабочего приложения недоступен. Запустите Kyrei как desktop-приложение и повторите попытку.",
   "shell.error.providerNotConfigured": "Подключите провайдера модели перед отправкой сообщения.",
+  "shell.error.healHandoff": "Kyrei приостановил выполнение после повторных ошибок инструментов. Частичный прогресс и локальная диагностика сохранены; проверьте последнюю ошибку и продолжите задачу.",
   "shell.error.prefix": "Ошибка: {message}",
   "shell.status.missions": "\u041c\u0438\u0441\u0441\u0438\u0438",
   "shell.status.missionsOpen": "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043c\u0438\u0441\u0441\u0438\u0438",
