@@ -85,7 +85,7 @@ interface ChildDeadline {
 
 function normalizedTimeoutMs(value: number | undefined): number {
   if (!Number.isSafeInteger(value)) return DEFAULT_ENGINE_CONFIG.delegation.timeoutMs;
-  return Math.min(300_000, Math.max(1_000, value as number));
+  return Math.min(3_600_000, Math.max(1_000, value as number));
 }
 
 function normalizedMaxRuntimeMs(value: number | undefined, timeoutMs: number): number {
@@ -121,11 +121,12 @@ function createChildDeadline(
   parent: AbortSignal | undefined,
   configuredTimeoutMs: number | undefined,
   configuredMaxRuntimeMs: number | undefined,
+  taskStartedAtMs = Date.now(),
+  onThreshold?: (error: ChildDeadline["timeoutError"]) => void,
 ): ChildDeadline {
   const timeoutMs = normalizedTimeoutMs(configuredTimeoutMs);
   const timeoutError = delegationTimeoutError(timeoutMs, "idle");
   const maxRuntimeMs = normalizedMaxRuntimeMs(configuredMaxRuntimeMs, timeoutMs);
-  const maxRuntimeError = delegationTimeoutError(maxRuntimeMs, "runtime");
   const controller = new AbortController();
   const onParentAbort = () => controller.abort(parent?.reason);
 
@@ -133,15 +134,24 @@ function createChildDeadline(
   else parent?.addEventListener("abort", onParentAbort, { once: true });
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const elapsedMs = Math.max(0, Date.now() - taskStartedAtMs);
+  const remainingMaxRuntimeMs = Math.max(0, maxRuntimeMs - elapsedMs);
   const armTimeout = () => {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
     if (controller.signal.aborted) return;
-    timeoutId = setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    timeoutId = setTimeout(() => {
+      if (controller.signal.aborted) return;
+      onThreshold?.(timeoutError);
+      armTimeout();
+    }, timeoutMs);
   };
-  armTimeout();
-  const maxRuntimeId = controller.signal.aborted
+  if (remainingMaxRuntimeMs > 0) armTimeout();
+  const maxRuntimeId = controller.signal.aborted || remainingMaxRuntimeMs === 0
     ? undefined
-    : setTimeout(() => controller.abort(maxRuntimeError), maxRuntimeMs);
+    : setTimeout(() => {
+      if (controller.signal.aborted) return;
+      onThreshold?.(delegationTimeoutError(maxRuntimeMs, "runtime"));
+    }, remainingMaxRuntimeMs);
 
   return {
     signal: controller.signal,
@@ -155,28 +165,21 @@ function createChildDeadline(
   };
 }
 
-/**
- * AbortSignal alone cannot enforce a deadline when a compatible provider
- * ignores it. Racing consumes late resolve/reject outcomes while returning as
- * soon as the combined parent/deadline signal fires.
- */
-function waitForGeneration<T>(generation: Promise<T>, deadline: ChildDeadline): Promise<T> {
-  const failure = () => deadline.signal.reason === deadline.timeoutError
-    ? deadline.timeoutError
-    : abortError(deadline.signal);
-  if (deadline.signal.aborted) return Promise.reject(failure());
-
+function waitForGenerationWithParentAbort<T>(
+  generation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) return Promise.reject(abortError(signal));
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
-      deadline.signal.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
       callback();
     };
-    const onAbort = () => finish(() => reject(failure()));
-
-    deadline.signal.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => finish(() => reject(abortError(signal!)));
+    signal?.addEventListener("abort", onAbort, { once: true });
     generation.then(
       (value) => finish(() => resolve(value)),
       (error: unknown) => finish(() => reject(error)),
@@ -300,6 +303,14 @@ function incompleteSummary(toolCount: number, filesRead: ReadonlySet<string>): s
   ].join(" ");
 }
 
+function thresholdProgressText(
+  attemptNumber: number,
+  error: ChildDeadline["timeoutError"],
+): string {
+  const phase = error.reason === "runtime" ? "attempt runtime" : "idle window";
+  return `Research attempt ${attemptNumber} exceeded the ${phase} threshold (${error.timeoutMs}ms); the task stays active while Kyrei waits for the provider.`;
+}
+
 function buildReadOnlyChildSynthesisInstructions(workspace?: string): string {
   return [
     "You are completing a Kyrei read-only research subagent run.",
@@ -320,47 +331,7 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
     let toolCount = 0;
     let cumulativeUsage: Usage = {};
     const toolsEnabled = Object.keys(options.tools).length > 0;
-
-    const deadline = createChildDeadline(
-      request.signal,
-      options.idleTimeoutMs ?? options.timeoutMs,
-      options.maxRuntimeMs,
-    );
-    // A wall-clock timeout must return control to the orchestrator promptly,
-    // but a provider may ignore AbortSignal and continue its HTTP request.
-    // Keep the account-pool lease occupied until that late request settles so
-    // max-concurrency is still truthful for the physical provider account.
-    let generationPending = false;
-    let generationDrain: Promise<void> | undefined;
-    let deferredRelease: { handle: unknown; outcome: ProviderAttemptOutcome } | undefined;
-    const releaseDeferredLease = () => {
-      const pending = deferredRelease;
-      if (!pending) return;
-      deferredRelease = undefined;
-      try { options.providerAttempt!.lifecycle.release(pending.handle, pending.outcome); }
-      catch { /* accounting has no route back after timeout */ }
-    };
-    const markGenerationSettled = () => {
-      generationPending = false;
-      releaseDeferredLease();
-    };
-    const providerAttempt = options.providerAttempt
-      ? {
-          ...options.providerAttempt,
-          lifecycle: {
-            acquire: (target: ProviderAttemptTarget) => (
-              options.providerAttempt!.lifecycle.acquire(target)
-            ),
-            release: (handle: unknown, outcome: ProviderAttemptOutcome) => {
-              if (!generationPending || !generationDrain) {
-                options.providerAttempt!.lifecycle.release(handle, outcome);
-                return;
-              }
-              deferredRelease = { handle, outcome };
-            },
-          },
-        }
-      : undefined;
+    let refreshCurrentAttempt: (() => void) | undefined;
     let completed: {
       result: Pick<Awaited<ReturnType<typeof generateText>>, "steps" | "toolCalls" | "usage">;
       summary: string;
@@ -368,154 +339,173 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
       usedSynthesis: boolean;
       incomplete?: boolean;
     };
-    try {
-      completed = await runWithProviderAttempt(
-        providerAttempt,
-        async () => {
-          const runGeneration = async (input: Parameters<typeof generateText>[0]) => {
-            const generation = generateText(input);
-            generationPending = true;
-            generationDrain = Promise.resolve(generation).then(
-              markGenerationSettled,
-              markGenerationSettled,
-            );
-            return assertProviderGenerationSucceeded(await waitForGeneration(generation, deadline));
+    for (let attemptNumber = 1; ; attemptNumber += 1) {
+      try {
+        const runGeneration = async (input: Parameters<typeof generateText>[0]) => {
+          const deadline = createChildDeadline(
+            request.signal,
+            options.idleTimeoutMs ?? options.timeoutMs,
+            options.maxRuntimeMs,
+            Date.now(),
+            (error) => {
+              request.onProgress({
+                status: "recovering",
+                text: thresholdProgressText(attemptNumber, error),
+                model: options.modelId,
+                usage: usageWithCost(cumulativeUsage, options.cost),
+                toolCount,
+                filesRead: [...filesRead],
+                providerCalls: Math.max(1, Math.min(options.maxSteps, toolCount || 1)),
+              });
+            },
+          );
+          refreshCurrentAttempt = deadline.refresh;
+          let generationPending = false;
+          let deferredRelease: { handle: unknown; outcome: ProviderAttemptOutcome } | undefined;
+          const releaseDeferredLease = () => {
+            const pending = deferredRelease;
+            if (!pending) return;
+            deferredRelease = undefined;
+            try { options.providerAttempt!.lifecycle.release(pending.handle, pending.outcome); }
+            catch { /* accounting has no route back after timeout */ }
           };
-          const result = await runGeneration({
-            model: options.model,
-            instructions: buildReadOnlyChildInstructions(options.workspace, options.skills),
-            prompt: request.goal,
-            ...(toolsEnabled ? { tools: options.tools, stopWhen: isStepCount(options.maxSteps) } : {}),
-            ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
-            abortSignal: deadline.signal,
-            maxRetries: options.maxRetries,
-            onToolExecutionStart: ({ toolCall }) => {
-              if (deadline.signal.aborted) return;
-              deadline.refresh();
-              toolCount += 1;
-              recordFilesRead(toolCall.toolName, toolCall.input, filesRead);
-              request.onProgress({
-                text: `Tool ${toolCall.toolName}`,
-                model: options.modelId,
-                usage: usageWithCost(cumulativeUsage, options.cost),
-                toolCount,
-                filesRead: [...filesRead],
-                providerCalls: 1,
-              });
-            },
-            onStepEnd: (step) => {
-              if (deadline.signal.aborted) return;
-              deadline.refresh();
-              cumulativeUsage = addUsage(cumulativeUsage, step.usage);
-              request.onProgress({
-                text: `Research step ${step.stepNumber + 1} complete`,
-                model: options.modelId,
-                usage: usageWithCost(cumulativeUsage, options.cost),
-                toolCount,
-                filesRead: [...filesRead],
-                providerCalls: Math.min(options.maxSteps, Math.max(1, step.stepNumber + 1)),
-              });
-            },
-          });
-          const summary = textualSummary(result.text, result.steps.map((step) => step.text));
-          if (summary) return { result, summary, usedSynthesis: false };
-
-          const totalToolCount = Math.max(toolCount, result.toolCalls.length);
-          const responseMessages = result.responseMessages;
-          if (!Array.isArray(responseMessages) || responseMessages.length === 0) {
-            return {
-              result,
-              summary: incompleteSummary(totalToolCount, filesRead),
-              usedSynthesis: false,
-              incomplete: true,
-            };
-          }
-          request.onProgress({
-            text: "Preparing final research summary",
-            model: options.modelId,
-            usage: usageWithCost(cumulativeUsage, options.cost),
-            toolCount: totalToolCount,
-            filesRead: [...filesRead],
-            providerCalls: providerCallsFromSteps(result.steps, options.maxSteps),
-          });
-          deadline.refresh();
-          const synthesis = await runGeneration({
-            model: options.model,
-            instructions: buildReadOnlyChildSynthesisInstructions(options.workspace),
-            messages: [
-              { role: "user", content: request.goal },
-              ...responseMessages,
-              {
-                role: "user",
-                content: "The tool budget is exhausted. Now provide the required factual summary without calling tools.",
+          const markGenerationSettled = () => {
+            generationPending = false;
+            releaseDeferredLease();
+          };
+          const providerAttempt = options.providerAttempt
+            ? {
+                ...options.providerAttempt,
+                lifecycle: {
+                  acquire: (target: ProviderAttemptTarget) => (
+                    options.providerAttempt!.lifecycle.acquire(target)
+                  ),
+                  release: (handle: unknown, outcome: ProviderAttemptOutcome) => {
+                    if (!generationPending) {
+                      options.providerAttempt!.lifecycle.release(handle, outcome);
+                      return;
+                    }
+                    deferredRelease = { handle, outcome };
+                  },
+                },
+              }
+            : undefined;
+          try {
+            return await runWithProviderAttempt(
+              providerAttempt,
+              async () => {
+                const generation = generateText({ ...input, abortSignal: deadline.signal });
+                generationPending = true;
+                void Promise.resolve(generation).then(
+                  markGenerationSettled,
+                  markGenerationSettled,
+                );
+                return assertProviderGenerationSucceeded(
+                  await waitForGenerationWithParentAbort(generation, request.signal),
+                );
               },
-            ],
-            ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
-            abortSignal: deadline.signal,
-            maxRetries: 0,
-          });
-          const synthesisSummary = textualSummary(synthesis.text, synthesis.steps.map((step) => step.text));
-          if (!synthesisSummary) {
-            return {
+              request.signal,
+            );
+          } finally {
+            if (refreshCurrentAttempt === deadline.refresh) refreshCurrentAttempt = undefined;
+            deadline.cleanup();
+          }
+        };
+        const result = await runGeneration({
+          model: options.model,
+          instructions: buildReadOnlyChildInstructions(options.workspace, options.skills),
+          prompt: request.goal,
+          ...(toolsEnabled ? { tools: options.tools, stopWhen: isStepCount(options.maxSteps) } : {}),
+          ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
+          maxRetries: options.maxRetries,
+          onToolExecutionStart: ({ toolCall }) => {
+            refreshCurrentAttempt?.();
+            toolCount += 1;
+            recordFilesRead(toolCall.toolName, toolCall.input, filesRead);
+            request.onProgress({
+              status: "running",
+              text: `Tool ${toolCall.toolName}`,
+              model: options.modelId,
+              usage: usageWithCost(cumulativeUsage, options.cost),
+              toolCount,
+              filesRead: [...filesRead],
+              providerCalls: 1,
+            });
+          },
+          onStepEnd: (step) => {
+            refreshCurrentAttempt?.();
+            cumulativeUsage = addUsage(cumulativeUsage, step.usage);
+            request.onProgress({
+              status: "running",
+              text: `Research step ${step.stepNumber + 1} complete`,
+              model: options.modelId,
+              usage: usageWithCost(cumulativeUsage, options.cost),
+              toolCount,
+              filesRead: [...filesRead],
+              providerCalls: Math.min(options.maxSteps, Math.max(1, step.stepNumber + 1)),
+            });
+          },
+        });
+        const summary = textualSummary(result.text, result.steps.map((step) => step.text));
+        if (summary) {
+          completed = { result, summary, usedSynthesis: false };
+          break;
+        }
+
+        const totalToolCount = Math.max(toolCount, result.toolCalls.length);
+        const responseMessages = result.responseMessages;
+        if (!Array.isArray(responseMessages) || responseMessages.length === 0) {
+          completed = {
+            result,
+            summary: incompleteSummary(totalToolCount, filesRead),
+            usedSynthesis: false,
+            incomplete: true,
+          };
+          break;
+        }
+        request.onProgress({
+          status: "running",
+          text: "Preparing final research summary",
+          model: options.modelId,
+          usage: usageWithCost(cumulativeUsage, options.cost),
+          toolCount: totalToolCount,
+          filesRead: [...filesRead],
+          providerCalls: providerCallsFromSteps(result.steps, options.maxSteps),
+        });
+        const synthesis = await runGeneration({
+          model: options.model,
+          instructions: buildReadOnlyChildSynthesisInstructions(options.workspace),
+          messages: [
+            { role: "user", content: request.goal },
+            ...responseMessages,
+            {
+              role: "user",
+              content: "The tool budget is exhausted. Now provide the required factual summary without calling tools.",
+            },
+          ],
+          ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
+          maxRetries: 0,
+        });
+        const synthesisSummary = textualSummary(synthesis.text, synthesis.steps.map((step) => step.text));
+        completed = !synthesisSummary
+          ? {
               result,
               summary: incompleteSummary(totalToolCount, filesRead),
               synthesisUsage: synthesis.usage,
               usedSynthesis: true,
               incomplete: true,
+            }
+          : {
+              result,
+              summary: synthesisSummary,
+              synthesisUsage: synthesis.usage,
+              usedSynthesis: true,
             };
-          }
-          return {
-            result,
-            summary: synthesisSummary,
-            synthesisUsage: synthesis.usage,
-            usedSynthesis: true,
-          };
-        },
-        deadline.signal,
-      );
-    } catch (error) {
-      const errorCode = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-      const timedOut = error === deadline.timeoutError
-        || (error instanceof Error && (errorCode === "delegation_timeout" || errorCode === "delegation_max_runtime"));
-      const hasEvidence = toolCount > 0 || filesRead.size > 0
-        || cumulativeUsage.inputTokens !== undefined
-        || cumulativeUsage.outputTokens !== undefined
-        || cumulativeUsage.totalTokens !== undefined;
-      if (!timedOut || !hasEvidence) throw error;
-      request.onProgress({
-        text: "Research timed out; returning bounded partial evidence",
-        model: options.modelId,
-        usage: usageWithCost(cumulativeUsage, options.cost),
-        toolCount,
-        filesRead: [...filesRead],
-        providerCalls: Math.max(1, Math.min(options.maxSteps, toolCount || 1)),
-        incomplete: true,
-      });
-      completed = {
-        result: {
-          steps: [],
-          toolCalls: [],
-          usage: {
-            inputTokens: 0,
-            inputTokenDetails: {
-              noCacheTokens: undefined,
-              cacheReadTokens: undefined,
-              cacheWriteTokens: undefined,
-            },
-            outputTokens: 0,
-            outputTokenDetails: {
-              textTokens: undefined,
-              reasoningTokens: undefined,
-            },
-            totalTokens: 0,
-          },
-        },
-        summary: incompleteSummary(toolCount, filesRead),
-        usedSynthesis: false,
-        incomplete: true,
-      };
-    } finally {
-      deadline.cleanup();
+        break;
+      } catch (error) {
+        if (request.signal?.aborted) throw abortError(request.signal);
+        throw error;
+      }
     }
     const { result } = completed;
     const totalToolCount = Math.max(toolCount, result.toolCalls.length);

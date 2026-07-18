@@ -450,15 +450,16 @@ describe("read-only child runner", () => {
     });
   });
 
-  it("enforces a wall-clock timeout even when the provider ignores AbortSignal", async () => {
+  it("accepts a late provider result after idle timeout instead of aborting the child", async () => {
     vi.useFakeTimers();
     try {
       let providerSignal: AbortSignal | undefined;
-      let rejectLate: ((error: Error) => void) | undefined;
+      let resolveLate: ((value: unknown) => void) | undefined;
+      const progress: DelegateProgress[] = [];
       generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
         providerSignal = options["abortSignal"] as AbortSignal;
-        return new Promise((_resolve, reject) => {
-          rejectLate = reject;
+        return new Promise((resolve) => {
+          resolveLate = resolve;
         });
       });
       const handle = { lease: "worker-timeout" };
@@ -480,38 +481,80 @@ describe("read-only child runner", () => {
 
       const pending = runner({
         childId: "child-timeout",
-        goal: "Do not hang the parent",
+        goal: "Accept the late result if it still arrives",
         index: 0,
         readOnly: true,
         allowDelegation: false,
-        onProgress: () => undefined,
-      });
-      const rejected = expect(pending).rejects.toMatchObject({
-        name: "TimeoutError",
-        code: "delegation_timeout",
-        timeoutMs: 1_000,
-        message: "Delegated research timed out after 1000ms",
+        onProgress: (update) => progress.push(update),
       });
 
       await vi.advanceTimersByTimeAsync(1_000);
-      await rejected;
-      expect(providerSignal?.aborted).toBe(true);
-      // The provider ignored the cancellation; its physical request is still
-      // in flight, so its account lease must remain occupied.
+      expect(providerSignal?.aborted).toBe(false);
+      expect(generateTextMock).toHaveBeenCalledTimes(1);
       expect(release).not.toHaveBeenCalled();
+      expect(progress.some((update) => typeof update !== "string" && update.status === "recovering")).toBe(true);
 
-      rejectLate?.(new Error("late provider failure"));
+      resolveLate?.({
+        text: "Late evidence still counts",
+        steps: [{ text: "Late evidence still counts" }],
+        toolCalls: [],
+        usage: {},
+      });
       await vi.runAllTicks();
+      await expect(pending).resolves.toMatchObject({
+        summary: "Late evidence still counts",
+      });
       expect(release).toHaveBeenCalledWith(handle, {
         providerId: "worker-provider",
         accountId: "timeout",
         modelId: "slow-worker",
-        outcome: "interrupted",
+        outcome: "success",
         phase: "stream",
       });
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("preserves terminal provider failures without launching a second attempt", async () => {
+    const providerError = Object.assign(new Error("provider overloaded"), { statusCode: 503 });
+    generateTextMock.mockRejectedValueOnce(providerError);
+    const handle = { lease: "worker-server-503" };
+    const acquire = vi.fn(() => handle);
+    const release = vi.fn();
+    const runner = createReadOnlyChildRunner({
+      model: { id: "slow-worker" } as unknown as LanguageModel,
+      modelId: "slow-worker",
+      tools: {},
+      maxSteps: 2,
+      maxRetries: 0,
+      timeoutMs: 1_000,
+      cost: { inputPerM: 0, outputPerM: 0 },
+      providerAttempt: {
+        lifecycle: { acquire, release },
+        target: { providerId: "worker-provider", accountId: "timeout", modelId: "slow-worker" },
+      },
+    });
+
+    await expect(runner({
+      childId: "child-server-503",
+      goal: "Propagate the provider error",
+      index: 0,
+      readOnly: true,
+      allowDelegation: false,
+      onProgress: () => undefined,
+    })).rejects.toBe(providerError);
+    expect(generateTextMock).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(handle, {
+      providerId: "worker-provider",
+      accountId: "timeout",
+      modelId: "slow-worker",
+      outcome: "retryable-error",
+      phase: "stream",
+      statusCode: 503,
+      failureClass: "server",
+    });
   });
 
   it("renews the child idle lease on observed progress so long-running research can finish", async () => {
@@ -573,17 +616,18 @@ describe("read-only child runner", () => {
     }
   });
 
-  it("returns bounded partial evidence instead of failing when a timed-out child already inspected sources", async () => {
+  it("keeps evidence-bearing research alive instead of returning a timeout partial", async () => {
     vi.useFakeTimers();
     try {
       let providerSignal: AbortSignal | undefined;
-      let rejectLate: ((error: Error) => void) | undefined;
+      let resolveLate: ((value: unknown) => void) | undefined;
+      const progress: DelegateProgress[] = [];
       generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
         providerSignal = options["abortSignal"] as AbortSignal;
         const onToolExecutionStart = options["onToolExecutionStart"] as (event: unknown) => void;
         onToolExecutionStart({ toolCall: { toolName: "read_file", input: { path: "src\\partial.ts" } } });
-        return new Promise((_resolve, reject) => {
-          rejectLate = reject;
+        return new Promise((resolve) => {
+          resolveLate = resolve;
         });
       });
       const handle = { lease: "worker-partial-timeout" };
@@ -609,25 +653,29 @@ describe("read-only child runner", () => {
         index: 0,
         readOnly: true,
         allowDelegation: false,
-        onProgress: () => undefined,
+        onProgress: (update) => progress.push(update),
       });
 
       await vi.advanceTimersByTimeAsync(1_000);
-      await expect(pending).resolves.toMatchObject({
-        incomplete: true,
-        filesRead: ["src/partial.ts"],
-        summary: expect.stringContaining("Treat this as non-evidence"),
-      });
-      expect(providerSignal?.aborted).toBe(true);
+      expect(progress.some((update) => typeof update !== "string" && update.status === "recovering")).toBe(true);
+      expect(providerSignal?.aborted).toBe(false);
       expect(release).not.toHaveBeenCalled();
 
-      rejectLate?.(new Error("late provider failure"));
-      await vi.runAllTicks();
+      resolveLate?.({
+        text: "Recovered after reading the file",
+        steps: [{ text: "Recovered after reading the file" }],
+        toolCalls: [{ toolName: "read_file" }],
+        usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 },
+      });
+      await expect(pending).resolves.toMatchObject({
+        filesRead: ["src/partial.ts"],
+        summary: "Recovered after reading the file",
+      });
       expect(release).toHaveBeenCalledWith(handle, {
         providerId: "worker-provider",
         accountId: "partial",
         modelId: "slow-worker",
-        outcome: "interrupted",
+        outcome: "success",
         phase: "stream",
       });
     } finally {
@@ -635,21 +683,32 @@ describe("read-only child runner", () => {
     }
   });
 
-  it("refreshes the child timeout while real tool progress keeps arriving", async () => {
+  it("returns to running progress after a recovering warning when activity resumes", async () => {
     vi.useFakeTimers();
     try {
       let providerSignal: AbortSignal | undefined;
-      let rejectLate: ((error: Error) => void) | undefined;
+      const progress: DelegateProgress[] = [];
       generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
         providerSignal = options["abortSignal"] as AbortSignal;
         const onToolExecutionStart = options["onToolExecutionStart"] as (event: unknown) => void;
-        return new Promise((_resolve, reject) => {
-          rejectLate = reject;
+        const onStepEnd = options["onStepEnd"] as (event: unknown) => void;
+        return new Promise((resolve) => {
           setTimeout(() => {
             onToolExecutionStart({
               toolCall: { toolName: "read_file", input: { path: "src/a.ts" } },
             });
           }, 900);
+          setTimeout(() => {
+            onStepEnd({ stepNumber: 0, usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 } });
+          }, 2_100);
+          setTimeout(() => {
+            resolve({
+              text: "Recovered and finished",
+              steps: [{ text: "Recovered and finished" }],
+              toolCalls: [{ toolName: "read_file" }],
+              usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+            });
+          }, 2_200);
         });
       });
       const runner = createReadOnlyChildRunner({
@@ -668,24 +727,20 @@ describe("read-only child runner", () => {
         index: 0,
         readOnly: true,
         allowDelegation: false,
-        onProgress: () => undefined,
+        onProgress: (update) => progress.push(update),
       });
 
       await vi.advanceTimersByTimeAsync(999);
       expect(providerSignal?.aborted).toBe(false);
-      await vi.advanceTimersByTimeAsync(850);
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(progress.some((update) => typeof update !== "string" && update.status === "recovering")).toBe(true);
       expect(providerSignal?.aborted).toBe(false);
-
-      const resolved = expect(pending).resolves.toMatchObject({
-        incomplete: true,
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(pending).resolves.toMatchObject({
         filesRead: ["src/a.ts"],
-        summary: expect.stringContaining("Treat this as non-evidence"),
+        summary: "Recovered and finished",
       });
-      await vi.advanceTimersByTimeAsync(151);
-      await resolved;
-
-      rejectLate?.(new Error("late provider failure"));
-      await vi.runAllTicks();
+      expect(progress.some((update) => typeof update !== "string" && update.status === "running" && update.text.includes("Research step 1 complete"))).toBe(true);
     } finally {
       vi.useRealTimers();
     }

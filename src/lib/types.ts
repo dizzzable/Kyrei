@@ -405,6 +405,8 @@ export interface TeamProfileLimits {
   maxTasks: number;
   maxStepsPerAgent: number;
   timeoutMs: number;
+  idleTimeoutMs: number;
+  maxRuntimeMs: number;
 }
 
 export interface TeamProfile {
@@ -605,6 +607,8 @@ export interface SubscriptionShieldConfig {
   mode: SubscriptionShieldMode;
   minIntervalMs?: number;
   connectTimeoutMs?: number;
+  headerTimeoutMs?: number;
+  inactivityTimeoutMs?: number;
   maxConnectionsPerOrigin?: number;
 }
 

@@ -40,6 +40,12 @@ function isSubscriptionShieldTimeout(error: unknown): boolean {
     || (source["code"] === "ETIMEDOUT" && source["phase"] === "headers");
 }
 
+function isDelegationTimeout(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const source = error as Record<string, unknown>;
+  return source["code"] === "delegation_timeout" && source["reason"] === "idle";
+}
+
 /** Some providers surface a terminal generation failure as a resolved result. */
 export function assertProviderGenerationSucceeded<T>(result: T): T {
   if (
@@ -66,14 +72,14 @@ function failedOutcome(
     ...target,
     outcome: interruptedOutcome
       ? "interrupted"
-      : isSubscriptionShieldTimeout(error) || isRetryable(error)
+      : isDelegationTimeout(error) || isSubscriptionShieldTimeout(error) || isRetryable(error)
         ? "retryable-error"
         : "terminal-error",
     phase: "stream",
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
     // Interrupted aborts must not train the account pool (user cancel / session stop).
-    ...(!interruptedOutcome ? { failureClass: isSubscriptionShieldTimeout(error) ? "network" : classifyProviderFailure(error) } : {}),
+    ...(!interruptedOutcome ? { failureClass: isDelegationTimeout(error) || isSubscriptionShieldTimeout(error) ? "network" : classifyProviderFailure(error) } : {}),
   };
 }
 

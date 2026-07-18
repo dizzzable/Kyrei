@@ -187,12 +187,18 @@ interface TaskDeadline {
   cleanup: () => void;
 }
 
+function deadlineProgressText(error: TaskDeadline["timeoutError"]): string {
+  const phase = error.reason === "runtime" ? "max runtime" : "idle window";
+  return `Task is still running after the ${phase} threshold (${error.timeoutMs}ms); waiting for the provider instead of failing the role.`;
+}
+
 function createTaskDeadline(
   parent: AbortSignal,
   configuredTimeoutMs: number,
+  onThreshold: (error: TaskDeadline["timeoutError"]) => void,
   configuredMaxRuntimeMs?: number,
 ): TaskDeadline {
-  const timeoutMs = Math.min(300_000, Math.max(1_000, Math.floor(configuredTimeoutMs || 0) || 180_000));
+  const timeoutMs = Math.max(1_000, Math.floor(configuredTimeoutMs || 0) || 180_000);
   const maxRuntimeMs = Math.min(7_200_000, Math.max(timeoutMs, Math.floor(configuredMaxRuntimeMs || 0) || 1_800_000));
   const controller = new AbortController();
   const onParentAbort = () => controller.abort(parent.reason);
@@ -206,12 +212,20 @@ function createTaskDeadline(
   const armIdleTimeout = () => {
     if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
     if (controller.signal.aborted) return;
-    idleTimeoutId = setTimeout(() => controller.abort(timeoutError(timeoutMs, "idle")), timeoutMs);
+    idleTimeoutId = setTimeout(() => {
+      if (controller.signal.aborted) return;
+      const error = timeoutError(timeoutMs, "idle");
+      onThreshold(error);
+      armIdleTimeout();
+    }, timeoutMs);
   };
   armIdleTimeout();
   const maxRuntimeId = controller.signal.aborted
     ? undefined
-    : setTimeout(() => controller.abort(timeoutError(maxRuntimeMs, "runtime")), maxRuntimeMs);
+    : setTimeout(() => {
+      if (controller.signal.aborted) return;
+      onThreshold(timeoutError(maxRuntimeMs, "runtime"));
+    }, maxRuntimeMs);
   return {
     signal: controller.signal,
     timeoutError: timeoutError(timeoutMs, "idle"),
@@ -515,7 +529,19 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
         taskMetrics.set(context.task.id, { providerCalls: 1, unmeteredProviderCalls: 1 });
         const taskDeadline = createTaskDeadline(
           combined.signal,
-          options.team.limits.timeoutMs,
+          options.team.limits.idleTimeoutMs ?? options.team.limits.timeoutMs,
+          (timeout) => {
+            if (combined.signal.aborted) return;
+            emit({
+              type: "subagent.progress",
+              payload: {
+                ...base,
+                model: executor.role.target.model,
+                status: "recovering",
+                text: text(deadlineProgressText(timeout), 1_200, sensitiveValues),
+              },
+            });
+          },
           (options.team.limits as RuntimeTeamSpec["limits"] & { maxRuntimeMs?: number }).maxRuntimeMs,
         );
         emit({ type: "subagent.start", payload: { ...base, status: "running" } });

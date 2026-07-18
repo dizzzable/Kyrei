@@ -111,6 +111,19 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(warnings.some((warning) => warning.includes("maxRuntimeMs < idleTimeoutMs"))).toBe(true);
   });
 
+  it("preserves advisory delegation leases up to one hour", () => {
+    const { config, warnings } = resolveEngineConfig({
+      delegation: { timeoutMs: 3_600_000, idleTimeoutMs: 3_600_000, maxRuntimeMs: 7_200_000 },
+    });
+
+    expect(config.delegation).toMatchObject({
+      timeoutMs: 3_600_000,
+      idleTimeoutMs: 3_600_000,
+      maxRuntimeMs: 7_200_000,
+    });
+    expect(warnings).not.toContain(expect.stringContaining("delegation.idleTimeoutMs"));
+  });
+
   it("migrates the legacy 90-second child cutoff without shrinking the hard runtime", () => {
     const { config, warnings } = resolveEngineConfig({
       delegation: { timeoutMs: 90_000 },
@@ -124,9 +137,9 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(warnings.some((warning) => warning.includes("90-second delegation cutoff"))).toBe(true);
   });
 
-  it("rejects delegation timeouts outside the bounded wall-clock range", () => {
+  it("rejects delegation leases outside the supported observation range", () => {
     const tooShort = resolveEngineConfig({ delegation: { timeoutMs: 999 } });
-    const tooLong = resolveEngineConfig({ delegation: { timeoutMs: 300_001 } });
+    const tooLong = resolveEngineConfig({ delegation: { timeoutMs: 3_600_001 } });
 
     expect(tooShort.config.delegation).toEqual(DEFAULT_ENGINE_CONFIG.delegation);
     expect(tooLong.config.delegation).toEqual(DEFAULT_ENGINE_CONFIG.delegation);

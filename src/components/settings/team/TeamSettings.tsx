@@ -449,6 +449,46 @@ function TeamLimits({
           </label>
         ))}
       </div>
+      <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-[9.5px] text-muted">{t("settings.team.limits.idleTimeout")}</span>
+          <Input
+            type="number"
+            min={1_000}
+            max={3_600_000}
+            step={1_000}
+            value={limits.idleTimeoutMs}
+            disabled={disabled}
+            className="font-mono text-[11px]"
+            onChange={(event) => {
+              const idleTimeoutMs = boundedInteger(event.target.value, 1_000, 3_600_000);
+              const next = {
+                ...limits,
+                timeoutMs: idleTimeoutMs,
+                idleTimeoutMs,
+                maxRuntimeMs: Math.max(idleTimeoutMs, limits.maxRuntimeMs),
+              };
+              onChange(next);
+            }}
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="text-[9.5px] text-muted">{t("settings.team.limits.maxRuntime")}</span>
+          <Input
+            type="number"
+            min={1_000}
+            max={7_200_000}
+            step={1_000}
+            value={limits.maxRuntimeMs}
+            disabled={disabled}
+            className="font-mono text-[11px]"
+            onChange={(event) => {
+              const maxRuntimeMs = boundedInteger(event.target.value, 1_000, 7_200_000);
+              onChange({ ...limits, maxRuntimeMs: Math.max(limits.idleTimeoutMs, maxRuntimeMs) });
+            }}
+          />
+        </label>
+      </div>
     </fieldset>
   );
 }

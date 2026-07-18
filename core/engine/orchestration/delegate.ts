@@ -25,7 +25,10 @@ export interface DelegateTaskResult extends DelegateTaskMetadata {
   summary: string;
 }
 
-export type DelegateProgress = string | ({ text: string } & DelegateTaskMetadata);
+export type DelegateProgress = string | ({
+  text: string;
+  status?: "running" | "recovering";
+} & DelegateTaskMetadata);
 
 /**
  * Input passed to the injected child runner. `runTask` is the security
@@ -373,7 +376,7 @@ export function buildDelegateTool(options: DelegateToolOptions): ToolSet {
                 payload: {
                   ...base,
                   ...eventMetadata(metadata),
-                  status: "running",
+                  status: update.status === "recovering" ? "recovering" : "running",
                   text,
                 },
               });

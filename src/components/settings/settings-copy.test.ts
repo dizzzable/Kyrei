@@ -8,7 +8,7 @@ afterEach(() => {
 
 async function renderSettings(
   lang: "en" | "ru",
-  initialSection: "model" | "providers" | "workspace" | "skills" | "chat" | "memory" | "appearance" | "notifications" | "keybinds" | "advanced" | "about" = "model",
+  initialSection: "model" | "providers" | "workspace" | "skills" | "chat" | "memory" | "appearance" | "notifications" | "keybinds" | "capacity" | "advanced" | "about" = "model",
   engine: Record<string, unknown> = {},
 ): Promise<string> {
   vi.resetModules();
@@ -215,5 +215,33 @@ describe("settings localized rendering", () => {
       const html = (await renderSettings("en", section)).replaceAll("Русский", "");
       expect(html, section).not.toMatch(/[А-Яа-яЁё]/);
     }
+  });
+
+  it("explains that subagent leases observe slow attempts without killing the task", async () => {
+    const english = await renderSettings("en", "chat", {
+      delegation: { enabled: true, idleTimeoutMs: 3_600_000, maxRuntimeMs: 7_200_000 },
+    });
+    const russian = await renderSettings("ru", "chat", {
+      delegation: { enabled: true, idleTimeoutMs: 3_600_000, maxRuntimeMs: 7_200_000 },
+    });
+
+    expect(english).toContain("Slow-provider observation interval");
+    expect(english).toContain("does not stop the task");
+    expect(english).toContain("Attempt runtime observation");
+    expect(russian).toContain("Интервал контроля медленного провайдера");
+    expect(russian).toContain("не завершает задачу");
+    expect(russian).toContain("Контроль времени попытки");
+  });
+
+  it("shows separate provider header and body inactivity controls with an unlimited value", async () => {
+    const english = await renderSettings("en", "capacity");
+    const russian = await renderSettings("ru", "capacity");
+
+    expect(english).toContain("Header timeout (ms)");
+    expect(english).toContain("Body inactivity timeout (ms)");
+    expect(english).toContain("0 disables the timer");
+    expect(russian).toContain("Таймаут заголовков (мс)");
+    expect(russian).toContain("Таймаут тишины тела ответа (мс)");
+    expect(russian).toContain("0 отключает таймер");
   });
 });

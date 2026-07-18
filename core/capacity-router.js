@@ -46,16 +46,27 @@ export function normalizeSubscriptionShieldConfig(raw) {
   const enabled = source.enabled === false || mode === "off" ? false : true;
   const minIntervalMs = Number(source.minIntervalMs);
   const connectTimeoutMs = Number(source.connectTimeoutMs);
+  const headerTimeoutMs = Number(source.headerTimeoutMs);
+  const inactivityTimeoutMs = Number(source.inactivityTimeoutMs);
   const maxConnectionsPerOrigin = Number(source.maxConnectionsPerOrigin);
+  const normalizedLegacyTimeout = Number.isFinite(connectTimeoutMs)
+    ? Math.max(0, Math.min(120_000, Math.floor(connectTimeoutMs)))
+    : 0;
+  const normalizedHeaderTimeout = Number.isFinite(headerTimeoutMs)
+    ? Math.max(0, Math.min(120_000, Math.floor(headerTimeoutMs)))
+    : normalizedLegacyTimeout;
+  const normalizedInactivityTimeout = Number.isFinite(inactivityTimeoutMs)
+    ? Math.max(0, Math.min(120_000, Math.floor(inactivityTimeoutMs)))
+    : 0;
   return {
     enabled: enabled && mode !== "off",
     mode: enabled ? mode : "off",
     minIntervalMs: Number.isFinite(minIntervalMs)
       ? Math.max(0, Math.min(10_000, Math.floor(minIntervalMs)))
       : 75,
-    connectTimeoutMs: Number.isFinite(connectTimeoutMs)
-      ? Math.max(5_000, Math.min(120_000, Math.floor(connectTimeoutMs)))
-      : 30_000,
+    connectTimeoutMs: normalizedHeaderTimeout,
+    headerTimeoutMs: normalizedHeaderTimeout,
+    inactivityTimeoutMs: normalizedInactivityTimeout,
     maxConnectionsPerOrigin: Number.isFinite(maxConnectionsPerOrigin)
       ? Math.max(1, Math.min(32, Math.floor(maxConnectionsPerOrigin)))
       : 4,

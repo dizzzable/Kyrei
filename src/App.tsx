@@ -500,11 +500,20 @@ export function App() {
           const now = Date.now();
           setAgentRuns((current) => {
             const previous = current.find((run) => run.id === id);
+            const incomplete = typeof payload === "object" && payload !== null && "incomplete" in payload
+              ? (payload as { incomplete?: boolean }).incomplete === true
+              : false;
             const status: SubagentRun["status"] = event.type === "subagent.complete"
-              ? "completed"
+              ? payload.status === "partial" || incomplete ? "partial" : "completed"
               : event.type === "subagent.failed"
-                ? payload.status === "interrupted" ? "interrupted" : "failed"
-                : "running";
+                ? payload.status === "interrupted"
+                  ? "interrupted"
+                  : payload.status === "recovering"
+                    ? "recovering"
+                    : "failed"
+                : payload.status === "recovering"
+                  ? "recovering"
+                  : "running";
             const next: SubagentRun = {
               id,
               parentId: payload.parent_id ?? previous?.parentId,

@@ -67,9 +67,34 @@ describe("capacity-router", () => {
         enabled: true,
         mode: "stealth",
         minIntervalMs: 75,
-        connectTimeoutMs: 30_000,
+        connectTimeoutMs: 0,
+        headerTimeoutMs: 0,
+        inactivityTimeoutMs: 0,
         maxConnectionsPerOrigin: 4,
       },
+    });
+  });
+
+  it("keeps explicit transport timeout fields and lets 0 disable them", () => {
+    expect(normalizeCapacityConfig({
+      subscriptionShield: {
+        connectTimeoutMs: 0,
+        inactivityTimeoutMs: 0,
+      },
+    }).subscriptionShield).toMatchObject({
+      headerTimeoutMs: 0,
+      inactivityTimeoutMs: 0,
+    });
+
+    expect(normalizeCapacityConfig({
+      subscriptionShield: {
+        connectTimeoutMs: 15_000,
+        headerTimeoutMs: 12_000,
+        inactivityTimeoutMs: 18_000,
+      },
+    }).subscriptionShield).toMatchObject({
+      headerTimeoutMs: 12_000,
+      inactivityTimeoutMs: 18_000,
     });
   });
 });

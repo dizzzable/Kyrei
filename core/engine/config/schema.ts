@@ -346,8 +346,8 @@ const DelegationConfigSchema = z.object({
   maxTasks: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxTasks),
   maxParallel: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxParallel),
   maxSteps: z.number().int().min(1).max(24).default(DEFAULT_ENGINE_CONFIG.delegation.maxSteps),
-  timeoutMs: z.number().int().min(1_000).max(300_000).default(DEFAULT_ENGINE_CONFIG.delegation.timeoutMs),
-  idleTimeoutMs: z.number().int().min(1_000).max(300_000).default(DEFAULT_ENGINE_CONFIG.delegation.idleTimeoutMs),
+  timeoutMs: z.number().int().min(1_000).max(3_600_000).default(DEFAULT_ENGINE_CONFIG.delegation.timeoutMs),
+  idleTimeoutMs: z.number().int().min(1_000).max(3_600_000).default(DEFAULT_ENGINE_CONFIG.delegation.idleTimeoutMs),
   maxRuntimeMs: z.number().int().min(1_000).max(7_200_000).default(DEFAULT_ENGINE_CONFIG.delegation.maxRuntimeMs),
 });
 
@@ -653,7 +653,7 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
       warnings.push("migrated Hermes 'delegation.max_iterations' → delegation.maxSteps");
     }
     if (typeof delegation["child_timeout_seconds"] === "number" && delegation["timeoutMs"] == null) {
-      delegation["timeoutMs"] = Math.min(300_000, Math.max(1_000, Math.floor(delegation["child_timeout_seconds"] * 1_000)));
+      delegation["timeoutMs"] = Math.min(3_600_000, Math.max(1_000, Math.floor(delegation["child_timeout_seconds"] * 1_000)));
       delete delegation["child_timeout_seconds"];
       migrated = true;
       warnings.push("migrated Hermes 'delegation.child_timeout_seconds' → delegation.timeoutMs");

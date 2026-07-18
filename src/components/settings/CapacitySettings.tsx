@@ -56,6 +56,18 @@ function capacityFromConfig(config: AppConfig | null | undefined): CapacityConfi
       enabled: shieldRaw?.enabled !== false && shieldMode !== "off",
       mode: shieldMode,
       minIntervalMs: typeof shieldRaw?.minIntervalMs === "number" ? shieldRaw.minIntervalMs : 75,
+      connectTimeoutMs:
+        typeof shieldRaw?.connectTimeoutMs === "number"
+          ? shieldRaw.connectTimeoutMs
+          : (typeof shieldRaw?.headerTimeoutMs === "number" ? shieldRaw.headerTimeoutMs : 0),
+      headerTimeoutMs:
+        typeof shieldRaw?.headerTimeoutMs === "number"
+          ? shieldRaw.headerTimeoutMs
+          : (typeof shieldRaw?.connectTimeoutMs === "number" ? shieldRaw.connectTimeoutMs : 0),
+      inactivityTimeoutMs:
+        typeof shieldRaw?.inactivityTimeoutMs === "number"
+          ? shieldRaw.inactivityTimeoutMs
+          : 0,
       maxConnectionsPerOrigin:
         typeof shieldRaw?.maxConnectionsPerOrigin === "number"
           ? shieldRaw.maxConnectionsPerOrigin
@@ -305,6 +317,9 @@ export function CapacitySettings({ config, onSaved }: CapacitySettingsProps) {
                       : current.subscriptionShield?.mode ?? "stealth")
                     : "off",
                   minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
+                  connectTimeoutMs: current.subscriptionShield?.connectTimeoutMs ?? current.subscriptionShield?.headerTimeoutMs ?? 0,
+                  headerTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? current.subscriptionShield?.connectTimeoutMs ?? 0,
+                  inactivityTimeoutMs: current.subscriptionShield?.inactivityTimeoutMs ?? 0,
                   maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
                 },
               }))}
@@ -327,6 +342,9 @@ export function CapacitySettings({ config, onSaved }: CapacitySettingsProps) {
                     mode,
                     enabled: mode !== "off",
                     minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
+                    connectTimeoutMs: current.subscriptionShield?.connectTimeoutMs ?? current.subscriptionShield?.headerTimeoutMs ?? 0,
+                    headerTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? current.subscriptionShield?.connectTimeoutMs ?? 0,
+                    inactivityTimeoutMs: current.subscriptionShield?.inactivityTimeoutMs ?? 0,
                     maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
                   },
                 }));
@@ -342,6 +360,68 @@ export function CapacitySettings({ config, onSaved }: CapacitySettingsProps) {
               {t(`settings.capacity.shield.modeHint.${draft.subscriptionShield?.mode === "standard" ? "standard" : "stealth"}`)}
             </span>
           </label>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+            <label className="block space-y-1">
+              <span className="text-[10px] text-muted">{t("settings.capacity.shield.headerTimeout")}</span>
+              <input
+                type="number"
+                min={0}
+                max={120_000}
+                step={1_000}
+                value={draft.subscriptionShield?.headerTimeoutMs ?? draft.subscriptionShield?.connectTimeoutMs ?? 0}
+                disabled={busy || !draft.subscriptionShield?.enabled || draft.subscriptionShield?.mode === "off"}
+                className="h-8 w-full rounded-md border border-border bg-surface px-2 font-mono text-[11px] text-foreground"
+                onChange={(event) => {
+                  const numeric = Number(event.target.value);
+                  const nextValue = Number.isFinite(numeric) ? Math.max(0, Math.min(120_000, Math.floor(numeric))) : 0;
+                  setDraft((current) => ({
+                    ...current,
+                    subscriptionShield: {
+                      ...current.subscriptionShield,
+                      enabled: current.subscriptionShield?.enabled ?? true,
+                      mode: current.subscriptionShield?.mode ?? "stealth",
+                      minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
+                      connectTimeoutMs: nextValue,
+                      headerTimeoutMs: nextValue,
+                      inactivityTimeoutMs: current.subscriptionShield?.inactivityTimeoutMs ?? 0,
+                      maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
+                    },
+                  }));
+                }}
+              />
+              <span className="block text-[10px] leading-4 text-muted">{t("settings.capacity.shield.headerTimeoutHint")}</span>
+            </label>
+            <label className="block space-y-1">
+              <span className="text-[10px] text-muted">{t("settings.capacity.shield.inactivityTimeout")}</span>
+              <input
+                type="number"
+                min={0}
+                max={120_000}
+                step={1_000}
+                value={draft.subscriptionShield?.inactivityTimeoutMs ?? 0}
+                disabled={busy || !draft.subscriptionShield?.enabled || draft.subscriptionShield?.mode === "off"}
+                className="h-8 w-full rounded-md border border-border bg-surface px-2 font-mono text-[11px] text-foreground"
+                onChange={(event) => {
+                  const numeric = Number(event.target.value);
+                  const nextValue = Number.isFinite(numeric) ? Math.max(0, Math.min(120_000, Math.floor(numeric))) : 0;
+                  setDraft((current) => ({
+                    ...current,
+                    subscriptionShield: {
+                      ...current.subscriptionShield,
+                      enabled: current.subscriptionShield?.enabled ?? true,
+                      mode: current.subscriptionShield?.mode ?? "stealth",
+                      minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
+                      connectTimeoutMs: current.subscriptionShield?.connectTimeoutMs ?? current.subscriptionShield?.headerTimeoutMs ?? 0,
+                      headerTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? current.subscriptionShield?.connectTimeoutMs ?? 0,
+                      inactivityTimeoutMs: nextValue,
+                      maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
+                    },
+                  }));
+                }}
+              />
+              <span className="block text-[10px] leading-4 text-muted">{t("settings.capacity.shield.inactivityTimeoutHint")}</span>
+            </label>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">

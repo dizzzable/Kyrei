@@ -241,6 +241,34 @@ describe("delegate_read tool", () => {
     );
   });
 
+  it("relays a recoverable slow-provider state without terminating the child", async () => {
+    const events: DelegateEvent[] = [];
+    const tools = buildDelegateTool({
+      enabled: true,
+      maxTasks: 1,
+      maxParallel: 1,
+      emit: (event) => events.push(event),
+      runTask: async ({ onProgress }) => {
+        onProgress({
+          status: "recovering",
+          text: "Provider is still working; the task remains active",
+        });
+        onProgress({ status: "running", text: "Provider activity resumed" });
+        return { summary: "Finished after the slow response." };
+      },
+    });
+
+    await execute(tools, [{ goal: "Wait for a slow provider" }]);
+
+    const progress = events.filter((event) => event.type === "subagent.progress");
+    expect(progress.map((event) => event.payload.status)).toEqual(["recovering", "running"]);
+    expect(events.at(-1)).toMatchObject({
+      type: "subagent.complete",
+      payload: { status: "completed", summary: "Finished after the slow response." },
+    });
+    expect(events.some((event) => event.type === "subagent.failed")).toBe(false);
+  });
+
   it("contains one child failure without rejecting successful siblings", async () => {
     const events: DelegateEvent[] = [];
     const visited: string[] = [];

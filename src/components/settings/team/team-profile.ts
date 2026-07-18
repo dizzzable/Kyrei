@@ -22,6 +22,8 @@ export const DEFAULT_TEAM_LIMITS: TeamProfileLimits = {
   maxTasks: 12,
   maxStepsPerAgent: 8,
   timeoutMs: 180_000,
+  idleTimeoutMs: 180_000,
+  maxRuntimeMs: 1_800_000,
 };
 
 /**
@@ -303,7 +305,7 @@ export function cloneTeamOrchestration(value: TeamOrchestrationConfig | undefine
     activeProfileId: value.activeProfileId,
     profiles: value.profiles.map((profile) => ({
       ...profile,
-      limits: { ...profile.limits },
+      limits: { ...DEFAULT_TEAM_LIMITS, ...profile.limits },
       roles: profile.roles.map((role) => ({
         ...role,
         ...(role.model ? { model: { ...role.model } } : {}),

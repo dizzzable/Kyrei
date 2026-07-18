@@ -4362,7 +4362,9 @@ export async function startGateway({
             : "failed"
         : payload.status === "queued"
           ? "queued"
-          : "running";
+          : payload.status === "recovering"
+            ? "recovering"
+            : "running";
     const checkpointManifest = normalizeCheckpointManifest(
       payload.checkpoint_manifest,
       status === "recovering" || status === "partial" ? status : undefined,

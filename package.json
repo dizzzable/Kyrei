@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
@@ -36,15 +36,15 @@
     "gate": "npm run typecheck:engine && npm run typecheck:renderer && npm run check:js && npm run check:i18n && npm run test",
     "start": "vite build && node scripts/build-engine.mjs && electron .",
     "package:prepare": "npm run gen-icons && vite build && node scripts/build-engine.mjs",
-    "dist": "npm run package:prepare && electron-builder",
-    "dist:win": "npm run package:prepare && electron-builder --win",
-    "dist:mac": "npm run package:prepare && electron-builder --mac",
-    "dist:mac:x64": "npm run package:prepare && electron-builder --mac --x64",
-    "dist:mac:arm64": "npm run package:prepare && electron-builder --mac --arm64",
-    "dist:linux": "npm run package:prepare && electron-builder --linux",
-    "dist:linux:x64": "npm run package:prepare && electron-builder --linux AppImage deb pacman --x64",
-    "dist:linux:arm64": "npm run package:prepare && electron-builder --linux AppImage deb --arm64",
-    "dist:arch": "npm run package:prepare && electron-builder --linux pacman --x64"
+    "dist": "node scripts/package-electron.mjs",
+    "dist:win": "node scripts/package-electron.mjs --win",
+    "dist:mac": "node scripts/package-electron.mjs --mac",
+    "dist:mac:x64": "node scripts/package-electron.mjs --mac --x64",
+    "dist:mac:arm64": "node scripts/package-electron.mjs --mac --arm64",
+    "dist:linux": "node scripts/package-electron.mjs --linux",
+    "dist:linux:x64": "node scripts/package-electron.mjs --linux AppImage deb pacman --x64",
+    "dist:linux:arm64": "node scripts/package-electron.mjs --linux AppImage deb --arm64",
+    "dist:arch": "node scripts/package-electron.mjs --linux pacman --x64"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.20",

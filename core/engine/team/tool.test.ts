@@ -179,13 +179,13 @@ describe("buildTeamDelegateTool", () => {
     });
   });
 
-  it("fails only the timed-out role instead of aborting the whole run", async () => {
+  it("emits a recovery progress update and lets a slow role finish", async () => {
     vi.useFakeTimers();
     try {
       const researcher = role("researcher");
       const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
       const tools = buildTeamDelegateTool({
-        spec: spec([researcher], { timeoutMs: 1_000 }),
+        spec: spec([researcher], { timeoutMs: 10_000, idleTimeoutMs: 1_000 }),
         emit: (event) => events.push(event as never),
         executors: [{
           role: researcher,
@@ -200,18 +200,20 @@ describe("buildTeamDelegateTool", () => {
       };
 
       const pending = team.execute({ tasks: [{ id: "slow", goal: "Slow" }] }, { toolCallId: "slow" });
-      await vi.advanceTimersByTimeAsync(1_600);
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(events.find((event) => event.type === "subagent.progress" && String(event.payload.text).includes("still running"))?.payload)
+        .toMatchObject({ task_id: "slow", status: "recovering" });
+      await vi.advanceTimersByTimeAsync(500);
       const output = JSON.parse(await pending);
-      expect(output.tasks[0]).toMatchObject({ id: "slow", status: "failed", error: "Team task timed out after 1000ms" });
-      expect(events.some((event) => event.type === "subagent.complete")).toBe(false);
-      expect(events.find((event) => event.type === "subagent.failed")?.payload.status).toBe("failed");
-      expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "failed" } });
+      expect(output.tasks[0]).toMatchObject({ id: "slow", status: "succeeded", summary: "summary slow" });
+      expect(events.find((event) => event.type === "subagent.failed")).toBeUndefined();
+      expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "completed", completed_tasks: 1, failed_tasks: 0 } });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("lets an independent task finish after another task times out", async () => {
+  it("keeps a queued task healthy while another task exceeds the idle threshold", async () => {
     vi.useFakeTimers();
     try {
       const researcher = role("researcher");
@@ -242,11 +244,46 @@ describe("buildTeamDelegateTool", () => {
       const output = JSON.parse(await pending);
 
       expect(output.tasks).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: "slow", status: "failed" }),
+        expect.objectContaining({ id: "slow", status: "succeeded" }),
         expect.objectContaining({ id: "fast", status: "succeeded" }),
       ]));
+      expect(events.find((event) => event.type === "subagent.progress" && String(event.payload.text).includes("still running"))?.payload.task_id)
+        .toBe("slow");
       expect(events.filter((event) => event.type === "subagent.complete").map((event) => event.payload.task_id)).toContain("fast");
-      expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "failed", completed_tasks: 1, failed_tasks: 1 } });
+      expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "completed", completed_tasks: 2, failed_tasks: 0 } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honors idle thresholds above five minutes without clamping them down", async () => {
+    vi.useFakeTimers();
+    try {
+      const researcher = role("researcher");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const tools = buildTeamDelegateTool({
+        spec: spec([researcher], { timeoutMs: 400_000 }),
+        emit: (event) => events.push(event as never),
+        executors: [{
+          role: researcher,
+          run: async (context) => {
+            await new Promise((resolve) => setTimeout(resolve, 450_000));
+            return artifact(context.task.id);
+          },
+        }],
+      });
+      const team = tools.team_delegate as unknown as {
+        execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+      };
+
+      const pending = team.execute({ tasks: [{ id: "slow", goal: "Slow" }] }, { toolCallId: "long-idle" });
+      await vi.advanceTimersByTimeAsync(350_000);
+      expect(events.some((event) => event.type === "subagent.progress" && String(event.payload.text).includes("400000ms"))).toBe(false);
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(events.find((event) => event.type === "subagent.progress" && String(event.payload.text).includes("400000ms"))?.payload.task_id)
+        .toBe("slow");
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
     } finally {
       vi.useRealTimers();
     }

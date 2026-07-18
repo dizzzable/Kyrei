@@ -25,8 +25,12 @@ export interface SubscriptionShieldConfig {
   mode: SubscriptionShieldMode;
   /** Minimum gap between request starts for the same pace key (ms). */
   minIntervalMs: number;
-  /** Soft timeout for a single provider attempt (ms); 0 disables. */
+  /** Legacy alias for the header timeout; kept for old saved configs. */
   connectTimeoutMs: number;
+  /** Timeout while waiting for response headers (ms); 0 disables. */
+  headerTimeoutMs: number;
+  /** Timeout between raw response body chunks (ms); 0 disables. */
+  inactivityTimeoutMs: number;
   /** Max concurrent in-flight requests per origin host. */
   maxConnectionsPerOrigin: number;
 }
@@ -34,7 +38,7 @@ export interface SubscriptionShieldConfig {
 export interface SubscriptionShieldTimeoutError extends Error {
   code: "ETIMEDOUT";
   reason: "subscription_shield_timeout";
-  phase: "headers";
+  phase: "headers" | "body-inactivity";
   timeoutMs: number;
 }
 
@@ -48,7 +52,9 @@ const DEFAULTS: SubscriptionShieldConfig = {
   enabled: true,
   mode: "stealth",
   minIntervalMs: 75,
-  connectTimeoutMs: 30_000,
+  connectTimeoutMs: 0,
+  headerTimeoutMs: 0,
+  inactivityTimeoutMs: 0,
   maxConnectionsPerOrigin: 4,
 };
 
@@ -83,11 +89,16 @@ export function normalizeSubscriptionShield(raw: unknown): SubscriptionShieldCon
     ? modeRaw as SubscriptionShieldMode
     : DEFAULTS.mode;
   const enabled = source.enabled === false || mode === "off" ? false : source.enabled !== false;
+  const legacyTimeoutMs = clampInt(source.connectTimeoutMs, DEFAULTS.connectTimeoutMs, 0, 120_000);
+  const headerTimeoutMs = clampInt(source.headerTimeoutMs, legacyTimeoutMs, 0, 120_000);
+  const inactivityTimeoutMs = clampInt(source.inactivityTimeoutMs, DEFAULTS.inactivityTimeoutMs, 0, 120_000);
   return {
     enabled: enabled && mode !== "off",
     mode: enabled ? mode : "off",
     minIntervalMs: clampInt(source.minIntervalMs, DEFAULTS.minIntervalMs, 0, 10_000),
-    connectTimeoutMs: clampInt(source.connectTimeoutMs, DEFAULTS.connectTimeoutMs, 0, 120_000),
+    connectTimeoutMs: headerTimeoutMs,
+    headerTimeoutMs,
+    inactivityTimeoutMs,
     maxConnectionsPerOrigin: clampInt(
       source.maxConnectionsPerOrigin,
       DEFAULTS.maxConnectionsPerOrigin,
@@ -107,14 +118,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function createSubscriptionShieldTimeoutError(timeoutMs: number): SubscriptionShieldTimeoutError {
+export function createSubscriptionShieldTimeoutError(
+  timeoutMs: number,
+  phase: SubscriptionShieldTimeoutError["phase"] = "headers",
+): SubscriptionShieldTimeoutError {
   return Object.assign(new Error("subscription_shield_timeout"), {
     name: "TimeoutError",
     code: "ETIMEDOUT" as const,
     reason: "subscription_shield_timeout" as const,
-    phase: "headers" as const,
+    phase,
     timeoutMs,
   });
+}
+
+function withResponseBody(response: Response, body: ReadableStream<Uint8Array>): Response {
+  const wrapped = new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+  for (const [key, value] of [
+    ["url", response.url],
+    ["redirected", response.redirected],
+    ["type", response.type],
+  ] as const) {
+    try {
+      Object.defineProperty(wrapped, key, { value, configurable: true });
+    } catch {
+      /* best-effort mirror only */
+    }
+  }
+  return wrapped;
 }
 
 /**
@@ -260,40 +294,138 @@ export function wrapFetchWithSubscriptionShield(
       config.mode,
     );
 
-    const timeoutMs = config.connectTimeoutMs;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
-    const controller = timeoutMs > 0 ? new AbortController() : null;
-    if (controller && init?.signal) {
-      if (init.signal.aborted) controller.abort(init.signal.reason);
-      else {
-        init.signal.addEventListener("abort", () => controller.abort(init.signal?.reason), {
-          once: true,
-        });
-      }
+    const headerTimeoutMs = config.headerTimeoutMs;
+    const inactivityTimeoutMs = config.inactivityTimeoutMs;
+    let headerTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    let timedOutPhase: SubscriptionShieldTimeoutError["phase"] | null = null;
+    let released = false;
+    let bodyOwnsCleanup = false;
+    let abortBody: ((reason: unknown) => void) | undefined;
+    const releaseOriginSlotOnce = () => {
+      if (released) return;
+      released = true;
+      releaseOriginSlot(origin);
+    };
+    const controller = headerTimeoutMs > 0 || inactivityTimeoutMs > 0 || init?.signal
+      ? new AbortController()
+      : null;
+    const onExternalAbort = () => {
+      const reason = init?.signal?.reason;
+      controller?.abort(reason);
+      abortBody?.(reason);
+    };
+    const removeExternalAbort = () => init?.signal?.removeEventListener("abort", onExternalAbort);
+    if (init?.signal?.aborted) {
+      releaseOriginSlotOnce();
+      throw init.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
     }
-    if (controller && timeoutMs > 0) {
-      timeoutId = setTimeout(() => {
-        timedOut = true;
-        controller.abort(createSubscriptionShieldTimeoutError(timeoutMs));
-      }, timeoutMs);
+    init?.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    if (controller && headerTimeoutMs > 0) {
+      headerTimeoutId = setTimeout(() => {
+        timedOutPhase = "headers";
+        controller.abort(createSubscriptionShieldTimeoutError(headerTimeoutMs, "headers"));
+      }, headerTimeoutMs);
     }
 
     try {
-      const response = await baseFetch(input, {
+      const responsePromise = baseFetch(input, {
         ...init,
         headers,
         ...(controller ? { signal: controller.signal } : {}),
       });
-      return response;
+      const response = controller
+        ? await new Promise<Response>((resolve, reject) => {
+          const onControllerAbort = () => {
+            controller.signal.removeEventListener("abort", onControllerAbort);
+            reject(controller.signal.reason);
+          };
+          controller.signal.addEventListener("abort", onControllerAbort, { once: true });
+          responsePromise.then(
+            (value) => {
+              controller.signal.removeEventListener("abort", onControllerAbort);
+              resolve(value);
+            },
+            (error: unknown) => {
+              controller.signal.removeEventListener("abort", onControllerAbort);
+              reject(error);
+            },
+          );
+        })
+        : await responsePromise;
+      if (headerTimeoutId !== undefined) {
+        clearTimeout(headerTimeoutId);
+        headerTimeoutId = undefined;
+      }
+      if (!response.body) {
+        removeExternalAbort();
+        releaseOriginSlotOnce();
+        return response;
+      }
+
+      const reader = response.body.getReader();
+      let bodyTimeoutId: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const cleanupBody = () => {
+        if (settled) return false;
+        settled = true;
+        if (bodyTimeoutId !== undefined) clearTimeout(bodyTimeoutId);
+        bodyTimeoutId = undefined;
+        removeExternalAbort();
+        releaseOriginSlotOnce();
+        return true;
+      };
+      const failBody = (error: unknown) => {
+        if (!cleanupBody()) return;
+        void reader.cancel(error).catch(() => undefined);
+        try { streamController?.error(error); } catch { /* consumer already closed the stream */ }
+      };
+      abortBody = failBody;
+      const armBodyTimeout = () => {
+        if (bodyTimeoutId !== undefined) clearTimeout(bodyTimeoutId);
+        if (settled || inactivityTimeoutMs <= 0) return;
+        bodyTimeoutId = setTimeout(() => {
+          timedOutPhase = "body-inactivity";
+          failBody(createSubscriptionShieldTimeoutError(inactivityTimeoutMs, "body-inactivity"));
+        }, inactivityTimeoutMs);
+      };
+      const wrappedBody = new ReadableStream<Uint8Array>({
+        start(controllerForBody) {
+          streamController = controllerForBody;
+        },
+        async pull(controllerForBody) {
+          if (settled) return;
+          armBodyTimeout();
+          try {
+            const { done, value } = await reader.read();
+            if (settled) return;
+            if (done) {
+              if (cleanupBody()) controllerForBody.close();
+              return;
+            }
+            if (bodyTimeoutId !== undefined) clearTimeout(bodyTimeoutId);
+            bodyTimeoutId = undefined;
+            controllerForBody.enqueue(value);
+          } catch (error) {
+            if (cleanupBody()) controllerForBody.error(error);
+          }
+        },
+        cancel(reason) {
+          return cleanupBody() ? reader.cancel(reason) : undefined;
+        },
+      });
+
+      bodyOwnsCleanup = true;
+      return withResponseBody(response, wrappedBody);
     } catch (error) {
-      if (timedOut) {
-        throw Object.assign(createSubscriptionShieldTimeoutError(timeoutMs), { cause: error });
+      releaseOriginSlotOnce();
+      if (timedOutPhase === "headers") {
+        throw Object.assign(createSubscriptionShieldTimeoutError(headerTimeoutMs, "headers"), { cause: error });
       }
       throw error;
     } finally {
-      if (timeoutId) clearTimeout(timeoutId);
-      releaseOriginSlot(origin);
+      if (headerTimeoutId !== undefined) clearTimeout(headerTimeoutId);
+      if (!bodyOwnsCleanup) removeExternalAbort();
     }
   }) as typeof fetch;
 

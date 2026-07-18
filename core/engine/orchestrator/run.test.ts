@@ -957,7 +957,7 @@ describe("runKyreiChat project context wiring", () => {
     });
   });
 
-  it("turns the configured child timeout into a failed task without aborting the parent", async () => {
+  it("keeps a slow child recoverable until a late provider result arrives", async () => {
     vi.useFakeTimers();
     try {
       resolveEngineConfigMock.mockReturnValueOnce({
@@ -995,16 +995,20 @@ describe("runKyreiChat project context wiring", () => {
       );
 
       await vi.advanceTimersByTimeAsync(1_000);
-      await expect(pending).resolves.toBe("[1] Failed: Delegated research timed out after 1000ms");
       expect(parent.signal.aborted).toBe(false);
-      expect(providerSignal?.aborted).toBe(true);
-      expect(events.find((event) => event.type === "subagent.failed")?.payload).toMatchObject({
-        status: "failed",
-        error: "Delegated research timed out after 1000ms",
+      expect(providerSignal?.aborted).toBe(false);
+      expect(events.find((event) => event.type === "subagent.progress")?.payload).toMatchObject({
+        status: "recovering",
       });
 
-      resolveLate?.({ text: "too late", steps: [], toolCalls: [], usage: {} });
-      await Promise.resolve();
+      resolveLate?.({ text: "late but valid", steps: [{ text: "late but valid" }], toolCalls: [], usage: {} });
+      await vi.runAllTicks();
+      await expect(pending).resolves.toBe("[1] late but valid");
+      expect(events.some((event) => event.type === "subagent.failed")).toBe(false);
+      expect(events.find((event) => event.type === "subagent.complete")?.payload).toMatchObject({
+        status: "completed",
+        summary: "late but valid",
+      });
     } finally {
       vi.useRealTimers();
     }

@@ -78,7 +78,7 @@ export type SubagentEvent =
     }
   | {
       type: "subagent.progress";
-      payload: SubagentEventBasePayload & SubagentEventMetadata & { status: "running"; text: string };
+      payload: SubagentEventBasePayload & SubagentEventMetadata & { status: "running" | "recovering"; text: string };
     }
   | {
       type: "subagent.complete";
@@ -333,9 +333,9 @@ export interface DelegationConfig {
   maxSteps: number;
   /** Legacy alias for the child idle lease; preserved for config compatibility. */
   timeoutMs: number;
-  /** Idle lease renewed only by observed progress. */
+  /** Observation interval renewed by progress; expiry reports recovery but never kills the task. */
   idleTimeoutMs: number;
-  /** Separate non-renewable ceiling for one delegated child. */
+  /** Observation threshold for one slow provider attempt; it is not a task lifetime. */
   maxRuntimeMs: number;
 }
 

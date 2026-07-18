@@ -1250,7 +1250,34 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           <NumberField label={t("settings.delegation.maxTasks.label")} hint={t("settings.delegation.maxTasks.hint")} value={Number(getEngineField("delegation.maxTasks", 3))} min={1} max={8} step={1} onChange={(value) => setEngineField("delegation.maxTasks", value)} />
                           <NumberField label={t("settings.delegation.maxParallel.label")} hint={t("settings.delegation.maxParallel.hint")} value={Number(getEngineField("delegation.maxParallel", 3))} min={1} max={8} step={1} onChange={(value) => setEngineField("delegation.maxParallel", value)} />
                           <NumberField label={t("settings.delegation.maxSteps.label")} hint={t("settings.delegation.maxSteps.hint")} value={Number(getEngineField("delegation.maxSteps", 8))} min={1} max={24} step={1} onChange={(value) => setEngineField("delegation.maxSteps", value)} />
-                          <NumberField label={t("settings.delegation.timeout.label")} hint={t("settings.delegation.timeout.hint")} value={Number(getEngineField("delegation.timeoutMs", 90_000))} min={1_000} max={300_000} step={1_000} format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })} onChange={(value) => setEngineField("delegation.timeoutMs", value)} />
+                          <NumberField
+                            label={t("settings.delegation.timeout.label")}
+                            hint={t("settings.delegation.timeout.hint")}
+                            value={Number(getEngineField("delegation.idleTimeoutMs", getEngineField("delegation.timeoutMs", 180_000)))}
+                            min={1_000}
+                            max={3_600_000}
+                            step={1_000}
+                            format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })}
+                            onChange={(value) => {
+                              setEngineField("delegation.idleTimeoutMs", value);
+                              setEngineField("delegation.timeoutMs", value);
+                              const currentMaxRuntime = Number(getEngineField("delegation.maxRuntimeMs", 1_800_000));
+                              if (currentMaxRuntime < value) setEngineField("delegation.maxRuntimeMs", value);
+                            }}
+                          />
+                          <NumberField
+                            label={t("settings.delegation.maxRuntime.label")}
+                            hint={t("settings.delegation.maxRuntime.hint")}
+                            value={Number(getEngineField("delegation.maxRuntimeMs", 1_800_000))}
+                            min={1_000}
+                            max={7_200_000}
+                            step={1_000}
+                            format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1_000) })}
+                            onChange={(value) => {
+                              const idleTimeoutMs = Number(getEngineField("delegation.idleTimeoutMs", getEngineField("delegation.timeoutMs", 180_000)));
+                              setEngineField("delegation.maxRuntimeMs", Math.max(idleTimeoutMs, value));
+                            }}
+                          />
                         </>
                       )}
                       <NumberField label={t("settings.contextSoft.label")} hint={t("settings.contextSoft.hint")} value={Number(getEngineField("contextBudget.softPct", 0.75))} min={0.3} max={0.95} step={0.05} format={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setEngineField("contextBudget.softPct", value)} />

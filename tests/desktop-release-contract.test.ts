@@ -15,7 +15,8 @@ describe("desktop release contract", () => {
     expect(workflow).toContain("dist/app/latest-linux-arm64.yml");
     expect(workflow).toContain("dist/app/*.blockmap");
     expect(workflow).toContain("npm ci");
-    expect(workflow).toContain("npm run package:prepare");
+    expect(workflow).toContain("node scripts/package-electron.mjs");
+    expect(workflow).not.toContain("npx electron-builder");
     expect(workflow).toContain('node-version: "24"');
   });
 

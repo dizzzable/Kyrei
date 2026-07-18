@@ -204,4 +204,46 @@ describe("runTeamDepartment", () => {
       },
     });
   });
+
+  it("emits recovery progress and eventually completes a slow department role", async () => {
+    vi.useFakeTimers();
+    try {
+      const singleRoleTeam: RuntimeTeamSpec = {
+        ...team,
+        roles: [team.roles[0]!],
+        limits: { ...team.limits, maxAgents: 1, maxTasks: 1, timeoutMs: 10_000, idleTimeoutMs: 1_000 },
+      };
+      createTeamRoleExecutorsMock.mockResolvedValue([{
+        role: singleRoleTeam.roles[0]!,
+        run: async (context: { task: { id: string } }) => {
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return artifact(context.task.id);
+        },
+      }]);
+      const { runTeamDepartment } = await import("./department.js");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+
+      const pending = runTeamDepartment({
+        team: singleRoleTeam,
+        goal: "Wait for the slow role",
+        stageId: "research",
+        emit: (event) => events.push(event as never),
+      });
+
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(events.find((event) => event.type === "subagent.progress" && String(event.payload.text).includes("still running"))?.payload)
+        .toMatchObject({ task_id: "role-1-researcher", status: "recovering" });
+      await vi.advanceTimersByTimeAsync(500);
+      const result = await pending;
+
+      expect(result.artifact).toMatchObject({ taskId: "role-1-researcher", summary: "role-1-researcher structured result" });
+      expect(events.find((event) => event.type === "subagent.failed")).toBeUndefined();
+      expect(events.at(-1)).toMatchObject({
+        type: "team.complete",
+        payload: { status: "completed", completed_tasks: 1, failed_tasks: 0 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
