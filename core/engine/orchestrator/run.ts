@@ -92,7 +92,7 @@ import {
 import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/file-review.js";
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
 import { buildSystemPromptParts } from "./system-prompt.js";
-import { packSystemForCache } from "../prompt/cache-packing.js";
+import { mergeProviderOptions, packSystemForCache } from "../prompt/cache-packing.js";
 import type { ToolName } from "../prompt/tool-descriptions.js";
 import { resolvePersonalityText } from "../personality-catalog.js";
 import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
@@ -108,6 +108,40 @@ const MODEL_OVERRIDE_BOUNDS = Object.freeze({
   contextWindow: { min: 256, max: 100_000_000 },
   maxOutput: { min: 1, max: 10_000_000 },
 });
+
+// A provider's context window covers the prompt *and* the requested completion.
+// Keep room for the completion plus stable system/tool protocol overhead before
+// deciding whether history must be compacted. Without this reserve a large first
+// request can be rejected before AI SDK ever invokes prepareStep.
+const CONTEXT_PROTOCOL_RESERVE_TOKENS = 8_192;
+
+function inputContextWindow(contextWindow: number, maxOutputTokens: number | undefined): number {
+  const reserved = Math.min(
+    Math.max(0, contextWindow - MODEL_OVERRIDE_BOUNDS.contextWindow.min),
+    (maxOutputTokens ?? 0) + CONTEXT_PROTOCOL_RESERVE_TOKENS,
+  );
+  return Math.max(MODEL_OVERRIDE_BOUNDS.contextWindow.min, contextWindow - reserved);
+}
+
+/**
+ * Keep an OpenAI Responses cache namespace stable for one durable chat. The
+ * model id prevents unrelated model routes from sharing an opaque cache key.
+ * OpenAI-compatible gateways are intentionally excluded: many do not accept
+ * this vendor-specific field and already control their own caching behavior.
+ */
+function sessionPromptCacheOptions(
+  protocol: RuntimeProviderTarget["protocol"],
+  sessionId: string | undefined,
+  model: string,
+) {
+  if (protocol !== "openai-responses" || !sessionId) return undefined;
+  const clean = (value: string, max: number) => value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, max);
+  return {
+    openai: {
+      promptCacheKey: `kyrei:v2:${clean(sessionId, 96)}:${clean(model, 96)}`,
+    },
+  };
+}
 
 function boundedModelOverride(
   value: unknown,
@@ -434,7 +468,11 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
   const mcpConfig = normalizeMcpConfig(cfg.mcp);
   const mcpManager =
     mcpConfig.enabled && mcpConfig.servers.length
-      ? createMcpManager({ config: mcpConfig, sensitiveValues })
+      ? createMcpManager({
+          config: mcpConfig,
+          ...(opts.workspace ? { workspace: opts.workspace } : {}),
+          sensitiveValues,
+        })
       : null;
   const mcpTools = mcpManager
     ? buildMcpTools(mcpConfig, {
@@ -545,6 +583,16 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     } catch (error) {
       console.warn("[kyrei v2] project context disabled:", error);
     }
+  }
+
+  // A continuation is intentionally a system-context reference rather than a
+  // hidden chat message. This keeps strict provider message alternation intact
+  // and lets the normal project/plan/LTM layers remain the current source of
+  // truth. The gateway bounds and redacts this packet before it reaches here.
+  if (opts.continuationContext?.trim()) {
+    projectContext = projectContext
+      ? `${opts.continuationContext.trim()}\n\n${projectContext}`
+      : opts.continuationContext.trim();
   }
 
   // Effort for Team is resolved inside createTeamRoleExecutors from cfg + modelParams.
@@ -744,10 +792,13 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     "maxOutput",
   );
 
-  const start = (ci: number, useTools: boolean): StreamLike => {
+  const start = async (ci: number, useTools: boolean): Promise<StreamLike> => {
     const candidate = candidates[ci] ?? candidates[0]!;
     const { entry, target, credentials } = candidate;
-    const providerOptions = buildProviderOptions(target.protocol, turnParams);
+    const providerOptions = mergeProviderOptions(
+      buildProviderOptions(target.protocol, turnParams),
+      sessionPromptCacheOptions(target.protocol, opts.sessionId, entry.id),
+    );
     // Manual limits are scoped to the selected primary model. A fallback can
     // have a different context/output contract and must use its own registry
     // metadata instead of inheriting an unrelated override.
@@ -790,10 +841,13 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
           ...(workerShieldFetch ? { fetch: workerShieldFetch } : {}),
         })
       : model;
-    const compactionPrepareStep = ccr && contextWindow !== undefined
+    const compactionWindow = contextWindow !== undefined
+      ? inputContextWindow(contextWindow, maxOutputTokens)
+      : undefined;
+    const compactionPrepareStep = ccr && compactionWindow !== undefined
       ? makePrepareStep(cfg, {
           model: entry.id,
-          window: contextWindow,
+          window: compactionWindow,
           ccr,
           workspace: opts.workspace,
           sessionId: opts.sessionId,
@@ -887,7 +941,21 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     // prefix; other protocols keep a single instructions string (stable first).
     const packedSystem = packSystemForCache(systemParts, target.protocol);
     if (packedSystem.cacheBreakpoints) harnessMetrics.recordCacheBreakpoints(true);
-    const historyMessages = prepareMessagesForModel((opts.messages ?? []) as ModelMessage[]);
+    const rawHistoryMessages = prepareMessagesForModel((opts.messages ?? []) as ModelMessage[]);
+    // AI SDK calls prepareStep only after the first provider response/tool step.
+    // Run the same compactor before streamText so a long restored session never
+    // sends an unbounded first prompt and takes the whole dialog down with it.
+    let historyMessages = rawHistoryMessages;
+    if (compactionPrepareStep) {
+      try {
+        const prepared = await compactionPrepareStep({ messages: rawHistoryMessages });
+        historyMessages = prepared?.messages ?? rawHistoryMessages;
+      } catch (error) {
+        // Context preparation is a resilience layer. A degraded index/CCR must
+        // not turn a recoverable provider request into a gateway crash.
+        console.warn("[kyrei context] initial compaction skipped:", error);
+      }
+    }
     const streamMessages = packedSystem.systemMessages?.length
       ? [...packedSystem.systemMessages, ...historyMessages]
       : historyMessages;
@@ -1343,6 +1411,7 @@ function stripRecoveryMarkersFromParts(incoming: readonly MessagePart[]): Messag
     const text = stripPrivateRecoveryMarkers(part.text);
     if (text) clean.push({ ...part, text });
   }
+
   return clean;
 }
 

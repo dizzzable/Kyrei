@@ -68,6 +68,9 @@ interface KyreiDesktopBridge {
       options?: { sessionVerificationUri?: string },
     ) => Promise<{ ok: boolean }>;
   };
+  appearance?: {
+    setWindowTheme: (input: { color: string; symbolColor: string }) => Promise<boolean>;
+  };
   update?: {
     getStatus: () => Promise<DesktopUpdateStatus>;
     check: () => Promise<DesktopUpdateStatus>;

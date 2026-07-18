@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertCircle,
@@ -21,7 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui";
 import { useI18n } from "@/i18n";
-import { shouldHighlightUpdate } from "@/lib/app-update";
+import { shouldHighlightUpdate, updateAttentionKey } from "@/lib/app-update";
 import { desktopUpdate, type DesktopUpdateStatus } from "@/lib/desktop";
 import { contextMetric, formatCompactTokens, formatElapsed } from "@/lib/status-metrics";
 import type { GatewayStatus, SubagentRun } from "@/lib/types";
@@ -71,6 +71,8 @@ export function StatusBar({
   const { t } = useI18n();
   const [now, setNow] = useState(Date.now());
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus | null>(null);
+  const [showUpdateNotice, setShowUpdateNotice] = useState(false);
+  const lastUpdateNotice = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -104,9 +106,23 @@ export function StatusBar({
       ? t("shell.status.gatewayReady")
       : t("shell.status.gatewayNeedsSetup");
   const updateAttention = shouldHighlightUpdate(updateStatus?.phase);
+  const updateNoticeKey = updateAttentionKey(updateStatus?.phase, updateStatus?.latestVersion);
   const updateTitle = updateStatus?.phase === "downloaded"
     ? t("shell.status.updateDownloaded", { version: updateStatus.latestVersion || "?" })
     : t("shell.status.updateAvailable", { version: updateStatus?.latestVersion || "?" });
+
+  useEffect(() => {
+    if (!updateNoticeKey || lastUpdateNotice.current === updateNoticeKey) return;
+    lastUpdateNotice.current = updateNoticeKey;
+    setShowUpdateNotice(true);
+    const timer = window.setTimeout(() => setShowUpdateNotice(false), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [updateNoticeKey]);
+
+  const openUpdateSettings = () => {
+    setShowUpdateNotice(false);
+    onOpenAbout();
+  };
 
   return (
     <footer className="statusbar flex shrink-0 items-stretch justify-between gap-2 overflow-hidden border-t border-border-soft px-1 font-mono text-[10px] text-muted">
@@ -244,7 +260,7 @@ export function StatusBar({
             className={cn(STATUS_ACTION, "status-update-attention")}
             title={updateTitle}
             aria-label={updateTitle}
-            onClick={onOpenAbout}
+            onClick={openUpdateSettings}
           >
             <Sparkles className="size-3" aria-hidden />
             <span>{`v${__APP_VERSION__}`}</span>
@@ -263,6 +279,21 @@ export function StatusBar({
         )}
         {updateAttention && (
           <span className="sr-only" role="status" aria-live="polite">{updateTitle}</span>
+        )}
+        {updateAttention && showUpdateNotice && (
+          <button
+            type="button"
+            className="status-update-notice"
+            title={updateTitle}
+            aria-label={`${updateTitle}. ${t("shell.status.openUpdates")}`}
+            onClick={openUpdateSettings}
+          >
+            <Sparkles className="size-3.5 shrink-0" aria-hidden />
+            <span className="min-w-0 text-left">
+              <span className="block truncate">{updateTitle}</span>
+              <span className="status-update-notice-action">{t("shell.status.openUpdates")}</span>
+            </span>
+          </button>
         )}
       </div>
     </footer>

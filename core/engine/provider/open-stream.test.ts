@@ -31,6 +31,22 @@ describe("openStream adapter contract", () => {
     expect(opened.candidateIndex).toBe(0);
   });
 
+  it("awaits asynchronous preflight work before probing a provider stream", async () => {
+    const order: string[] = [];
+    const opened = await openStream(1, false, async () => {
+      order.push("prepare");
+      await Promise.resolve();
+      order.push("open");
+      return streamOf([{ type: "text-delta", text: "ready" }, { type: "finish" }]);
+    });
+
+    const seen: string[] = [];
+    for await (const part of opened.stream) seen.push(String((part as { type?: string }).type));
+
+    expect(order).toEqual(["prepare", "open"]);
+    expect(seen).toEqual(["text-delta", "finish"]);
+  });
+
   it("detects an AI SDK 7 error after the start preamble and tries the next candidate", async () => {
     const candidates: number[] = [];
     const start = (candidate: number): StreamLike => {

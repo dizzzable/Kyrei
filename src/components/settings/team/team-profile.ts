@@ -195,13 +195,38 @@ export function reconcileTeamPromptAssignments(
 export function defaultTeamModel(providers: readonly ProviderProfile[], fallback: ModelRef): ModelRef | undefined {
   const fallbackProvider = providers.find((provider) => provider.id === fallback.providerId);
   if (fallbackProvider?.enabled
-    && (!fallbackProvider.requiresApiKey || fallbackProvider.hasKey)
     && fallbackProvider.models.some((model) => model.id === fallback.modelId)) return { ...fallback };
   const provider = providers.find((candidate) => candidate.enabled
     && (!candidate.requiresApiKey || candidate.hasKey)
     && candidate.models.length > 0);
   const modelId = provider?.models[0]?.id;
   return provider && modelId ? { providerId: provider.id, modelId } : undefined;
+}
+
+/**
+ * A team role needs an explicit model, but profiles can outlive a provider
+ * refresh. Fill only missing assignments from the currently selected model;
+ * never rewrite a deliberate per-role choice (even an invalid one), so the
+ * user can see and correct it in the UI.
+ */
+export function fillMissingTeamRoleModels(
+  value: TeamOrchestrationConfig | undefined,
+  providers: readonly ProviderProfile[],
+  fallback: ModelRef,
+): TeamOrchestrationConfig {
+  const result = cloneTeamOrchestration(value);
+  const model = defaultTeamModel(providers, fallback);
+  if (!model) return result;
+
+  result.profiles = result.profiles.map((profile) => ({
+    ...profile,
+    roles: profile.roles.map((role) => (
+      role.model?.providerId && role.model.modelId
+        ? role
+        : { ...role, model: { ...model } }
+    )),
+  }));
+  return result;
 }
 
 export function createTeamRole(options: {

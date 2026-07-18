@@ -34,6 +34,7 @@ import {
   toolStart,
 } from "@/lib/chat-messages";
 import { GatewayRequestError, gateway } from "@/lib/gateway";
+import { hasOpenEscapeLayer, shouldInterruptSessionFromEscape } from "@/lib/escape-hotkey";
 import { actionForCombo } from "@/store/keybinds";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
 import { executableModelParams } from "@/lib/model-capabilities";
@@ -838,6 +839,35 @@ export function App() {
     t,
   ]);
 
+  const continueSessionById = useCallback(async (sessionId: string) => {
+    if (!sessionId) return;
+    const target = sessions.find((s) => s.id === sessionId);
+    const targetBusy = target?.status === "working"
+      || (sessionId === currentId && (streaming || rewinding));
+    if (targetBusy) return;
+    if (!window.confirm(t("shell.session.continueConfirm"))) return;
+    setStartupError(null);
+    beginSessionMutation();
+    try {
+      const result = await gateway.continueSession(sessionId);
+      await openForkedSession(result);
+    } catch (reason) {
+      setStartupError(describeError(reason));
+    } finally {
+      finishSessionMutation();
+    }
+  }, [
+    beginSessionMutation,
+    currentId,
+    describeError,
+    finishSessionMutation,
+    openForkedSession,
+    rewinding,
+    sessions,
+    streaming,
+    t,
+  ]);
+
   const respondToApproval = useCallback(async (
     approvalId: string,
     approved: boolean,
@@ -1206,6 +1236,16 @@ export function App() {
       "keybinds.openPanel": () => openSettings("keybinds"),
     };
     const onKey = (event: KeyboardEvent) => {
+      if (shouldInterruptSessionFromEscape({
+        event,
+        streaming,
+        stopping,
+        hasOpenLayer: hasOpenEscapeLayer(document),
+      })) {
+        event.preventDefault();
+        void stop();
+        return;
+      }
       if (settingsOpen || cronOpen || missionOpen || changesOpen || memoryOpen) return;
       const combo = comboFromEvent(event);
       if (!combo) return;
@@ -1217,7 +1257,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [newSession, cycleSession, toggleMode, openSettings, currentId, toggleActivity, toggleDeveloper, settingsOpen, cronOpen, missionOpen, changesOpen, memoryOpen]);
+  }, [newSession, cycleSession, toggleMode, openSettings, currentId, toggleActivity, toggleDeveloper, settingsOpen, cronOpen, missionOpen, changesOpen, memoryOpen, stop, stopping, streaming]);
 
   const currentTitle = sessionTitle(sessions.find((session) => session.id === currentId) ?? { id: "" }, t("shell.session.untitled"));
   const turbo = terminalPermission(config) === "turbo";
@@ -1268,6 +1308,7 @@ export function App() {
         onNew={newSession}
         onArchive={archiveSession}
         onFork={(id) => void forkSessionById(id)}
+        onContinue={(id) => void continueSessionById(id)}
         onRename={renameSession}
         onOpenActivity={(id) => {
           if (id === "artifacts") {

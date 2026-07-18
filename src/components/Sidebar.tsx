@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, Copy, Download, GitFork, MoreHorizontal, Pencil, Pin, PinOff, Trash2, Upload } from "lucide-react";
+import { Archive, Copy, Download, GitFork, History, MoreHorizontal, Pencil, Pin, PinOff, Trash2, Upload } from "lucide-react";
 
 import type { SessionInfo } from "@/lib/types";
 import { sessionMatchesSearch, sessionTitle } from "@/lib/session-search";
@@ -30,6 +30,8 @@ interface SidebarProps {
   onArchive: (id: string) => void;
   /** Fork full chat into a new session (parent untouched). */
   onFork?: (id: string) => void;
+  /** Start a clean session seeded by a compact continuation checkpoint. */
+  onContinue?: (id: string) => void;
   /** Permanent delete — only if caller wires it (Settings uses this). */
   onDelete?: (id: string) => void;
   onRename: (id: string, title: string) => void;
@@ -66,6 +68,7 @@ function SessionRow({
   onSelect,
   onArchive,
   onFork,
+  onContinue,
   onDelete,
   onRename,
   now,
@@ -79,6 +82,7 @@ function SessionRow({
   onSelect: (id: string) => void;
   onArchive: (id: string) => void;
   onFork?: (id: string) => void;
+  onContinue?: (id: string) => void;
   onDelete?: (id: string) => void;
   onRename: (id: string, title: string) => void;
   now: number;
@@ -143,9 +147,14 @@ function SessionRow({
             {session.parentSessionId && (
               <span
                 className="shrink-0 rounded bg-elevated px-1 py-px text-[8px] font-medium uppercase tracking-wide text-muted"
-                title={t("shell.session.forkBadge", { id: session.parentSessionId.slice(-8) })}
+                title={t(
+                  session.lineageKind === "continuation"
+                    ? "shell.session.continuationBadge"
+                    : "shell.session.forkBadge",
+                  { id: session.parentSessionId.slice(-8) },
+                )}
               >
-                {t("shell.session.fork")}
+                {t(session.lineageKind === "continuation" ? "shell.session.continuation" : "shell.session.fork")}
               </span>
             )}
           </span>
@@ -180,6 +189,11 @@ function SessionRow({
               <GitFork size={14} aria-hidden /> {t("shell.session.forkChat")}
             </DropdownMenuItem>
           )}
+          {onContinue && (
+            <DropdownMenuItem className={dropdownMenuRow} onSelect={() => onContinue(session.id)}>
+              <History size={14} aria-hidden /> {t("shell.session.continue")}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem className={dropdownMenuRow} onSelect={() => void exportSession(session, t("shell.session.untitled"))}>
             <Download size={14} aria-hidden /> {t("shell.session.export")}
           </DropdownMenuItem>
@@ -211,7 +225,7 @@ function SectionHeader({ label, count, className }: { label: string; count: numb
   );
 }
 
-export function Sidebar({ sessions, currentId, workingId, onSelect, onArchive, onFork, onDelete, onRename }: SidebarProps) {
+export function Sidebar({ sessions, currentId, workingId, onSelect, onArchive, onFork, onContinue, onDelete, onRename }: SidebarProps) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [now, setNow] = useState(Date.now());
@@ -272,6 +286,7 @@ export function Sidebar({ sessions, currentId, workingId, onSelect, onArchive, o
       onSelect={onSelect}
       onArchive={onArchive}
       onFork={onFork}
+      onContinue={onContinue}
       onDelete={onDelete}
       onRename={onRename}
       now={now}

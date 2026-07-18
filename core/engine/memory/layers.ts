@@ -1,6 +1,6 @@
 /**
  * Layered instruction/memory assembly with precedence (Requirements §6.2, §6.5).
- * Order (high → low): AGENTS.md → steering (.kiro/steering/*.md, always) →
+ * Order (high → low): AGENTS.md → steering (.kyrei/steering/*.md, always) →
  * project MEMORY.md → LTM recall (recent session activity) → global GLOBAL.md.
  * Higher layers win; each block is labeled.
  */
@@ -24,7 +24,7 @@ async function readIfExists(path: string): Promise<string | null> {
 }
 
 async function readAlwaysSteering(workspace: string): Promise<string[]> {
-  const dir = join(workspace, ".kiro", "steering");
+  const dir = join(workspace, ".kyrei", "steering");
   let names: string[];
   try {
     names = (await readdir(dir)).filter((n) => n.endsWith(".md"));

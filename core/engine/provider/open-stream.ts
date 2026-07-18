@@ -58,8 +58,11 @@ export interface StreamLike {
   attempts?: ProviderStreamAttemptOutcome[];
 }
 
-/** start(candidateIndex, useTools) returns a fresh streamText-like result. */
-export type StartFn = (candidateIndex: number, useTools: boolean) => StreamLike;
+/**
+ * start(candidateIndex, useTools) returns a fresh streamText-like result.
+ * It may prepare a bounded initial context before opening the provider stream.
+ */
+export type StartFn = (candidateIndex: number, useTools: boolean) => StreamLike | PromiseLike<StreamLike>;
 
 interface Probe {
   values: unknown[];
@@ -252,7 +255,7 @@ async function openAttempt(
 
   let stream: StreamLike;
   try {
-    stream = start(candidateIndex, useTools);
+    stream = await start(candidateIndex, useTools);
     observeResponseMessages(stream);
   } catch (error) {
     finishAttempt(active, attempts, attemptOutcome(candidateIndex, outcomeForError(error), "start", error));

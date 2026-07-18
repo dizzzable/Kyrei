@@ -9,6 +9,7 @@ import {
   createTeamProfile,
   defaultTeamModel,
   emptyTeamOrchestration,
+  fillMissingTeamRoleModels,
   isPromptProfilesDraftValid,
   mergeBuiltinPromptProfiles,
   nextTeamId,
@@ -43,14 +44,37 @@ describe("team profile helpers", () => {
     expect(nextTeamId("role", ["role-1", "role-3"])).toBe("role-2");
   });
 
-  it("prefers the current model and otherwise falls back to a ready provider", () => {
+  it("prefers the selected model even while its credentials are being configured", () => {
     const providers: ProviderProfile[] = [
       { id: "locked", name: "Locked", protocol: "openai-chat", baseURL: "https://locked.test", models: [{ id: "a" }], enabled: true, requiresApiKey: true, hasKey: false },
       { id: "local", name: "Local", protocol: "openai-chat", baseURL: "http://localhost", models: [{ id: "b" }], enabled: true, requiresApiKey: false, hasKey: false },
     ];
 
-    expect(defaultTeamModel(providers, { providerId: "locked", modelId: "a" })).toEqual({ providerId: "local", modelId: "b" });
+    expect(defaultTeamModel(providers, { providerId: "locked", modelId: "a" })).toEqual({ providerId: "locked", modelId: "a" });
     expect(defaultTeamModel(providers, { providerId: "missing", modelId: "missing" })).toEqual({ providerId: "local", modelId: "b" });
+  });
+
+  it("repairs legacy blank role assignments without overwriting an explicit choice", () => {
+    const providers: ProviderProfile[] = [{
+      id: "openai",
+      name: "OpenAI",
+      protocol: "openai-responses",
+      baseURL: "https://api.openai.com/v1",
+      models: [{ id: "gpt-5.6" }],
+      enabled: true,
+      requiresApiKey: true,
+      hasKey: true,
+    }];
+    const profile = createTeamProfile({ name: "Team", initialRoleName: "Blank" });
+    profile.roles.push({ ...profile.roles[0]!, id: "role-explicit", name: "Explicit", model: { providerId: "missing", modelId: "old" } });
+    const repaired = fillMissingTeamRoleModels({
+      defaultMode: "team",
+      activeProfileId: profile.id,
+      profiles: [profile],
+    }, providers, { providerId: "openai", modelId: "gpt-5.6" });
+
+    expect(repaired.profiles[0]?.roles[0]?.model).toEqual({ providerId: "openai", modelId: "gpt-5.6" });
+    expect(repaired.profiles[0]?.roles[1]?.model).toEqual({ providerId: "missing", modelId: "old" });
   });
 
   it("clones nested profile state and synchronizes opaque skill selections", () => {

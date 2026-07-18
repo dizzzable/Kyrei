@@ -43,6 +43,12 @@ export function modelSupportsImageInput(model: unknown): boolean {
     if (c.image_input === true || c.imageInput === true || c.vision === true) return true;
     const input = c.inputModalities ?? c.input_modalities;
     if (Array.isArray(input) && input.some((x) => String(x).toLowerCase() === "image")) return true;
+    // ProviderModel stores normalized metadata under this nested shape.
+    const modalities = c.modalities;
+    if (modalities && typeof modalities === "object") {
+      const nestedInput = (modalities as Record<string, unknown>).input;
+      if (Array.isArray(nestedInput) && nestedInput.some((x) => String(x).toLowerCase() === "image")) return true;
+    }
   }
   const modalities = m.modalities;
   if (modalities && typeof modalities === "object") {

@@ -14,6 +14,7 @@ import {
   createTeamProfile,
   createTeamRole,
   defaultTeamModel,
+  fillMissingTeamRoleModels,
   isPromptProfilesDraftValid,
   mergeBuiltinPromptProfiles,
   promptProfilesFromEngine,
@@ -33,30 +34,44 @@ const SELECT_CLASS = "h-8 w-full rounded-md border border-border bg-surface px-2
 
 export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
   const { t } = useI18n();
+  const mainModel = useMemo<ModelRef>(() => ({
+    providerId: config.activeProviderId,
+    modelId: config.activeModelId,
+  }), [config.activeModelId, config.activeProviderId]);
   const [promptDraft, setPromptDraft] = useState(() => promptProfilesFromEngine(config.engine));
-  const [draft, setDraft] = useState(() => reconcileTeamPromptAssignments(
-    config.orchestration,
-    promptProfilesFromEngine(config.engine).promptProfiles.map((profile) => profile.id),
+  const [draft, setDraft] = useState(() => fillMissingTeamRoleModels(
+    reconcileTeamPromptAssignments(
+      config.orchestration,
+      promptProfilesFromEngine(config.engine).promptProfiles.map((profile) => profile.id),
+    ),
+    config.providers,
+    { providerId: config.activeProviderId, modelId: config.activeModelId },
   ));
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [failed, setFailed] = useState(false);
   const [enabledSkills, setEnabledSkills] = useState<SkillInfo[]>([]);
   const [skillsStatus, setSkillsStatus] = useState<"loading" | "ready" | "error">("loading");
-  const mainModel = useMemo<ModelRef>(() => ({
-    providerId: config.activeProviderId,
-    modelId: config.activeModelId,
-  }), [config.activeModelId, config.activeProviderId]);
 
   useEffect(() => {
     const nextPrompts = promptProfilesFromEngine(config.engine);
     setPromptDraft(nextPrompts);
-    setDraft(reconcileTeamPromptAssignments(
-      config.orchestration,
-      nextPrompts.promptProfiles.map((profile) => profile.id),
+    setDraft(fillMissingTeamRoleModels(
+      reconcileTeamPromptAssignments(
+        config.orchestration,
+        nextPrompts.promptProfiles.map((profile) => profile.id),
+      ),
+      config.providers,
+      mainModel,
     ));
     setSaved(false);
   }, [config.engine, config.orchestration]);
+
+  // Provider credentials and model discovery can finish after this panel has
+  // opened. Repair only missing defaults in-place instead of resetting edits.
+  useEffect(() => {
+    setDraft((current) => fillMissingTeamRoleModels(current, config.providers, mainModel));
+  }, [config.providers, mainModel]);
 
   useEffect(() => {
     let alive = true;
@@ -192,9 +207,13 @@ export function TeamSettings({ config, onSaved }: TeamSettingsProps) {
       const next = response.orchestration ? response : { ...response, orchestration: submitted };
       const nextPromptDraft = promptProfilesFromEngine(next.engine ?? submittedEngine);
       setPromptDraft(nextPromptDraft);
-      setDraft(reconcileTeamPromptAssignments(
-        next.orchestration,
-        nextPromptDraft.promptProfiles.map((profile) => profile.id),
+      setDraft(fillMissingTeamRoleModels(
+        reconcileTeamPromptAssignments(
+          next.orchestration,
+          nextPromptDraft.promptProfiles.map((profile) => profile.id),
+        ),
+        next.providers,
+        { providerId: next.activeProviderId, modelId: next.activeModelId },
       ));
       onSaved(next);
       setSaved(true);

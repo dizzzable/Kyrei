@@ -286,7 +286,7 @@ describe("OpenAI-compatible provider discovery", () => {
     expect(request.mock.calls[0]?.[1].pinnedAddress).toMatchObject({ ...pinnedAddress, loopback: true });
   });
 
-  it("requires a temporary opt-in for a trusted HTTPS benchmark-network hostname", async () => {
+  it("allows an explicitly trusted provider endpoint through a Fake-IP proxy without a secondary opt-in", async () => {
     const request = vi.fn(async (_url: URL, options: Record<string, any>) => {
       expect(options.pinnedAddress).toMatchObject({ address: "198.18.0.127", family: 4, loopback: false });
       return response(200, JSON.stringify({ data: [{ id: "benchmark-model" }] }));
@@ -299,12 +299,10 @@ describe("OpenAI-compatible provider discovery", () => {
       request,
     } as const;
 
-    await expect(discoverProviderModels(options)).rejects.toMatchObject({
-      code: "provider_discovery_benchmark_opt_in_required",
-    });
+    await expect(discoverProviderModels(options)).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
     expect(request).not.toHaveBeenCalled();
 
-    await expect(discoverProviderModels({ ...options, allowBenchmarkNetwork: true })).resolves.toEqual([
+    await expect(discoverProviderModels({ ...options, trustedEndpoint: true })).resolves.toEqual([
       { id: "benchmark-model" },
     ]);
     expect(request).toHaveBeenCalledTimes(1);
@@ -319,13 +317,12 @@ describe("OpenAI-compatible provider discovery", () => {
       { address: "198.18.0.127", family: 4 as const },
       { address: "10.0.0.2", family: 4 as const },
     ]],
-  ])("does not widen the discovery SSRF boundary with benchmark opt-in: %s", async (baseURL, resolveHost) => {
+  ])("keeps the standalone discovery SSRF boundary closed: %s", async (baseURL, resolveHost) => {
     const request = vi.fn();
     await expect(discoverProviderModels({
       protocol: "openai-chat",
       baseURL,
       credentials: {},
-      allowBenchmarkNetwork: true,
       ...(resolveHost ? { resolveHost } : {}),
       request,
     })).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
@@ -415,7 +412,7 @@ describe("OpenAI-compatible provider discovery", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it("allows a public HTTP literal IP only with an exact-origin insecure opt-in", async () => {
+  it("allows a public HTTP endpoint after the user explicitly enters it as a provider", async () => {
     const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "public-http-ip" }] })));
     const options = {
       protocol: "openai-chat",
@@ -427,16 +424,12 @@ describe("OpenAI-compatible provider discovery", () => {
     await expect(discoverProviderModels(options)).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
     expect(request).not.toHaveBeenCalled();
 
-    await expect(discoverProviderModels({
-      ...options,
-      allowInsecureHttpOrigins: ["http://93.184.216.34:8080"],
-    })).resolves.toEqual([{ id: "public-http-ip" }]);
+    await expect(discoverProviderModels({ ...options, trustedEndpoint: true }))
+      .resolves.toEqual([{ id: "public-http-ip" }]);
     expect(request).toHaveBeenCalledTimes(1);
 
-    await expect(discoverProviderModels({
-      ...options,
-      allowInsecureHttpOrigins: ["http://93.184.216.34:9090"],
-    })).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
+    await expect(discoverProviderModels({ ...options, trustedEndpoint: false }))
+      .rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
   });
 
   it.each([

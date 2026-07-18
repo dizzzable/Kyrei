@@ -21,7 +21,6 @@ import { cn } from "@/lib/utils";
 import { ModelDiscovery } from "./ModelDiscovery";
 import { secretStorageGuidanceFor } from "./secret-storage-guidance";
 import {
-  consumeBenchmarkNetworkPermission,
   mergeDiscoveredModels,
   providerSupportsModelDiscovery,
   updateProviderDraftEndpoint,
@@ -57,26 +56,6 @@ function discoveryErrorKey(reason: unknown): TranslationKey {
     return DISCOVERY_ERRORS[reason.serverCode];
   }
   return "settings.providers.discovery.failed";
-}
-
-function canUseBenchmarkNetwork(draft: ProviderDraft): boolean {
-  if (draft.protocol !== "openai-chat" && draft.protocol !== "openai-responses") return false;
-  try {
-    const url = new URL(draft.baseURL.trim());
-    const host = url.hostname.replace(/^\[|\]$/g, "");
-    return url.protocol === "https:" && host.includes(".") && !host.includes(":") && !/^\d+(?:\.\d+){3}$/.test(host);
-  } catch {
-    return false;
-  }
-}
-
-function insecureHttpOrigin(draft: ProviderDraft): string | null {
-  try {
-    const url = new URL(draft.baseURL.trim());
-    return url.protocol === "http:" ? url.origin : null;
-  } catch {
-    return null;
-  }
 }
 
 interface ProviderSetupDialogProps {
@@ -121,10 +100,9 @@ export function ProviderSetupDialog({
     setDiscoveryStatus({ kind: "idle" });
     try {
       const models = await onDiscover(draft);
-      onDraftChange(consumeBenchmarkNetworkPermission(mergeDiscoveredModels(draft, models)));
+      onDraftChange(mergeDiscoveredModels(draft, models));
       setDiscoveryStatus({ kind: "success", count: models.length });
     } catch (reason) {
-      onDraftChange(consumeBenchmarkNetworkPermission(draft));
       setDiscoveryStatus({ kind: "error", errorKey: discoveryErrorKey(reason) });
     } finally {
       setDiscovering(false);
@@ -133,8 +111,6 @@ export function ProviderSetupDialog({
 
   const unavailable = saving || discovering;
   const editing = Boolean(draft.editingId);
-  const benchmarkNetworkAvailable = canUseBenchmarkNetwork(draft);
-  const insecureOrigin = insecureHttpOrigin(draft);
   const discoverySupported = providerSupportsModelDiscovery(draft.protocol);
   const storageUnavailable = errorKey === "settings.providers.error.secretStorageUnavailable";
   const desktopPlatform = desktopRuntime.platform();
@@ -200,24 +176,6 @@ export function ProviderSetupDialog({
                 </span>
                 <Switch checked={draft.requiresApiKey} disabled={unavailable} onCheckedChange={(value) => update({ requiresApiKey: value })} aria-label={t("settings.providers.requiresCredentialsShort")} />
               </label>
-              {benchmarkNetworkAvailable ? (
-                <label className="flex items-center justify-between gap-4 rounded-md border border-warning/30 bg-warning/5 px-3 py-2">
-                  <span>
-                    <span className="block text-[11px] font-medium text-secondary">{t("settings.providers.discovery.allowBenchmarkNetwork")}</span>
-                    <span className="mt-0.5 block text-[9.5px] leading-4 text-muted">{t("settings.providers.discovery.allowBenchmarkNetworkHint")}</span>
-                  </span>
-                  <Switch checked={draft.allowBenchmarkNetwork} disabled={unavailable} onCheckedChange={(allowBenchmarkNetwork) => update({ allowBenchmarkNetwork })} aria-label={t("settings.providers.discovery.allowBenchmarkNetwork")} />
-                </label>
-              ) : null}
-              {insecureOrigin ? (
-                <label className="flex items-center justify-between gap-4 rounded-md border border-warning/30 bg-warning/5 px-3 py-2">
-                  <span>
-                    <span className="block text-[11px] font-medium text-secondary">{t("settings.providers.insecureHttp", { origin: insecureOrigin })}</span>
-                    <span className="mt-0.5 block text-[9.5px] leading-4 text-muted">{t("settings.providers.insecureHttpHint")}</span>
-                  </span>
-                  <Switch checked={draft.allowInsecureHttp} disabled={unavailable} onCheckedChange={(allowInsecureHttp) => update({ allowInsecureHttp })} aria-label={t("settings.providers.insecureHttp", { origin: insecureOrigin })} />
-                </label>
-              ) : null}
             </section>
 
             {draft.requiresApiKey ? (

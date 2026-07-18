@@ -27,6 +27,7 @@ import type {
   LocalPostgresRuntimeStatus,
   MemoryIndexRuntimeStatus,
   McpRuntimeStatus,
+  ProjectMcpConfigStatus,
   EffectivePromptPreview,
   SessionMirrorRuntimeStatus,
   SessionMirrorParityResult,
@@ -184,6 +185,10 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [messagingNote, setMessagingNote] = useState<string | null>(null);
   const [mcpStatus, setMcpStatus] = useState<McpRuntimeStatus | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [projectMcpStatus, setProjectMcpStatus] = useState<ProjectMcpConfigStatus | null>(null);
+  const [projectMcpText, setProjectMcpText] = useState("");
+  const [projectMcpBusy, setProjectMcpBusy] = useState(false);
+  const [projectMcpError, setProjectMcpError] = useState(false);
   const [localPostgresStatus, setLocalPostgresStatus] = useState<LocalPostgresRuntimeStatus | null>(null);
 
   useEffect(() => {
@@ -421,6 +426,57 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
   }, [flushEngineSave]);
 
+  const checkProjectMcp = useCallback(async () => {
+    setProjectMcpBusy(true);
+    setProjectMcpError(false);
+    try {
+      const status = await gateway.getProjectMcpConfig();
+      setProjectMcpStatus(status);
+      setProjectMcpText(JSON.stringify(status.config, null, 2));
+    } catch {
+      setProjectMcpError(true);
+    } finally {
+      setProjectMcpBusy(false);
+    }
+  }, []);
+
+  const saveProjectMcp = useCallback(async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(projectMcpText || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid");
+    } catch {
+      setProjectMcpError(true);
+      return;
+    }
+    setProjectMcpBusy(true);
+    setProjectMcpError(false);
+    try {
+      const status = await gateway.saveProjectMcpConfig(parsed as ProjectMcpConfigStatus["config"]);
+      setProjectMcpStatus(status);
+      setProjectMcpText(JSON.stringify(status.config, null, 2));
+      await checkMcp();
+    } catch {
+      setProjectMcpError(true);
+    } finally {
+      setProjectMcpBusy(false);
+    }
+  }, [checkMcp, projectMcpText]);
+
+  const setProjectMcpTrust = useCallback(async (trusted: boolean) => {
+    setProjectMcpBusy(true);
+    setProjectMcpError(false);
+    try {
+      const status = await gateway.setProjectMcpTrust(trusted);
+      setProjectMcpStatus(status);
+      await checkMcp();
+    } catch {
+      setProjectMcpError(true);
+    } finally {
+      setProjectMcpBusy(false);
+    }
+  }, [checkMcp]);
+
   const checkLocalPostgres = useCallback(async () => {
     try {
       setLocalPostgresStatus(await gateway.getLocalPostgresStatus());
@@ -572,12 +628,13 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       void checkMemoryIndex();
       void checkSessionMirror();
       void checkMcp();
+      void checkProjectMcp();
       void checkLocalPostgres();
     }
     if (visibleSection === "notifications") {
       void checkMessaging();
     }
-  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMcp, checkLocalPostgres, checkMessaging, visibleSection]);
+  }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMcp, checkProjectMcp, checkLocalPostgres, checkMessaging, visibleSection]);
 
   useEffect(() => {
     if (visibleSection !== "memory" || sessionMirrorStatus?.sync?.state !== "running") return;
@@ -1677,6 +1734,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                                 <p key={server.id} className="mt-0.5 text-[11px] text-muted">
                                   <span className={server.ok ? "text-success" : "text-warning"}>{server.ok ? "●" : "●"}</span>{" "}
                                   <span className="font-mono">{server.id}</span>{" "}
+                                  {server.source && <span>{t(`settings.mcp.status.scope.${server.source}`)} · </span>}
                                   {server.ok
                                     ? t("settings.mcp.status.tools", { count: server.toolCount })
                                     : server.error ?? t("settings.mcp.status.failed")}
@@ -1689,6 +1747,76 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           </div>
                         </>
                       )}
+                      <Field label={t("settings.mcp.project.label")} hint={t("settings.mcp.project.hint")} stacked>
+                        <div className="rounded-md border border-border-soft bg-surface/55 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-[12px] font-medium text-foreground">
+                                {projectMcpError
+                                  ? t("settings.mcp.project.status.error")
+                                  : !projectMcpStatus
+                                    ? t("settings.mcp.project.status.loading")
+                                    : !projectMcpStatus.workspace
+                                      ? t("settings.mcp.project.status.noWorkspace")
+                                      : !projectMcpStatus.exists
+                                        ? t("settings.mcp.project.status.missing")
+                                        : !projectMcpStatus.valid
+                                          ? t("settings.mcp.project.status.invalid")
+                                          : projectMcpStatus.trusted && projectMcpStatus.config.enabled
+                                            ? t("settings.mcp.project.status.active")
+                                            : projectMcpStatus.trusted
+                                              ? t("settings.mcp.project.status.disabled")
+                                              : t("settings.mcp.project.status.review")}
+                              </p>
+                              {projectMcpStatus?.workspace && (
+                                <p className="mt-0.5 font-mono text-[10px] text-muted">{projectMcpStatus.path}</p>
+                              )}
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              <Button variant="outline" size="sm" onClick={() => void checkProjectMcp()} disabled={projectMcpBusy}>
+                                {t("settings.mcp.project.refresh")}
+                              </Button>
+                              {projectMcpStatus?.exists && projectMcpStatus.valid && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => void setProjectMcpTrust(!projectMcpStatus.trusted)}
+                                  disabled={projectMcpBusy}
+                                >
+                                  {projectMcpStatus.trusted ? t("settings.mcp.project.untrust") : t("settings.mcp.project.trust")}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                          {projectMcpStatus?.workspace && (
+                            <>
+                              <textarea
+                                value={projectMcpText}
+                                onChange={(event) => { setProjectMcpText(event.target.value); setProjectMcpError(false); }}
+                                spellCheck={false}
+                                rows={7}
+                                aria-label={t("settings.mcp.project.label")}
+                                className="mt-3 w-full resize-y rounded-md border border-border bg-bg px-3 py-2 font-mono text-[11px] text-foreground outline-none focus:border-primary"
+                              />
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {!projectMcpStatus.exists && (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => setProjectMcpText(JSON.stringify({ version: 1, enabled: true, servers: [] }, null, 2))}
+                                  >
+                                    {t("settings.mcp.project.create")}
+                                  </Button>
+                                )}
+                                <Button type="button" size="sm" onClick={() => void saveProjectMcp()} disabled={projectMcpBusy}>
+                                  {projectMcpBusy ? t("settings.mcp.project.saving") : t("settings.mcp.project.save")}
+                                </Button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </Field>
                     </div>
                   </section>
                   <section>

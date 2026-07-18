@@ -2,6 +2,7 @@ import { ArrowLeftRight, Keyboard, PanelLeft, PanelRight, Settings } from "lucid
 import { useEffect } from "react";
 
 import { useI18n } from "@/i18n";
+import { cssColorToHex } from "@/lib/window-theme";
 import { cn } from "@/lib/utils";
 
 interface TitlebarProps {
@@ -29,6 +30,31 @@ export function Titlebar({
   onOpenKeybinds,
 }: TitlebarProps) {
   const { t } = useI18n();
+
+  useEffect(() => {
+    const setWindowTheme = window.kyrei?.appearance?.setWindowTheme;
+    if (!setWindowTheme || typeof document === "undefined") return;
+    const root = document.documentElement;
+    const resolveThemeColor = (variable: "--k-surface" | "--k-secondary") => {
+      const probe = document.createElement("span");
+      probe.style.cssText = `position:fixed;visibility:hidden;pointer-events:none;color:var(${variable});`;
+      root.append(probe);
+      try {
+        return cssColorToHex(getComputedStyle(probe).color);
+      } finally {
+        probe.remove();
+      }
+    };
+    const sync = () => {
+      const color = resolveThemeColor("--k-surface");
+      const symbolColor = resolveThemeColor("--k-secondary");
+      if (color && symbolColor) void setWindowTheme({ color, symbolColor }).catch(() => undefined);
+    };
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "style"] });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;

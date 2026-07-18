@@ -75,7 +75,7 @@ describe("capacity-router", () => {
     });
   });
 
-  it("keeps explicit transport timeout fields and lets 0 disable them", () => {
+  it("keeps explicit current transport timeout fields and ignores the legacy hard cutoff", () => {
     expect(normalizeCapacityConfig({
       subscriptionShield: {
         connectTimeoutMs: 0,
@@ -95,6 +95,12 @@ describe("capacity-router", () => {
     }).subscriptionShield).toMatchObject({
       headerTimeoutMs: 12_000,
       inactivityTimeoutMs: 18_000,
+    });
+    expect(normalizeCapacityConfig({
+      subscriptionShield: { connectTimeoutMs: 30_000 },
+    }).subscriptionShield).toMatchObject({
+      headerTimeoutMs: 0,
+      connectTimeoutMs: 0,
     });
   });
 });

@@ -100,8 +100,16 @@ function defaultFetch(urlString: string, init: Parameters<FetchLike>[1], pinnedA
   const transport = url.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     const lookup = pinnedAddress
-      ? (_hostname: string, _options: unknown, callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void) =>
-        callback(null, pinnedAddress.address, pinnedAddress.family)
+      ? (_hostname: string, options: { all?: boolean } | undefined, callback: (...args: unknown[]) => void) => {
+        // Node 24 enables `all: true` for connection-family selection. Returning
+        // the old scalar shape in that mode produces "Invalid IP address:
+        // undefined" before the request leaves the machine.
+        if (options?.all) {
+          callback(null, [{ address: pinnedAddress.address, family: pinnedAddress.family }]);
+          return;
+        }
+        callback(null, pinnedAddress.address, pinnedAddress.family);
+      }
       : undefined;
     const request = transport(url, {
       method: init.method,
@@ -156,6 +164,29 @@ function isPrivateIpv4(address: string): boolean {
     (a === 198 && (b === 18 || b === 19)) ||
     a >= 224
   );
+}
+
+/**
+ * 198.18.0.0/15 is reserved for benchmarking, not a routable private LAN.
+ * DNS proxy/TUN clients (for example Fake-IP modes) map public hostnames to
+ * this range and route by the original TLS SNI/Host. A hostname-only target
+ * whose every answer is in this range can use that local egress route without
+ * widening access to loopback, RFC1918, link-local, or metadata networks.
+ */
+function isBenchmarkIpv4(address: string): boolean {
+  const parts = address.split(".").map(Number);
+  return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    && parts[0] === 198 && (parts[1] === 18 || parts[1] === 19);
+}
+
+function isBenchmarkAddress(address: string): boolean {
+  const normalized = address.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  const family = isIP(normalized);
+  if (family === 4) return isBenchmarkIpv4(normalized);
+  if (family !== 6) return false;
+  const words = parseIpv6Words(normalized);
+  const embeddedIpv4 = words ? mappedIpv4(words) : null;
+  return embeddedIpv4 !== null && isBenchmarkIpv4(embeddedIpv4);
 }
 
 /** Return the 8 network-order IPv6 words, including embedded IPv4 syntax. */
@@ -250,7 +281,13 @@ async function resolvePublicWebTarget(raw: string, resolveHost: HostResolver = d
     throw new Error("web hostname could not be resolved");
   }
   if (!addresses.length) throw new Error("web hostname has no public address");
-  if (addresses.some((entry) => isPrivateAddress(entry.address))) throw new Error("web URL resolves to a private network");
+  const fakeIpProxyRoute = addresses.every((entry) => isBenchmarkAddress(entry.address));
+  // Allow Fake-IP/TUN DNS mappings only for a hostname, never for a literal
+  // IP. Mixed DNS answers remain blocked: that keeps DNS-rebinding and every
+  // genuine private target on the deny path.
+  if (!fakeIpProxyRoute && addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error("web URL resolves to a private network");
+  }
   return { url, pinnedAddress: addresses[0]! };
 }
 

@@ -10,6 +10,8 @@ import { redact } from "../security/secrets.js";
 
 export interface McpManagerOptions {
   config: McpConfig;
+  /** Workspace-owned default for stdio servers that do not define a cwd. */
+  workspace?: string;
   sensitiveValues?: readonly string[];
   createClient?: (server: McpServerConfig, timeoutMs: number) => McpClient;
 }
@@ -35,6 +37,7 @@ export function normalizeMcpConfig(raw: Partial<McpConfig> | undefined): McpConf
     if (!id || seen.has(id)) continue;
     if (s.enabled === false) continue;
     seen.add(id);
+    const source = s.source === "project" ? "project" : s.source === "global" ? "global" : undefined;
     const requestedTransport = typeof s.transport === "string" ? s.transport.trim().toLowerCase() : "stdio";
     if (requestedTransport === "streamable-http") {
       const url = typeof s.url === "string" ? s.url.trim() : "";
@@ -51,6 +54,7 @@ export function normalizeMcpConfig(raw: Partial<McpConfig> | undefined): McpConf
             ...(s.headers && typeof s.headers === "object" && !Array.isArray(s.headers)
               ? { headers: Object.fromEntries(Object.entries(s.headers).filter(([k, v]) => typeof k === "string" && typeof v === "string").slice(0, 32)) }
               : {}),
+            ...(source ? { source } : {}),
             enabled: true,
           }
         : { id, transport: "unsupported", configuredTransport: requestedTransport, reason: "mcp_url_invalid", enabled: true });
@@ -71,6 +75,7 @@ export function normalizeMcpConfig(raw: Partial<McpConfig> | undefined): McpConf
             ? { env: Object.fromEntries(Object.entries(s.env).filter(([k, v]) => typeof k === "string" && typeof v === "string").slice(0, 64)) }
             : {}),
           ...(typeof s.cwd === "string" && s.cwd.trim() ? { cwd: s.cwd.trim() } : {}),
+          ...(source ? { source } : {}),
           enabled: true,
         }
       : { id, transport: "unsupported", configuredTransport: "stdio", reason: "mcp_command_required", enabled: true });
@@ -82,11 +87,25 @@ export function normalizeMcpConfig(raw: Partial<McpConfig> | undefined): McpConf
     maxServers: Math.min(16, Math.max(1, raw?.maxServers ?? base.maxServers)),
     maxToolsPerServer: Math.min(200, Math.max(1, raw?.maxToolsPerServer ?? base.maxToolsPerServer)),
     maxResultChars: Math.min(200_000, Math.max(1_000, raw?.maxResultChars ?? base.maxResultChars)),
+    ...(Array.isArray(raw?.projectTrust)
+      ? { projectTrust: raw.projectTrust.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).slice(0, 128) }
+      : {}),
   };
 }
 
 export function createMcpManager(options: McpManagerOptions) {
-  const config = normalizeMcpConfig(options.config);
+  const normalized = normalizeMcpConfig(options.config);
+  const workspace = typeof options.workspace === "string" ? options.workspace.trim() : "";
+  const config: McpConfig = workspace
+    ? {
+        ...normalized,
+        servers: normalized.servers.map((server) => (
+          server.transport === "stdio" && !server.cwd
+            ? { ...server, cwd: workspace }
+            : server
+        )),
+      }
+    : normalized;
   const clients = new Map<string, McpClient>();
   const create =
     options.createClient
@@ -139,6 +158,7 @@ export function createMcpManager(options: McpManagerOptions) {
     id: string;
     command: string;
     transport: "stdio" | "streamable-http" | "unsupported";
+    source?: "global" | "project";
     ok: boolean;
     toolCount: number;
     error?: string;
@@ -148,12 +168,20 @@ export function createMcpManager(options: McpManagerOptions) {
     for (const server of config.servers) {
       try {
         const tools = await getClient(server.id).listTools();
-        out.push({ id: server.id, command: server.command ?? server.url ?? "", transport: server.transport ?? "stdio", ok: true, toolCount: tools.length });
+        out.push({
+          id: server.id,
+          command: server.command ?? server.url ?? "",
+          transport: server.transport ?? "stdio",
+          ...(server.source ? { source: server.source } : {}),
+          ok: true,
+          toolCount: tools.length,
+        });
       } catch (error) {
         out.push({
           id: server.id,
           command: server.command ?? server.url ?? "",
           transport: server.transport ?? "stdio",
+          ...(server.source ? { source: server.source } : {}),
           ok: false,
           toolCount: 0,
           error: (error as Error).message,

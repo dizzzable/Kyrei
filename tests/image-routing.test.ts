@@ -28,6 +28,7 @@ describe("image routing (Hermes image_input_mode)", () => {
     expect(modelSupportsImageInput({ supportsVision: true })).toBe(true);
     expect(modelSupportsImageInput({ modalities: { input: ["text", "image"] } })).toBe(true);
     expect(modelSupportsImageInput({ capabilities: { inputModalities: ["image"] } })).toBe(true);
+    expect(modelSupportsImageInput({ capabilities: { modalities: { input: ["text", "image"] } } })).toBe(true);
     expect(modelSupportsImageInput({ id: "gpt-text" })).toBe(false);
   });
 });

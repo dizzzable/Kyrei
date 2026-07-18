@@ -30,12 +30,15 @@ export interface GatewayMirrorSession {
   /** Soft-archive: messages stay searchable; UI hides from main list. */
   archived?: boolean;
   archivedAt?: string;
-  /** User fork lineage (chat branch). */
+  /** User-created chat lineage (full-history branch or compact continuation). */
   parentSessionId?: string;
   rootSessionId?: string;
   forkedFromMessageId?: string;
   forkedAt?: string;
-  lineageKind?: "branch";
+  lineageKind?: "branch" | "continuation";
+  continuationSourceSessionId?: string;
+  continuationPacketVersion?: 1;
+  continuationCreatedAt?: string;
 }
 
 export interface GatewayMirrorMessage {
@@ -189,9 +192,18 @@ export function createSessionMirror(opts: SessionMirrorOptions) {
         ...(typeof session.forkedAt === "string" && session.forkedAt
           ? { forkedAt: session.forkedAt }
           : { forkedAt: undefined }),
-        ...(session.lineageKind === "branch"
-          ? { lineageKind: "branch" }
+        ...(session.lineageKind === "branch" || session.lineageKind === "continuation"
+          ? { lineageKind: session.lineageKind }
           : { lineageKind: undefined }),
+        ...(typeof session.continuationSourceSessionId === "string" && session.continuationSourceSessionId
+          ? { continuationSourceSessionId: session.continuationSourceSessionId }
+          : { continuationSourceSessionId: undefined }),
+        ...(session.continuationPacketVersion === 1
+          ? { continuationPacketVersion: 1 as const }
+          : { continuationPacketVersion: undefined }),
+        ...(typeof session.continuationCreatedAt === "string" && session.continuationCreatedAt
+          ? { continuationCreatedAt: session.continuationCreatedAt }
+          : { continuationCreatedAt: undefined }),
       },
     };
     if (existing) {

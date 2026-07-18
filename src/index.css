@@ -499,21 +499,37 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 .statusbar { height: var(--app-statusbar-h); min-height: var(--app-statusbar-h); background: var(--k-bg); }
 
 @keyframes kyrei-update-glint {
-  0%, 58% { transform: translateX(-180%) skewX(-18deg); opacity: 0; }
-  64% { opacity: 0.7; }
-  82%, 100% { transform: translateX(420%) skewX(-18deg); opacity: 0; }
+  0%, 22% { transform: translateX(-180%) skewX(-18deg); opacity: 0; }
+  31% { opacity: 0.78; }
+  46%, 100% { transform: translateX(420%) skewX(-18deg); opacity: 0; }
 }
 @keyframes kyrei-update-sparkle {
-  0%, 68%, 100% { transform: scale(1) rotate(0deg); filter: brightness(1); }
-  74% { transform: scale(1.18) rotate(10deg); filter: brightness(1.45); }
-  80% { transform: scale(0.96) rotate(-4deg); filter: brightness(1.1); }
+  0%, 38%, 100% { transform: scale(1) rotate(0deg); filter: brightness(1); }
+  44% { transform: scale(1.16) rotate(9deg); filter: brightness(1.5); }
+  50% { transform: scale(0.97) rotate(-4deg); filter: brightness(1.12); }
+}
+@keyframes kyrei-update-breathe {
+  0%, 100% {
+    background: color-mix(in srgb, var(--k-primary) 7%, transparent);
+    box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--k-primary) 28%, transparent), 0 0 0 transparent;
+  }
+  50% {
+    background: color-mix(in srgb, var(--k-primary) 12%, transparent);
+    box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--k-primary) 46%, transparent), 0 0 10px color-mix(in srgb, var(--k-primary) 20%, transparent);
+  }
+}
+@keyframes kyrei-update-notice-in {
+  from { opacity: 0; transform: translateY(5px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .status-update-attention {
   position: relative;
+  isolation: isolate;
   overflow: hidden;
   color: var(--k-primary);
   background: color-mix(in srgb, var(--k-primary) 7%, transparent);
   box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--k-primary) 28%, transparent);
+  animation: kyrei-update-breathe 2.8s ease-in-out infinite;
 }
 .status-update-attention::after {
   position: absolute;
@@ -523,10 +539,40 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
   content: "";
   pointer-events: none;
   background: linear-gradient(90deg, transparent, color-mix(in srgb, white 68%, transparent), transparent);
-  animation: kyrei-update-glint 3.4s ease-in-out infinite;
+  animation: kyrei-update-glint 3.2s ease-in-out infinite;
+  will-change: transform, opacity;
 }
-.status-update-attention > svg { animation: kyrei-update-sparkle 3.4s ease-in-out infinite; }
+.status-update-attention > * { position: relative; z-index: 1; }
+.status-update-attention > svg { animation: kyrei-update-sparkle 3.2s ease-in-out infinite; }
 .status-update-version { color: color-mix(in srgb, var(--k-primary) 72%, var(--k-foreground)); }
+.status-update-notice {
+  position: fixed;
+  right: 12px;
+  bottom: calc(var(--app-statusbar-h) + 10px);
+  z-index: 70;
+  display: inline-flex;
+  max-width: min(21rem, calc(100vw - 24px));
+  align-items: center;
+  gap: 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--k-primary) 38%, var(--k-border));
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  color: var(--k-foreground);
+  background: color-mix(in srgb, var(--k-elevated) 93%, var(--k-primary));
+  box-shadow: 0 8px 28px color-mix(in srgb, black 32%, transparent), inset 0 1px 0 color-mix(in srgb, white 8%, transparent);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.25;
+  cursor: pointer;
+  animation: kyrei-update-notice-in 180ms ease-out both;
+}
+.status-update-notice:hover {
+  border-color: color-mix(in srgb, var(--k-primary) 62%, var(--k-border));
+  background: color-mix(in srgb, var(--k-elevated) 86%, var(--k-primary));
+}
+.status-update-notice:focus-visible { outline: 1px solid var(--k-primary); outline-offset: 2px; }
+.status-update-notice > svg { color: var(--k-primary); }
+.status-update-notice-action { display: block; margin-top: 2px; color: var(--k-primary); font-size: 10px; }
 
 @media (max-width: 960px) {
   .shell-layout { display: block; }
@@ -589,7 +635,7 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 
 @media (prefers-reduced-motion: reduce) {
   .msg-in, .animate-fade, [data-radix-popper-content-wrapper] > *,
-  .status-update-attention::after, .status-update-attention > svg { animation: none; }
+  .status-update-attention, .status-update-attention::after, .status-update-attention > svg, .status-update-notice { animation: none; }
 }
 
 .memory-atlas-grid {

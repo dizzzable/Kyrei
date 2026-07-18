@@ -7,6 +7,7 @@ import {
   parseLatestReleasePayload,
   releaseTagUrl,
   shouldHighlightUpdate,
+  updateAttentionKey,
 } from "./app-update";
 
 describe("normalizeVersion / compareSemver", () => {
@@ -115,5 +116,14 @@ describe("shouldHighlightUpdate", () => {
     expect(shouldHighlightUpdate("checking")).toBe(false);
     expect(shouldHighlightUpdate("error")).toBe(false);
     expect(shouldHighlightUpdate(undefined)).toBe(false);
+  });
+});
+
+describe("updateAttentionKey", () => {
+  it("notifies once per actionable update state and normalized version", () => {
+    expect(updateAttentionKey("available", "v0.7.1")).toBe("available:0.7.1");
+    expect(updateAttentionKey("downloaded", "0.7.1")).toBe("downloaded:0.7.1");
+    expect(updateAttentionKey("checking", "0.7.1")).toBeUndefined();
+    expect(updateAttentionKey("available", "not-a-version")).toBeUndefined();
   });
 });

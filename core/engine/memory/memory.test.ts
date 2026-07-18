@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HandoffSchema, writeHandoff, reseedFromHandoff, type HandoffArtifact } from "./handoff.js";
+import { HandoffSchema, extractHeuristicHandoff, writeHandoff, reseedFromHandoff, type HandoffArtifact } from "./handoff.js";
 import { assembleSystemContext } from "./layers.js";
 import { assertWritable, writeMemory } from "./writer.js";
 import { withFileLock } from "./lock.js";
@@ -34,18 +34,46 @@ describe("handoff", () => {
     expect(seed).toContain("написать тесты");
     expect(seed).toContain("src/x.ts");
   });
+
+  it("records only completed write/edit receipts that use the AI SDK input shape", () => {
+    const handoff = extractHeuristicHandoff([
+      { role: "user", content: "continue the implementation" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "write-1", toolName: "write_file", input: { path: "src/new.ts" } }],
+      },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "write-1", output: "ok" }] },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "edit-1", toolName: "edit_file", input: { patch: [{ file: "src/blocked.ts" }] } }],
+      },
+      { role: "tool", content: [{ type: "tool-error", toolCallId: "edit-1", error: "permission denied" }] },
+    ] as never, "session-1", "window_limit");
+
+    expect(handoff.keyFiles).toEqual([{ path: "src/new.ts", why: "created" }]);
+    expect(handoff.done).toContain("Created: src/new.ts (completed Kyrei tool receipt)");
+    expect(handoff.openQuestions).toContain("Recent tool failure: permission denied");
+  });
 });
 
 describe("layers precedence", () => {
   it("assembles AGENTS.md + steering + MEMORY.md in order", async () => {
     await writeFile(join(ws, "AGENTS.md"), "правило проекта", "utf8");
-    await mkdir(join(ws, ".kiro", "steering"), { recursive: true });
-    await writeFile(join(ws, ".kiro", "steering", "a.md"), "steering-правило", "utf8");
+    await mkdir(join(ws, ".kyrei", "steering"), { recursive: true });
+    await writeFile(join(ws, ".kyrei", "steering", "a.md"), "steering-правило", "utf8");
     await mkdir(join(ws, ".kyrei", "memory"), { recursive: true });
     await writeFile(join(ws, ".kyrei", "memory", "MEMORY.md"), "память проекта", "utf8");
     const ctx = await assembleSystemContext({ workspace: ws });
     expect(ctx.indexOf("AGENTS.md")).toBeLessThan(ctx.indexOf("MEMORY.md"));
     expect(ctx).toContain("steering-правило");
+  });
+  it("does not import a neighbouring Kiro steering directory as Kyrei policy", async () => {
+    await mkdir(join(ws, ".kiro", "steering"), { recursive: true });
+    await writeFile(join(ws, ".kiro", "steering", "foreign.md"), "foreign-kiro-rule", "utf8");
+
+    const ctx = await assembleSystemContext({ workspace: ws });
+
+    expect(ctx).not.toContain("foreign-kiro-rule");
   });
   it("does not elevate a workspace project index into system instructions", async () => {
     await mkdir(join(ws, ".kyrei", "memory"), { recursive: true });

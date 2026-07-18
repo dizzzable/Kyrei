@@ -19,7 +19,7 @@ import {
  * on-disk format can evolve without breaking older installs.
  */
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const MESSAGE_ID_RE = /^msg-[a-zA-Z0-9_-]{8,80}$/;
 const LEGACY_HEAL_HANDOFF_MARKER = "KYREI_FAILURE_HANDOFF";
 
@@ -204,6 +204,9 @@ function normalizeSessionRecord(value) {
     forkedFromMessageId: rawForkMsg,
     forkedAt: rawForkedAt,
     lineageKind: rawLineageKind,
+    continuationSourceSessionId: rawContinuationSource,
+    continuationPacketVersion: rawContinuationPacketVersion,
+    continuationCreatedAt: rawContinuationCreatedAt,
     codingMode: rawCodingMode,
     ...rest
   } = source;
@@ -230,7 +233,15 @@ function normalizeSessionRecord(value) {
   const forkedAt = typeof rawForkedAt === "string" && Number.isFinite(Date.parse(rawForkedAt))
     ? rawForkedAt
     : undefined;
-  const lineageKind = rawLineageKind === "branch" ? "branch" : undefined;
+  const lineageKind = rawLineageKind === "branch" || rawLineageKind === "continuation"
+    ? rawLineageKind
+    : undefined;
+  const continuationSourceSessionId = boundedSessionId(rawContinuationSource);
+  const continuationPacketVersion = Number(rawContinuationPacketVersion) === 1 ? 1 : undefined;
+  const continuationCreatedAt = typeof rawContinuationCreatedAt === "string"
+    && Number.isFinite(Date.parse(rawContinuationCreatedAt))
+    ? rawContinuationCreatedAt
+    : undefined;
   // Drop stale archive/lineage fields from rest so clears work.
   const {
     archived: _a,
@@ -240,6 +251,9 @@ function normalizeSessionRecord(value) {
     forkedFromMessageId: _f,
     forkedAt: _fa,
     lineageKind: _lk,
+    continuationSourceSessionId: _cs,
+    continuationPacketVersion: _cpv,
+    continuationCreatedAt: _cca,
     codingMode: _cm,
     ...cleanRest
   } = rest;
@@ -262,13 +276,16 @@ function normalizeSessionRecord(value) {
     ...(forkedFromMessageId ? { forkedFromMessageId } : {}),
     ...(forkedAt ? { forkedAt } : {}),
     ...(lineageKind ? { lineageKind } : {}),
+    ...(continuationSourceSessionId ? { continuationSourceSessionId } : {}),
+    ...(continuationPacketVersion ? { continuationPacketVersion } : {}),
+    ...(continuationCreatedAt ? { continuationCreatedAt } : {}),
     ...(codingMode ? { codingMode } : {}),
   };
 }
 const LEGACY_UNTITLED_TITLES = new Set(["Новый диалог", "New chat", "New session"]);
 
 export class SessionStore {
-  constructor({ runtimeDir, maxMessages = 500 } = {}) {
+  constructor({ runtimeDir, maxMessages = Infinity } = {}) {
     this.runtimeDir = runtimeDir;
     this.file = join(runtimeDir, "state.json");
     this.maxMessages = maxMessages;
@@ -469,6 +486,50 @@ export class SessionStore {
     return { session: child, messageCount: this.getMessages(newId).length };
   }
 
+  /**
+   * Start a clean window for the same task. Unlike a fork this never duplicates
+   * parent messages; the gateway attaches a bounded continuation packet when
+   * the new session calls a model.
+   */
+  createContinuation(parentId, opts = {}) {
+    const parent = this.getSession(parentId);
+    if (!parent) return null;
+    const newId = typeof opts.newId === "string" && opts.newId.trim()
+      ? opts.newId.trim()
+      : `sess-${Date.now()}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    if (this.getSession(newId)) {
+      const err = new Error("continuation_id_exists");
+      err.code = "continuation_id_exists";
+      throw err;
+    }
+    const now = new Date().toISOString();
+    const child = this.upsertSession({
+      id: newId,
+      title: typeof opts.title === "string" && opts.title.trim()
+        ? opts.title.trim().slice(0, 200)
+        : typeof parent.title === "string" ? parent.title.slice(0, 200) : "",
+      source: parent.source === "cron" || parent.source === "import" || parent.source === "messaging"
+        ? parent.source
+        : "chat",
+      createdAt: now,
+      updatedAt: now,
+      ...(parent.providerId ? { providerId: parent.providerId } : {}),
+      ...(parent.modelId ? { modelId: parent.modelId } : {}),
+      ...(parent.providerAccountId ? { providerAccountId: parent.providerAccountId } : {}),
+      ...(parent.codingMode ? { codingMode: parent.codingMode } : {}),
+      archived: false,
+      parentSessionId: parent.id,
+      rootSessionId: parent.rootSessionId || parent.id,
+      lineageKind: "continuation",
+      continuationSourceSessionId: parent.id,
+      continuationPacketVersion: 1,
+      continuationCreatedAt: now,
+    });
+    this.state.messages[newId] = [];
+    this.touch();
+    return { session: child, messageCount: 0 };
+  }
+
   appendMessage(sessionId, message) {
     const list = this.state.messages[sessionId] ?? (this.state.messages[sessionId] = []);
     const requestedId = isSessionMessageId(message?.id)
@@ -487,7 +548,9 @@ export class SessionStore {
         : {}),
     };
     list.push(stored);
-    if (list.length > this.maxMessages) list.splice(0, list.length - this.maxMessages);
+    if (Number.isFinite(this.maxMessages) && this.maxMessages >= 1 && list.length > this.maxMessages) {
+      list.splice(0, list.length - this.maxMessages);
+    }
     this.touch();
     return stored;
   }

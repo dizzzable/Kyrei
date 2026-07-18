@@ -117,6 +117,41 @@ describe("desktop IPC", () => {
     await registration.dispose();
   });
 
+  it("applies only validated renderer theme colours to its own window overlay", async () => {
+    const ipcMain = new FakeIpcMain();
+    const owner = {
+      isDestroyed: () => false,
+      setTitleBarOverlay: vi.fn(),
+      setBackgroundColor: vi.fn(),
+    };
+    const registration = registerDesktopIpc({
+      ipcMain,
+      dialog: { showOpenDialog: vi.fn() },
+      getWindow: () => owner,
+      defaultCwd: "C:\\Users\\example",
+      terminalManager: {
+        onEvent: () => () => {},
+        closeAll: vi.fn(),
+        closeRenderer: vi.fn(),
+        list: vi.fn(),
+        createManual: vi.fn(),
+        runAgentCommand: vi.fn(),
+        write: vi.fn(),
+        rename: vi.fn(),
+        close: vi.fn(),
+      },
+    });
+    const sender = new FakeSender(18);
+    const setTheme = ipcMain.handlers.get(DESKTOP_CHANNELS.windowTheme)!;
+
+    await expect(setTheme({ sender }, { color: "#171d26", symbolColor: "#dde4ec" })).resolves.toBe(true);
+    expect(owner.setTitleBarOverlay).toHaveBeenCalledWith({ color: "#171d26", symbolColor: "#dde4ec", height: 34 });
+    expect(owner.setBackgroundColor).toHaveBeenCalledWith("#171d26");
+    await expect(setTheme({ sender }, { color: "rgb(0,0,0)", symbolColor: "#ffffff" }))
+      .rejects.toThrow("window_theme_color_invalid");
+    await registration.dispose();
+  });
+
   it("exposes update check/download/install through desktop IPC", async () => {
     const ipcMain = new FakeIpcMain();
     const appUpdater = {
