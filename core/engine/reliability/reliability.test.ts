@@ -254,8 +254,8 @@ describe("toolOutcomesFromSteps / shouldHealHandoff", () => {
   });
 });
 
-describe("heal handoff stop condition", () => {
-  it("stops after three consecutive hard tool-errors", async () => {
+describe("heal recovery pass boundary", () => {
+  it("ends the failed pass after three consecutive hard tool-errors", async () => {
     const reasons: string[] = [];
     const conditions = buildStopWhen(
       { ...DEFAULT_ENGINE_CONFIG, reliability: { goalVerify: true, healHandoff: true } },

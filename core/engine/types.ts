@@ -107,7 +107,7 @@ export type TurnStatus =
   | "goal_unsatisfied"
   /** Budget guard (tokens/cost/subagents) ended the loop. */
   | "budget_exceeded"
-  /** Self-heal FSM exhausted retries; distilled handoff written for human/fresh window. */
+  /** One bounded pass exhausted self-heal; the outer engine continues in a fresh recovery pass. */
   | "heal_handoff";
 
 /** Kiro-style execution mode: review workflow for file mutations (not shell scope). */
@@ -313,15 +313,15 @@ export interface CompressionConfig {
 }
 
 /**
- * Hermes-style tool-loop guardrails (repeated identical calls + heal handoff).
+ * Hermes-style tool-loop guardrails (repeated identical calls + clean recovery checkpoint).
  * Maps to Hermes `tool_loop_guardrails.*`.
  */
 export interface ToolLoopConfig {
-  /** Stop when the last N tool signatures are identical (idempotent no-progress). */
+  /** End the current pass when the last N tool signatures are identical. */
   repeatedCallThreshold: number;
-  /** When false, skip the repeated-call hard stop (heal handoff may still run). */
+  /** When false, skip the repeated-call pass boundary (failure recovery may still run). */
   hardStopEnabled: boolean;
-  /** Consecutive hard tool-errors before heal_handoff (self-heal FSM length). */
+  /** Consecutive hard tool-errors before a fresh recovery pass (self-heal FSM length). */
   healAfterFailures: number;
 }
 
@@ -513,10 +513,7 @@ export interface EngineConfig {
    */
   reliability: {
     goalVerify: boolean;
-    /**
-     * Stop the tool loop after consecutive hard tool failures (self-heal FSM)
-     * and write a distilled handoff for human / clean-window resume.
-     */
+    /** End the failed pass, write a checkpoint, and continue in a clean recovery pass. */
     healHandoff: boolean;
     maxTokens?: number;
     maxCostUsd?: number;
@@ -1097,7 +1094,7 @@ export interface RunKyreiChatResult {
     /** Judge infrastructure failed; no semantic completion verdict was applied. */
     unavailable?: boolean;
   };
-  /** Path to distilled handoff when self-heal FSM stopped the turn. */
+  /** Private checkpoint path when self-heal ended one bounded pass. */
   healHandoffPath?: string;
   /** Present when supervised mode requires accept/reject of file edits. */
   fileReview?: FileReviewState;

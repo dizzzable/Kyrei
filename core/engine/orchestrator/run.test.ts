@@ -614,6 +614,168 @@ describe("runKyreiChat project context wiring", () => {
     expect(toPartsMock).toHaveBeenCalledWith(responseMessages, bridged);
   });
 
+  it.each(["max_steps", "heal_handoff", "goal_unsatisfied"] as const)(
+    "continues the same turn after the internal %s checkpoint",
+    async (checkpointStatus) => {
+      const firstResponse = [
+        { role: "assistant", content: [{ type: "text", text: "partial " }] },
+      ];
+      const secondResponse = [
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+      ];
+      streamTextMock
+        .mockReturnValueOnce({
+          stream: (async function* () {})(),
+          responseMessages: Promise.resolve(firstResponse),
+        })
+        .mockReturnValueOnce({
+          stream: (async function* () {})(),
+          responseMessages: Promise.resolve(secondResponse),
+        });
+      toPartsMock
+        .mockReturnValueOnce([{ type: "text", text: "partial " }])
+        .mockReturnValueOnce([{ type: "text", text: "done" }]);
+      bridgeStreamMock
+        .mockImplementationOnce(async (_stream, emit: (event: unknown) => void) => {
+          emit({ type: "message.delta", payload: { text: "partial " } });
+          emit({ type: "message.complete", payload: { text: "partial ", status: checkpointStatus } });
+          return {
+            text: "partial ",
+            parts: [{ type: "text", text: "partial " }],
+            status: checkpointStatus,
+          };
+        })
+        .mockImplementationOnce(async (_stream, emit: (event: unknown) => void) => {
+          emit({ type: "message.delta", payload: { text: "done" } });
+          emit({ type: "message.complete", payload: { text: "done", status: "complete" } });
+          return {
+            text: "done",
+            parts: [{ type: "text", text: "done" }],
+            status: "complete",
+          };
+        });
+      const emit = vi.fn();
+
+      const { runKyreiChat } = await import("./run.js");
+      const result = await runKyreiChat({
+        emit,
+        messages: [{ role: "user", content: "Finish the original task" }],
+        providerBase: "http://mock",
+        apiKey: "key",
+        model: "mock-model",
+      });
+
+      expect(streamTextMock).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({
+        text: "partial done",
+        status: "complete",
+        parts: [{ type: "text", text: "partial done" }],
+        responseMessages: [...firstResponse, ...secondResponse],
+      });
+      const completionEvents = emit.mock.calls
+        .map(([event]) => event)
+        .filter((event) => event?.type === "message.complete");
+      expect(completionEvents).toEqual([{
+        type: "message.complete",
+        payload: { text: "partial done", status: "complete" },
+      }]);
+      const secondPass = streamTextMock.mock.calls[1]?.[0] as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      expect(secondPass.messages.at(-1)).toMatchObject({
+        role: "user",
+        content: expect.stringContaining("engine recovery checkpoint"),
+      });
+    },
+  );
+
+  it("keeps a configured cumulative budget terminal instead of auto-continuing", async () => {
+    resolveEngineConfigMock.mockReturnValue({
+      config: {
+        ...engineConfig(),
+        reliability: { ...engineConfig().reliability, maxTokens: 1_000 },
+      },
+      warnings: [],
+    });
+    bridgeStreamMock.mockImplementationOnce(async (_stream, emit: (event: unknown) => void) => {
+      emit({
+        type: "message.complete",
+        payload: { text: "window reached", status: "max_steps", usage: { totalTokens: 1_000 } },
+      });
+      return {
+        text: "window reached",
+        parts: [],
+        status: "max_steps",
+        usage: { totalTokens: 1_000 },
+      };
+    });
+    const emit = vi.fn();
+
+    const { runKyreiChat } = await import("./run.js");
+    const result = await runKyreiChat({
+      emit,
+      messages: [{ role: "user", content: "Finish the original task" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("budget_exceeded");
+    expect(emit).toHaveBeenCalledWith({
+      type: "message.complete",
+      payload: { text: "window reached", status: "budget_exceeded", usage: { totalTokens: 1_000 } },
+    });
+  });
+
+  it("keeps private recovery markers out of streaming and durable assistant text", async () => {
+    streamTextMock
+      .mockReturnValueOnce({
+        stream: (async function* () {})(),
+        responseMessages: Promise.resolve([]),
+      })
+      .mockReturnValueOnce({
+        stream: (async function* () {})(),
+        responseMessages: Promise.resolve([]),
+      });
+    toPartsMock
+      .mockReturnValueOnce([{ type: "text", text: "partial KYREI_FAILURE_HANDOFF" }])
+      .mockReturnValueOnce([{ type: "text", text: "done" }]);
+    bridgeStreamMock
+      .mockImplementationOnce(async (_stream, emit: (event: unknown) => void) => {
+        emit({ type: "message.delta", payload: { text: "partial KYREI_FAIL" } });
+        emit({ type: "message.delta", payload: { text: "URE_HANDOFF" } });
+        emit({ type: "message.complete", payload: { text: "partial KYREI_FAILURE_HANDOFF", status: "heal_handoff" } });
+        return {
+          text: "partial KYREI_FAILURE_HANDOFF",
+          parts: [{ type: "text", text: "partial KYREI_FAILURE_HANDOFF" }],
+          status: "heal_handoff",
+        };
+      })
+      .mockImplementationOnce(async (_stream, emit: (event: unknown) => void) => {
+        emit({ type: "message.delta", payload: { text: "done" } });
+        emit({ type: "message.complete", payload: { text: "done", status: "complete" } });
+        return { text: "done", parts: [{ type: "text", text: "done" }], status: "complete" };
+      });
+    const emit = vi.fn();
+
+    const { runKyreiChat } = await import("./run.js");
+    const result = await runKyreiChat({
+      emit,
+      messages: [{ role: "user", content: "Finish the original task" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    const visibleText = emit.mock.calls
+      .map(([event]) => event?.payload?.text ?? "")
+      .join("");
+    expect(visibleText).not.toContain("KYREI_FAILURE");
+    expect(result.text).toBe("partial done");
+    expect(result.parts).toEqual([{ type: "text", text: "partial done" }]);
+  });
+
   it("shares one audit sink with local and web tools and correlates the session", async () => {
     const audit = { write: vi.fn() };
     createAuditLogMock.mockReturnValueOnce(audit);

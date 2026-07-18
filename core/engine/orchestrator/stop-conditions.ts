@@ -14,7 +14,7 @@ export type GuardStopReason =
   | "budget_exceeded"
   | "heal_handoff";
 
-/** Stop a no-progress loop after N identical consecutive tool calls. */
+/** End one no-progress pass after N identical consecutive tool calls. */
 export function hasRepeatedToolCall(
   threshold = 3,
 ): StopCondition<ToolSet> {
@@ -26,7 +26,7 @@ export function hasRepeatedToolCall(
   };
 }
 
-/** Build bounded live-loop guardrails and report which one ended the run. */
+/** Build bounded live-loop guardrails and report which one ended the pass. */
 export function buildStopWhen(
   cfg: EngineConfig,
   onStop?: (reason: GuardStopReason) => void,

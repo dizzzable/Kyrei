@@ -1,6 +1,8 @@
 /**
  * Self-heal FSM (Phase 4). Requirements §9.4.
- * PROBE → RETRY → FIX_RETRY → HANDOFF (human). Pure state machine.
+ * PROBE → RETRY → FIX_RETRY → HANDOFF (fresh automatic recovery pass).
+ * `handoff` is terminal only for the current bounded model window, never for
+ * the user's logical task.
  *
  * Wave A: map to Supergoal-shaped transcript markers (3-strike):
  *   probe → KYREI_FAILURE_PROBE (strike 1)
@@ -70,7 +72,7 @@ export function healAgentGuidance(state: HealState): string {
     case "fix_retry":
       return "Print KYREI_FAILURE_ESCALATE; apply the fix-spec approach. One more failure → handoff.";
     case "handoff":
-      return "Print KYREI_FAILURE_HANDOFF with blockers and probe history; stop thrashing. Human takes the wheel.";
+      return "Print KYREI_FAILURE_HANDOFF with blockers and probe history; stop the identical strategy. The engine opens a fresh recovery pass that continues the original goal.";
     case "done":
       return "Recovery succeeded; continue the original goal.";
   }

@@ -12,11 +12,13 @@ import { join } from "node:path";
 import type {
   RunKyreiChatOpts,
   RunKyreiChatResult,
+  KyreiEvent,
   MessagePart,
   ProviderAttemptOutcome,
   ProviderAttemptTarget,
   RuntimeModelLimits,
   RuntimeProviderTarget,
+  Usage,
 } from "../types.js";
 import {
   buildModel,
@@ -86,7 +88,6 @@ import {
 } from "../reliability/post-edit-verify.js";
 import {
   evaluateVerifyBeforeDone,
-  verifyBeforeDoneMessage,
 } from "../reliability/verify-before-done.js";
 import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/file-review.js";
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
@@ -179,7 +180,7 @@ function redactApprovalArgs(value: unknown, sensitiveValues: readonly string[]):
   }
 }
 
-export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
+async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
   const { config: cfg, warnings } = resolveEngineConfig(opts.config);
   if (warnings.length) console.warn("[kyrei v2] config:", warnings.join("; "));
   opts.emit({ type: "message.start" });
@@ -1002,8 +1003,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   let healHandoffPath: string | undefined;
   let fileReview: import("../types.js").FileReviewState | undefined;
 
-  // Self-heal FSM exhausted consecutive hard tool failures → distilled handoff
-  // for human / clean-window resume (JSON chat remains SoT).
+  // Self-heal exhausted this bounded pass: persist a distilled checkpoint.
+  // The outer recovery loop consumes the result and continues automatically.
   if (
     status === "heal_handoff"
     && cfg.reliability?.healHandoff !== false
@@ -1042,12 +1043,6 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
           console.warn("[kyrei reliability] LTM checkpoint for heal handoff skipped:", ltmErr);
         }
       }
-      opts.emit({
-        type: "error",
-        payload: {
-          code: "heal_handoff",
-        },
-      });
     } catch (error) {
       console.warn("[kyrei reliability] heal handoff write failed:", error);
     }
@@ -1210,10 +1205,6 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
       } catch {
         /* */
       }
-      opts.emit({
-        type: "message.delta",
-        payload: { text: verifyBeforeDoneMessage("en") },
-      });
       if (!goalVerify || goalVerify.unavailable) {
         goalVerify = {
           satisfied: false,
@@ -1285,4 +1276,242 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     ...(healHandoffPath ? { healHandoffPath } : {}),
     ...(fileReview ? { fileReview } : {}),
   };
+}
+
+const INTERNAL_RECOVERY_STATUSES = new Set<RunKyreiChatResult["status"]>([
+  "max_steps",
+  "heal_handoff",
+  "goal_unsatisfied",
+]);
+
+const PRIVATE_RECOVERY_MARKERS = [
+  "KYREI_FAILURE_PROBE",
+  "KYREI_FAILURE_ESCALATE",
+  "KYREI_FAILURE_HANDOFF",
+] as const;
+
+function stripPrivateRecoveryMarkers(text: string): string {
+  return PRIVATE_RECOVERY_MARKERS.reduce(
+    (clean, marker) => clean.replaceAll(marker, ""),
+    text,
+  );
+}
+
+function createRecoveryDeltaFilter(): { push(delta: string): string; flush(): string } {
+  let carry = "";
+  const suffixToKeep = (text: string): number => {
+    let keep = 0;
+    for (const marker of PRIVATE_RECOVERY_MARKERS) {
+      const max = Math.min(text.length, marker.length - 1);
+      for (let length = max; length > keep; length -= 1) {
+        if (marker.startsWith(text.slice(-length))) {
+          keep = length;
+          break;
+        }
+      }
+    }
+    return keep;
+  };
+  return {
+    push(delta) {
+      const combined = carry + delta;
+      const keep = suffixToKeep(combined);
+      const ready = keep ? combined.slice(0, -keep) : combined;
+      carry = keep ? combined.slice(-keep) : "";
+      return stripPrivateRecoveryMarkers(ready);
+    },
+    flush() {
+      const ready = stripPrivateRecoveryMarkers(carry);
+      carry = "";
+      return ready;
+    },
+  };
+}
+
+function stripRecoveryMarkersFromParts(incoming: readonly MessagePart[]): MessagePart[] {
+  const clean: MessagePart[] = [];
+  for (const part of incoming) {
+    if (part.type !== "text" && part.type !== "reasoning") {
+      clean.push({ ...part });
+      continue;
+    }
+    const text = stripPrivateRecoveryMarkers(part.text);
+    if (text) clean.push({ ...part, text });
+  }
+  return clean;
+}
+
+function mergeRecoveryParts(current: MessagePart[], incoming: readonly MessagePart[]): MessagePart[] {
+  const merged = [...current];
+  for (const part of incoming) {
+    const previous = merged.at(-1);
+    if (
+      previous
+      && (part.type === "text" || part.type === "reasoning")
+      && previous.type === part.type
+    ) {
+      previous.text += part.text;
+    } else {
+      merged.push({ ...part });
+    }
+  }
+  return merged;
+}
+
+function sumUsage(left: Usage | undefined, right: Usage | undefined): Usage | undefined {
+  if (!left && !right) return undefined;
+  const sum = (key: keyof Usage): number | undefined => {
+    const leftValue = left?.[key];
+    const rightValue = right?.[key];
+    return leftValue === undefined && rightValue === undefined
+      ? undefined
+      : (leftValue ?? 0) + (rightValue ?? 0);
+  };
+  const inputTokens = sum("inputTokens");
+  const outputTokens = sum("outputTokens");
+  const explicitTotal = sum("totalTokens");
+  const totalTokens = explicitTotal ?? (
+    inputTokens !== undefined || outputTokens !== undefined
+      ? (inputTokens ?? 0) + (outputTokens ?? 0)
+      : undefined
+  );
+  const costUsd = sum("costUsd");
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+function recoveryBudgetReached(opts: RunKyreiChatOpts, usage: Usage | undefined): boolean {
+  if (!usage) return false;
+  const cfg = resolveEngineConfig(opts.config).config;
+  const maxTokens = cfg.reliability?.maxTokens;
+  const maxCostUsd = cfg.reliability?.maxCostUsd;
+  return (maxTokens !== undefined && (usage.totalTokens ?? 0) >= maxTokens)
+    || (maxCostUsd !== undefined && (usage.costUsd ?? 0) >= maxCostUsd);
+}
+
+function recoveryDirective(
+  result: RunKyreiChatResult,
+  passNumber: number,
+  originalGoal: string,
+): ModelMessage {
+  const gap = result.goalVerify?.gap?.trim().slice(0, 2_000);
+  const strategy = result.status === "heal_handoff"
+    ? "Inspect the latest tool errors, change the failed preconditions or approach, and do not repeat an identical failing call."
+    : result.status === "goal_unsatisfied"
+      ? `The completion gate found unfinished work${gap ? `: ${gap}` : "."} Resolve it with concrete actions and verification.`
+      : "The execution window ended. Continue from the accumulated progress and finish the remaining work with verification.";
+  return {
+    role: "user",
+    content: [
+      `[Kyrei engine recovery checkpoint ${passNumber}; not a new user request and not user-visible.]`,
+      "Continue the original task autonomously. Do not present this checkpoint as completion and do not ask whether to continue.",
+      strategy,
+      ...(originalGoal ? [`Original user goal: ${originalGoal.slice(0, 4_000)}`] : []),
+    ].join("\n"),
+  };
+}
+
+/**
+ * Run one logical user turn across as many bounded model windows as necessary.
+ * Guardrails stop a bad loop/window; only external blockers, explicit budgets,
+ * approvals/review, cancellation, or genuine completion terminate the turn.
+ */
+export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
+  let messages = [...((opts.messages ?? []) as ModelMessage[])];
+  const originalGoal = opts.goal?.trim() || lastUserTextFromMessages(messages);
+  let text = "";
+  let parts: MessagePart[] = [];
+  let responseMessages: ModelMessage[] = [];
+  let attempts: ProviderAttemptOutcome[] = [];
+  let usage: Usage | undefined;
+  let passNumber = 0;
+
+  while (true) {
+    passNumber += 1;
+    const completedUsage = usage;
+    const deltaFilter = createRecoveryDeltaFilter();
+    let result: RunKyreiChatResult;
+    try {
+      result = await runKyreiChatPass({
+        ...opts,
+        messages,
+        ...(originalGoal ? { goal: originalGoal } : {}),
+        emit: (event: KyreiEvent) => {
+          if (event.type === "message.complete") return;
+          if (event.type === "message.delta") {
+            const safeText = deltaFilter.push(event.payload.text);
+            if (safeText) opts.emit({ ...event, payload: { text: safeText } });
+            return;
+          }
+          if (event.type === "status.update" && event.payload.usage) {
+            opts.emit({
+              ...event,
+              payload: {
+                ...event.payload,
+                usage: sumUsage(completedUsage, event.payload.usage),
+              },
+            });
+            return;
+          }
+          opts.emit(event);
+        },
+      });
+    } catch (error) {
+      const tail = deltaFilter.flush();
+      if (tail) opts.emit({ type: "message.delta", payload: { text: tail } });
+      throw error;
+    }
+    const tail = deltaFilter.flush();
+    if (tail) opts.emit({ type: "message.delta", payload: { text: tail } });
+
+    text += stripPrivateRecoveryMarkers(result.text);
+    parts = mergeRecoveryParts(parts, stripRecoveryMarkersFromParts(result.parts));
+    attempts = [...attempts, ...result.attempts];
+    usage = sumUsage(usage, result.usage);
+    const passResponseMessages = result.responseMessages?.length
+      ? result.responseMessages
+      : result.text
+        ? [{ role: "assistant", content: result.text } satisfies ModelMessage]
+        : [];
+    responseMessages = [...responseMessages, ...passResponseMessages];
+
+    const budgetReached = recoveryBudgetReached(opts, usage);
+    const shouldRecover = INTERNAL_RECOVERY_STATUSES.has(result.status)
+      && !budgetReached
+      && !opts.abortSignal?.aborted;
+    if (shouldRecover) {
+      messages = [
+        ...messages,
+        ...passResponseMessages,
+        recoveryDirective(result, passNumber, originalGoal),
+      ];
+      continue;
+    }
+
+    const status = budgetReached && INTERNAL_RECOVERY_STATUSES.has(result.status)
+      ? "budget_exceeded" as const
+      : result.status;
+    const finalResult: RunKyreiChatResult = {
+      ...result,
+      text,
+      parts,
+      status,
+      attempts,
+      ...(responseMessages.length ? { responseMessages } : {}),
+      ...(usage ? { usage } : {}),
+    };
+    opts.emit({
+      type: "message.complete",
+      payload: {
+        text,
+        status,
+        ...(usage ? { usage } : {}),
+      },
+    });
+    return finalResult;
+  }
 }

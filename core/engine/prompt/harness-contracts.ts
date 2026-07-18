@@ -59,7 +59,7 @@ export const HARNESS_RUN_PROTOCOL = [
   "- Failure recovery (3-strike, maps to self-heal):",
   "  1) KYREI_FAILURE_PROBE — inject diagnosis, adjust once;",
   "  2) KYREI_FAILURE_ESCALATE — write a focused fix note (phase-N.fix.md) and execute;",
-  "  3) KYREI_FAILURE_HANDOFF — stop with blockers; do not thrash identical retries.",
+  "  3) KYREI_FAILURE_HANDOFF — record blockers and yield to the automatic clean recovery pass; never claim the user task is complete.",
   "- Before claiming complete: KYREI_FINAL_AUDIT — re-run key tests/build, spot-check acceptance criteria,",
   "  check deliverables exist; then KYREI_RUN_COMPLETE only if audit is clean.",
   "- not_observed ≠ absent: if you did not check something, say unknown — never invent green checks.",

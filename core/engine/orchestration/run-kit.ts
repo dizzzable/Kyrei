@@ -117,7 +117,7 @@ export function protocolMarkdown(): string {
     "2. Print `" + RUN_MARKERS.phaseStart(0).replace("phase=0", "phase=N") + "`.",
     "3. Do the work with tools; keep changes surgical.",
     "4. Print a `" + RUN_MARKERS.phaseVerify + "` table with pass/fail + evidence.",
-    "5. On failure: strike 1 probe → strike 2 fix note → strike 3 handoff.",
+    "5. On failure: strike 1 probe → strike 2 fix note → strike 3 clean recovery checkpoint; the engine continues the task automatically.",
     "6. Print `" + RUN_MARKERS.phaseDone(0).replace("phase=0", "phase=N") + "` only when verify is green.",
     "7. After last phase: `" + RUN_MARKERS.finalAudit + "` then `" + RUN_MARKERS.runComplete + "`.",
     "",
