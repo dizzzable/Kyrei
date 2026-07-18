@@ -283,10 +283,19 @@ const CompressionConfigSchema = z.object({
 
 const McpServerConfigSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
-  command: z.string().trim().min(1).max(1_024),
+  // `stdio` is the historical default. HTTP deliberately uses a separate
+  // endpoint field, so a valid Streamable HTTP server is never discarded by
+  // configuration validation before the MCP manager can open it.
+  transport: z.enum(["stdio", "streamable-http", "unsupported"]).optional(),
+  command: z.string().trim().min(1).max(1_024).optional(),
   args: z.array(z.string().max(512)).max(32).optional(),
   env: z.record(z.string().max(128), z.string().max(4_096)).optional(),
   cwd: z.string().trim().max(1_024).optional(),
+  url: z.string().trim().min(1).max(2_048).optional(),
+  headers: z.record(z.string().min(1).max(128), z.string().max(4_096)).refine(
+    (headers) => Object.keys(headers).length <= 32,
+    "at most 32 headers",
+  ).optional(),
   enabled: z.boolean().optional(),
 });
 

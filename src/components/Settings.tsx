@@ -14,7 +14,9 @@ import {
   MessageSquare,
   Palette,
   Network,
+  Plus,
   SlidersHorizontal,
+  Trash2,
   X,
 } from "lucide-react";
 import { gateway } from "@/lib/gateway";
@@ -30,7 +32,7 @@ import type {
   SessionMirrorParityResult,
   MessagingRuntimeStatus,
 } from "@/lib/types";
-import { Button } from "@/components/ui";
+import { Button, Input } from "@/components/ui";
 import { BoolField, EnumField, Field, NumberField, TextField } from "@/components/settings/ConfigField";
 import { ThemeGrid } from "@/components/settings/ThemeGrid";
 import { KeybindPanel } from "@/components/settings/KeybindPanel";
@@ -101,6 +103,31 @@ function permissionRulesInput(engine: Record<string, unknown>): unknown {
   if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) return permissions;
   if (!Object.hasOwn(permissions, "rules") || (permissions as Record<string, unknown>).rules === undefined) return [];
   return (permissions as Record<string, unknown>).rules;
+}
+
+type EditableMcpServer = Record<string, unknown> & {
+  id?: string;
+  transport?: "stdio" | "streamable-http" | "unsupported";
+  command?: string;
+  url?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  headers?: Record<string, string>;
+};
+
+function editableMcpServers(value: unknown): EditableMcpServer[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((server): server is EditableMcpServer => Boolean(server) && typeof server === "object" && !Array.isArray(server));
+}
+
+function defaultMcpServerId(servers: readonly EditableMcpServer[]): string {
+  const used = new Set(servers.map((server) => typeof server.id === "string" ? server.id : ""));
+  for (let index = 1; index <= 99; index += 1) {
+    const candidate = `server-${index}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `server-${Date.now().toString(36)}`;
 }
 
 export function Settings({ config, onClose, onSaved, initialSection = "model" }: SettingsProps) {
@@ -339,6 +366,17 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     pendingEngineSave.current = next;
     if (persistImmediately) void flushEngineSave();
     else engineSaveTimer.current = setTimeout(() => void flushEngineSave(), 500);
+  };
+
+  const mcpServers = editableMcpServers(getEngineField("mcp.servers", []));
+  const replaceMcpServer = (index: number, nextServer: EditableMcpServer) => {
+    setEngineField("mcp.servers", mcpServers.map((server, serverIndex) => serverIndex === index ? nextServer : server));
+  };
+  const removeMcpServer = (index: number) => {
+    setEngineField("mcp.servers", mcpServers.filter((_, serverIndex) => serverIndex !== index));
+  };
+  const addMcpServer = () => {
+    setEngineField("mcp.servers", [...mcpServers, { id: defaultMcpServerId(mcpServers), transport: "stdio", command: "" }]);
   };
 
   const checkGBrain = useCallback(async () => {
@@ -1423,6 +1461,109 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       {Boolean(getEngineField("mcp.enabled", false)) && (
                         <>
                           <Field label={t("settings.mcp.servers.label")} hint={t("settings.mcp.servers.hint")} stacked>
+                            <div className="space-y-2">
+                              {mcpServers.length === 0 && (
+                                <p className="rounded-md border border-dashed border-border-soft px-3 py-2 text-[12px] text-muted">
+                                  {t("settings.mcp.servers.empty")}
+                                </p>
+                              )}
+                              {mcpServers.map((server, index) => {
+                                const transport = server.transport === "streamable-http" ? "streamable-http" : "stdio";
+                                const args = Array.isArray(server.args) ? server.args : [];
+                                return (
+                                  <article key={`${server.id ?? "server"}-${index}`} className="rounded-md border border-border-soft bg-surface/55 p-3">
+                                    <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_12rem_auto]">
+                                      <label className="space-y-1">
+                                        <span className="text-[10px] text-muted">{t("settings.mcp.servers.id")}</span>
+                                        <Input
+                                          value={server.id ?? ""}
+                                          onChange={(event) => replaceMcpServer(index, { ...server, id: event.target.value })}
+                                          aria-label={t("settings.mcp.servers.id")}
+                                        />
+                                      </label>
+                                      <label className="space-y-1">
+                                        <span className="text-[10px] text-muted">{t("settings.mcp.servers.transport")}</span>
+                                        <select
+                                          value={transport}
+                                          className="h-9 w-full rounded-md border border-border bg-bg px-2 text-[12px] text-foreground outline-none focus:border-primary"
+                                          aria-label={t("settings.mcp.servers.transport")}
+                                          onChange={(event) => {
+                                            const nextTransport: "stdio" | "streamable-http" = event.target.value === "streamable-http" ? "streamable-http" : "stdio";
+                                            const nextServer: EditableMcpServer = { ...server, transport: nextTransport };
+                                            if (nextTransport === "streamable-http") {
+                                              delete nextServer.command;
+                                              delete nextServer.args;
+                                              delete nextServer.env;
+                                              delete nextServer.cwd;
+                                            } else {
+                                              delete nextServer.url;
+                                              delete nextServer.headers;
+                                            }
+                                            replaceMcpServer(index, nextServer);
+                                          }}
+                                        >
+                                          <option value="stdio">{t("settings.mcp.servers.stdio")}</option>
+                                          <option value="streamable-http">{t("settings.mcp.servers.http")}</option>
+                                        </select>
+                                      </label>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon-sm"
+                                        className="self-end text-muted hover:text-danger"
+                                        onClick={() => removeMcpServer(index)}
+                                        aria-label={t("settings.mcp.servers.remove", { id: server.id || String(index + 1) })}
+                                      >
+                                        <Trash2 className="size-3.5" aria-hidden />
+                                      </Button>
+                                    </div>
+                                    {transport === "streamable-http" ? (
+                                      <label className="mt-2 block space-y-1">
+                                        <span className="text-[10px] text-muted">{t("settings.mcp.servers.url")}</span>
+                                        <Input
+                                          value={server.url ?? ""}
+                                          placeholder="https://example.com/mcp"
+                                          onChange={(event) => replaceMcpServer(index, { ...server, url: event.target.value })}
+                                          aria-label={t("settings.mcp.servers.url")}
+                                        />
+                                      </label>
+                                    ) : (
+                                      <>
+                                        <label className="mt-2 block space-y-1">
+                                          <span className="text-[10px] text-muted">{t("settings.mcp.servers.command")}</span>
+                                          <Input
+                                            value={server.command ?? ""}
+                                            placeholder={t("settings.mcp.servers.commandPlaceholder")}
+                                            onChange={(event) => replaceMcpServer(index, { ...server, command: event.target.value })}
+                                            aria-label={t("settings.mcp.servers.command")}
+                                          />
+                                        </label>
+                                        <label className="mt-2 block space-y-1">
+                                          <span className="text-[10px] text-muted">{t("settings.mcp.servers.args")}</span>
+                                          <textarea
+                                            value={args.join("\n")}
+                                            rows={2}
+                                            spellCheck={false}
+                                            onChange={(event) => replaceMcpServer(index, {
+                                              ...server,
+                                              args: event.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+                                            })}
+                                            aria-label={t("settings.mcp.servers.args")}
+                                            className="w-full resize-y rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[11px] text-foreground outline-none focus:border-primary"
+                                          />
+                                        </label>
+                                      </>
+                                    )}
+                                  </article>
+                                );
+                              })}
+                              <Button type="button" variant="outline" size="sm" onClick={addMcpServer}>
+                                <Plus className="size-3.5" aria-hidden />
+                                {t("settings.mcp.servers.add")}
+                              </Button>
+                            </div>
+                            <details className="mt-2 rounded-md border border-border-soft px-3 py-2">
+                              <summary className="cursor-pointer text-[11px] text-muted">{t("settings.mcp.servers.advanced")}</summary>
                             <textarea
                               value={(() => {
                                 try {
@@ -1452,8 +1593,9 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                               spellCheck={false}
                               rows={6}
                               aria-label={t("settings.mcp.servers.label")}
-                              className="w-full resize-y rounded-md border border-border bg-bg px-3 py-2 font-mono text-[12px] text-foreground outline-none focus:border-primary"
+                              className="mt-2 w-full resize-y rounded-md border border-border bg-bg px-3 py-2 font-mono text-[12px] text-foreground outline-none focus:border-primary"
                             />
+                            </details>
                           </Field>
                           <NumberField
                             label={t("settings.mcp.timeout.label")}

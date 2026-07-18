@@ -555,10 +555,17 @@ export interface EngineConfig {
     enabled: boolean;
     servers: Array<{
       id: string;
-      command: string;
+      /** Omitted means the backwards-compatible stdio transport. */
+      transport?: "stdio" | "streamable-http" | "unsupported";
+      /** Executable for stdio servers. */
+      command?: string;
       args?: string[];
       env?: Record<string, string>;
       cwd?: string;
+      /** Endpoint for Streamable HTTP servers. */
+      url?: string;
+      /** Explicit user-managed HTTP headers; values never leave the gateway. */
+      headers?: Record<string, string>;
       enabled?: boolean;
     }>;
     timeoutMs: number;

@@ -122,6 +122,20 @@ describe("settings localized rendering", () => {
     expect(russian).toContain("Включить MCP-клиент");
   });
 
+  it("renders the MCP editor for a Streamable HTTP server", async () => {
+    const html = await renderSettings("en", "memory", {
+      mcp: {
+        enabled: true,
+        servers: [{ id: "remote-tools", transport: "streamable-http", url: "https://mcp.example.test/v1" }],
+      },
+    });
+
+    expect(html).toContain("remote-tools");
+    expect(html).toContain("Streamable HTTP");
+    expect(html).toContain("MCP endpoint URL");
+    expect(html).toContain("Advanced JSON");
+  });
+
   it("explains that standalone Skills work and can be selected for one task", async () => {
     const english = await renderSettings("en", "skills");
     const russian = await renderSettings("ru", "skills");

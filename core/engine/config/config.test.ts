@@ -118,6 +118,31 @@ describe("resolveEngineConfig (task 2.6)", () => {
     });
   });
 
+  it("preserves Streamable HTTP MCP servers instead of treating them as malformed stdio", () => {
+    const { config, warnings } = resolveEngineConfig({
+      mcp: {
+        enabled: true,
+        servers: [{
+          id: "remote-tools",
+          transport: "streamable-http",
+          url: "https://mcp.example.test/v1",
+          headers: { "X-Workspace": "kyrei" },
+        }],
+      },
+    });
+
+    expect(warnings).toEqual([]);
+    expect(config.mcp).toMatchObject({
+      enabled: true,
+      servers: [{
+        id: "remote-tools",
+        transport: "streamable-http",
+        url: "https://mcp.example.test/v1",
+        headers: { "X-Workspace": "kyrei" },
+      }],
+    });
+  });
+
   it("treats an empty GBrain source field as unset", () => {
     const { config, warnings } = resolveEngineConfig({ memory: { gbrain: { mode: "read", source: "" } } });
     expect(config.memory.gbrain.mode).toBe("read");
