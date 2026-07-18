@@ -12,7 +12,15 @@
 
 import type { KyreiEvent, MessagePart, TurnStatus, Usage } from "../types.js";
 import type { ToolMeta } from "../tools/index.js";
-import { initState, pushText, pushReasoning, type BridgeState, type ToolInFlight } from "./state.js";
+import {
+  closeReasoning,
+  initState,
+  openReasoning,
+  pushReasoning,
+  pushText,
+  type BridgeState,
+  type ToolInFlight,
+} from "./state.js";
 import { computeStatus } from "./status.js";
 
 export interface BridgeCtx {
@@ -111,8 +119,6 @@ export async function bridgeStream(
       case "start":
       case "text-start":
       case "text-end":
-      case "reasoning-start":
-      case "reasoning-end":
       case "tool-input-end":
       case "raw":
         break;
@@ -133,8 +139,70 @@ export async function bridgeStream(
       case "reasoning-delta": {
         const text = part["text"] ?? part["textDelta"] ?? "";
         if (text) {
-          pushReasoning(st, text);
-          emit({ type: "reasoning.delta", payload: { text } });
+          const explicitSequence = typeof part["sequence"] === "number" ? part["sequence"] : undefined;
+          const active = pushReasoning(st, text, {
+            id: typeof part["id"] === "string" ? part["id"] : undefined,
+            source: "provider",
+            providerId: ctx.provider,
+            modelId: ctx.model,
+            sequence: explicitSequence,
+          });
+          if (!active) break;
+          emit({
+            type: "reasoning.delta",
+            payload: {
+              id: active.id,
+              text,
+              sequence: explicitSequence ?? st.nextReasoningSequence,
+              source: active.source,
+              provider_id: active.providerId,
+              model_id: active.modelId,
+              attempt: active.attempt,
+              started_at: active.startedAt,
+            },
+          });
+        }
+        break;
+      }
+
+      case "reasoning-start": {
+        const active = openReasoning(st, {
+          id: typeof part["id"] === "string" ? part["id"] : undefined,
+          source: "provider",
+          providerId: ctx.provider,
+          modelId: ctx.model,
+          startedAt: typeof part["timestamp"] === "number" ? part["timestamp"] : undefined,
+        });
+        emit({
+          type: "reasoning.start",
+          payload: {
+            id: active.id,
+            source: active.source,
+            provider_id: active.providerId,
+            model_id: active.modelId,
+            attempt: active.attempt,
+            sequence: active.sequence,
+            started_at: active.startedAt,
+          },
+        });
+        break;
+      }
+
+      case "reasoning-end": {
+        const closed = closeReasoning(st, {
+          id: typeof part["id"] === "string" ? part["id"] : undefined,
+          completedAt: typeof part["timestamp"] === "number" ? part["timestamp"] : undefined,
+        });
+        if (closed) {
+          emit({
+            type: "reasoning.complete",
+            payload: {
+              id: closed.id,
+              state: "complete",
+              sequence: closed.sequence,
+              completed_at: closed.completedAt,
+            },
+          });
         }
         break;
       }

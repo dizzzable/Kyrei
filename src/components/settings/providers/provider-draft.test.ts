@@ -115,15 +115,31 @@ describe("provider setup drafts", () => {
       models: [{ id: "gpt-4o-mini", capabilities: liveCapabilities }],
     }, false);
     draft.allowBenchmarkNetwork = true;
+    draft.allowInsecureHttp = true;
 
     const proxy = updateProviderDraftEndpoint(draft, { baseURL: "https://api.xpiki.com/v1" });
     expect(proxy.allowBenchmarkNetwork).toBe(false);
+    expect(proxy.allowInsecureHttp).toBe(false);
     expect(proxy.hasStoredCredentials).toBe(false);
     expect(proxy.availableModels[0]?.capabilities).toBeUndefined();
     expect(mergeDiscoveredModels(proxy, [{ id: "gpt-4o-mini" }]).availableModels[0]?.capabilities).toBeUndefined();
 
     const anthropic = updateProviderDraftEndpoint(draft, { protocol: "anthropic-messages" });
     expect(anthropic.availableModels[0]?.capabilities).toBeUndefined();
+  });
+
+  it("persists exact-origin HTTP trust in the provider contract, not as a global discovery switch", () => {
+    const draft = createDraftFromProfile({
+      ...configured,
+      baseURL: "http://93.184.216.34:8080/v1",
+      allowInsecureHttp: true,
+    }, false);
+
+    expect(draftDiscoveryInput(draft)).toMatchObject({
+      baseURL: "http://93.184.216.34:8080/v1",
+      allowInsecureHttp: true,
+    });
+    expect(draftProviderInput(draft)).toMatchObject({ allowInsecureHttp: true });
   });
 
   it("creates a custom draft without performing any persistence", () => {

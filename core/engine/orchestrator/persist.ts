@@ -9,6 +9,15 @@ import type { MessagePart } from "../types.js";
 import type { BridgeResult } from "../stream-bridge/bridge.js";
 
 export function toParts(messages: ModelMessage[], bridged: BridgeResult): MessagePart[] {
+  if (bridged.parts.some((part) =>
+    part.type === "reasoning"
+    && (typeof part.id === "string" || typeof part.state === "string" || typeof part.sequence === "number"),
+  )) {
+    return bridged.parts.map((part) => ({ ...part }));
+  }
+  const streamedReasoning = bridged.parts
+    .filter((p): p is Extract<MessagePart, { type: "reasoning" }> => p.type === "reasoning")
+    .map((p) => ({ ...p }));
   const toolByIdEntries = bridged.parts
     .filter((p): p is Extract<MessagePart, { type: "tool" }> => p.type === "tool")
     .map((p) => [p.toolCallId, p] as const);
@@ -48,7 +57,8 @@ export function toParts(messages: ModelMessage[], bridged: BridgeResult): Messag
       if (kind === "text") {
         out.push({ type: "text", text: String(c["text"] ?? "") });
       } else if (kind === "reasoning") {
-        out.push({ type: "reasoning", text: String(c["text"] ?? "") });
+        const enriched = streamedReasoning.shift();
+        out.push(enriched ?? { type: "reasoning", text: String(c["text"] ?? "") });
       } else if (kind === "tool-call") {
         const id = String(c["toolCallId"] ?? "");
         const enriched = toolById.get(id);

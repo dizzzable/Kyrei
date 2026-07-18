@@ -158,6 +158,7 @@ export const ruChat = {
   "chat.code.copied": "Скопировано",
   "chat.thinking.label": "Размышление",
   "chat.thinking.elapsed": "{seconds} с",
+  "chat.jumpToLatest": "К последнему ответу",
   "chat.slash.new.description": "Начать новый диалог",
   "chat.slash.help.description": "Показать список команд",
   "chat.slash.model.description": "Сменить модель для этого диалога",

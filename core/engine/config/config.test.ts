@@ -66,7 +66,62 @@ describe("resolveEngineConfig (task 2.6)", () => {
       maxParallel: 2,
       maxSteps: 12,
       timeoutMs: 45_000,
+      idleTimeoutMs: 45_000,
+      maxRuntimeMs: DEFAULT_ENGINE_CONFIG.delegation.maxRuntimeMs,
     });
+  });
+
+  it("keeps evolution proposal-first and bounded by default", () => {
+    expect(resolveEngineConfig({}).config.evolution).toEqual({
+      harvestEnabled: true,
+      evaluationEnabled: false,
+      promotionMode: "manual",
+      maxCandidates: 500,
+      retentionDays: 180,
+      maxEvaluationCostUsd: null,
+    });
+    expect(resolveEngineConfig({ evolution: {
+      harvestEnabled: false,
+      evaluationEnabled: true,
+      promotionMode: "low-risk-canary",
+      maxCandidates: 80,
+      retentionDays: 30,
+      maxEvaluationCostUsd: 2,
+    } }).config.evolution).toMatchObject({
+      harvestEnabled: false,
+      evaluationEnabled: true,
+      promotionMode: "low-risk-canary",
+      maxCandidates: 80,
+      retentionDays: 30,
+      maxEvaluationCostUsd: 2,
+    });
+  });
+
+  it("normalizes explicit child idle and max-runtime limits", () => {
+    const { config, warnings } = resolveEngineConfig({
+      delegation: { timeoutMs: 45_000, idleTimeoutMs: 60_000, maxRuntimeMs: 30_000 },
+    });
+    expect(config.delegation).toEqual({
+      ...DEFAULT_ENGINE_CONFIG.delegation,
+      timeoutMs: 60_000,
+      idleTimeoutMs: 60_000,
+      maxRuntimeMs: 60_000,
+    });
+    expect(warnings.some((warning) => warning.includes("legacy alias"))).toBe(true);
+    expect(warnings.some((warning) => warning.includes("maxRuntimeMs < idleTimeoutMs"))).toBe(true);
+  });
+
+  it("migrates the legacy 90-second child cutoff without shrinking the hard runtime", () => {
+    const { config, warnings } = resolveEngineConfig({
+      delegation: { timeoutMs: 90_000 },
+    });
+
+    expect(config.delegation).toMatchObject({
+      timeoutMs: 180_000,
+      idleTimeoutMs: 180_000,
+      maxRuntimeMs: DEFAULT_ENGINE_CONFIG.delegation.maxRuntimeMs,
+    });
+    expect(warnings.some((warning) => warning.includes("90-second delegation cutoff"))).toBe(true);
   });
 
   it("rejects delegation timeouts outside the bounded wall-clock range", () => {

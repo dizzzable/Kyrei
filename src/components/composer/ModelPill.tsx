@@ -34,12 +34,22 @@ const EFFORTS = [
 ] as const satisfies readonly { value: string; labelKey: ChatTranslationKey }[];
 
 /** Per-model options are shown only where the engine can serialize them. */
-function ModelOptions({ provider, model, protocol }: { provider: string; model: string; protocol?: ProviderProtocol }) {
+function ModelOptions({
+  provider,
+  model,
+  protocol,
+  capabilities,
+}: {
+  provider: string;
+  model: string;
+  protocol?: ProviderProtocol;
+  capabilities?: ModelCatalogEntry["capabilities"];
+}) {
   const { t } = useI18n();
   const preset = useModelPreset(provider, model);
   const thinking = preset.thinking !== false;
   const effort = preset.effort || "medium";
-  if (!supportsModelTuning(protocol)) {
+  if (!supportsModelTuning(protocol, capabilities)) {
     return (
       <DropdownMenuSubContent className="w-52">
         <DropdownMenuLabel>{t("chat.model.options")}</DropdownMenuLabel>
@@ -100,7 +110,7 @@ function ModelRow({
 }) {
   const { t } = useI18n();
   const preset = useModelPreset(entry.provider, entry.id);
-  const tuningSupported = supportsModelTuning(protocol);
+  const tuningSupported = supportsModelTuning(protocol, entry.capabilities);
   const meta = tuningSupported
     ? [
         preset.fast ? t("chat.model.fast") : null,
@@ -124,7 +134,7 @@ function ModelRow({
         </span>
         {active && <Check className="ml-auto size-3.5 text-primary" aria-hidden />}
       </DropdownMenuSubTrigger>
-      <ModelOptions provider={entry.provider} model={entry.id} protocol={protocol} />
+      <ModelOptions provider={entry.provider} model={entry.id} protocol={protocol} capabilities={entry.capabilities} />
     </DropdownMenuSub>
   );
 }
@@ -177,7 +187,8 @@ export function ModelPill({
     return [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [models, search]);
 
-  const label = supportsModelTuning(protocols.get(provider))
+  const currentEntry = models.find((entry) => entry.provider === provider && entry.id === model);
+  const label = supportsModelTuning(protocols.get(provider), currentEntry?.capabilities)
     ? formatModelStatusLabel(model, t, { fastMode: preset.fast, reasoningEffort: preset.thinking === false ? "none" : preset.effort })
     : displayModelName(model, t);
 

@@ -10,6 +10,10 @@ import type {
   McpRuntimeStatus,
   MemoryIndexReindexResult,
   MemoryIndexRuntimeStatus,
+  MemoryAtlasSnapshot,
+  EvolutionCandidate,
+  EvolutionCandidateStatus,
+  EvolutionRuntimeConfig,
   ProjectDocumentImportResult,
   WorkspaceMemoryGraph,
   LtmConsolidateResult,
@@ -266,6 +270,9 @@ export const gateway = {
   base: BASE,
 
   getStatus: () => json<GatewayStatus>("/api/status"),
+  retryAgent: (id: string) => json<{ ok: true; status: string }>(`/api/agents/${encodeURIComponent(id)}/retry`, { method: "POST", body: "{}" }),
+  resumeAgent: (id: string) => json<{ ok: true; status: string }>(`/api/agents/${encodeURIComponent(id)}/resume`, { method: "POST", body: "{}" }),
+  cancelAgent: (id: string) => json<{ ok: true; status: string }>(`/api/agents/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" }),
 
   getConfig: () => json<AppConfig>("/api/config"),
   getGBrainStatus: () => json<GBrainRuntimeStatus>("/api/memory/gbrain"),
@@ -277,7 +284,11 @@ export const gateway = {
   getMemoryIndexStatus: () => json<MemoryIndexRuntimeStatus>("/api/memory/index"),
   reindexMemoryIndex: () => json<MemoryIndexReindexResult>("/api/memory/index/reindex", { method: "POST" }),
   getMemoryGraph: () => json<WorkspaceMemoryGraph>("/api/memory/graph"),
-  importProjectDocuments: (files: Array<{ fileName: string; contentBase64: string }>) =>
+  getMemoryAtlas: () => json<{ atlas: MemoryAtlasSnapshot }>("/api/memory/atlas").then((result) => result.atlas),
+  getEvolutionCandidates: () => json<{ config: EvolutionRuntimeConfig; candidates: EvolutionCandidate[] }>("/api/evolution/candidates"),
+  transitionEvolutionCandidate: (id: string, body: { expectedRevision: number; status: EvolutionCandidateStatus; reason?: string; evidence?: { receipts?: string[]; tests?: string[]; notes?: string } }) =>
+    json<{ candidate: EvolutionCandidate }>(`/api/evolution/candidates/${encodeURIComponent(id)}/transition`, { method: "POST", body: JSON.stringify(body) }),
+  importProjectDocuments: (files: Array<{ fileName: string; relativePath?: string; contentBase64: string }>) =>
     json<ProjectDocumentImportResult>("/api/memory/documents/import", {
       method: "POST",
       body: JSON.stringify({ files }),
@@ -521,6 +532,11 @@ export const gateway = {
       method: "POST",
       body: JSON.stringify({ allowBenchmarkNetwork: options.allowBenchmarkNetwork === true }),
     }),
+  resetProviderRuntime: (id: string, accountId?: string) =>
+    json<{ ok: true; scope: "provider" | "account"; accountId?: string; runtime: ProviderAccountPoolSnapshot }>(
+      `/api/providers/${encodeURIComponent(id)}/runtime/reset`,
+      { method: "POST", body: JSON.stringify(accountId ? { accountId } : {}) },
+    ),
   deleteProvider: (id: string) =>
     json<AppConfig>(`/api/providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
   setProviderSecret: (id: string, credentials: ProviderCredentialsInput | string) =>

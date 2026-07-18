@@ -22,7 +22,7 @@ const STATE_FILE = "skills-state.json";
 const SKILL_FILE = "SKILL.md";
 const DEFAULT_MAX_SKILL_BYTES = 256_000;
 const HARD_MAX_SKILL_BYTES = 2_000_000;
-const HARD_MAX_RUNTIME_SKILLS = 256;
+const HARD_MAX_RUNTIME_SKILLS = 1_024;
 const HARD_MAX_RUNTIME_CHARS = 1_000_000;
 const DEFAULT_RUNTIME_IDENTITY_BYTES = 16_000_000;
 const HARD_MAX_RUNTIME_IDENTITY_BYTES = 64_000_000;
@@ -39,7 +39,18 @@ const PUBLIC_ID_RE = /^skill_[a-f0-9]{24}$/;
 const PUBLIC_DOCUMENT_ID_RE = /^doc_[a-f0-9]{24}$/;
 const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RESERVED_WINDOWS_NAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-const ALLOWED_METADATA_KEYS = new Set(["name", "description", "version", "author", "tags"]);
+const ALLOWED_METADATA_KEYS = new Set([
+  "name",
+  "description",
+  "version",
+  "author",
+  "tags",
+  "tools",
+  "platforms",
+  "capabilities",
+  "network",
+]);
+const RUNTIME_SKILL_READ_MAX_CHARS = 256_000;
 
 export class SkillsStoreError extends Error {
   constructor(code, message = code) {
@@ -184,9 +195,14 @@ export function parseSkillFrontmatter(source) {
       rawValue = chunks.join(folded ? " " : "\n");
     }
 
-    if (key === "tags") {
+    if (key === "tags" || key === "tools" || key === "platforms" || key === "capabilities") {
       const tags = parseTags(rawValue);
-      if (tags.length) metadata.tags = tags;
+      if (tags.length) metadata[key] = tags;
+      continue;
+    }
+    if (key === "network") {
+      const scalar = parseScalar(rawValue).toLowerCase();
+      if (["true", "yes", "on", "1"].includes(scalar)) metadata.network = true;
       continue;
     }
     const max = key === "description" ? MAX_DESCRIPTION_CHARS : MAX_METADATA_TEXT_CHARS;
@@ -574,10 +590,22 @@ function publicSkill(skill, includeContent = false) {
     owned: skill.owned,
     enabled: skill.enabled,
     usage: skill.usage,
+    compatible: skill.compatible,
+    availability: skill.availability,
+    ...(skill.reasonCode ? { reasonCode: skill.reasonCode } : {}),
     ...(skill.lastUsedAt ? { lastUsedAt: skill.lastUsedAt } : {}),
     rootId: skill.rootId,
     relativePath: skill.relativePath,
+    ...(skill.contentDigest ? { contentDigest: skill.contentDigest } : {}),
+    ...(Number.isFinite(skill.mtimeMs) ? { mtimeMs: skill.mtimeMs } : {}),
     metadata: { ...skill.metadata },
+    documents: (skill._documents ?? []).map(({ id, label, relativePath, source, parentId }) => ({
+      id,
+      label,
+      relativePath,
+      source,
+      ...(parentId ? { parentId } : {}),
+    })),
     references: (skill._documents ?? []).map(({ id, label, relativePath, source, parentId }) => ({
       id,
       label,
@@ -831,6 +859,21 @@ export class SkillsStore {
           root.provenance === "kiro" ? root.docsCanonical : null,
         )
       : { documents: [], issues: [] };
+    const requirements = {};
+    if (parsed.metadata.tools?.length) requirements.tools = [...parsed.metadata.tools];
+    if (parsed.metadata.platforms?.length) requirements.platforms = [...parsed.metadata.platforms];
+    if (parsed.metadata.capabilities?.length) requirements.capabilities = [...parsed.metadata.capabilities];
+    if (parsed.metadata.network === true) requirements.network = true;
+    const platformMismatch = Array.isArray(requirements.platforms)
+      && requirements.platforms.length > 0
+      && !requirements.platforms.some((platform) => String(platform).toLowerCase() === process.platform);
+    const reasonCode = !enabled
+      ? "skill_disabled"
+      : platformMismatch
+        ? "platform_mismatch"
+        : linked.issues.length
+          ? linked.issues[0]?.code ?? "skill_unavailable"
+          : "";
     return {
       id,
       name: candidateName,
@@ -838,14 +881,26 @@ export class SkillsStore {
       provenance: root.provenance,
       owned: root.owned,
       enabled,
+      compatible: !platformMismatch,
+      availability: !enabled
+        ? "unavailable"
+        : platformMismatch
+          ? "incompatible"
+          : linked.issues.length
+            ? "unavailable"
+            : "ready",
+      ...(reasonCode ? { reasonCode } : {}),
       usage: usage.total,
       lastUsedAt: usage.lastUsedAt,
       rootId: root.id,
       relativePath,
+      contentDigest: contentDigest(loaded.content),
+      mtimeMs: Number.isFinite(directoryInfo?.mtimeMs) ? directoryInfo.mtimeMs : undefined,
       metadata: {
         ...(parsed.metadata.version ? { version: parsed.metadata.version } : {}),
         ...(parsed.metadata.author ? { author: parsed.metadata.author } : {}),
         ...(parsed.metadata.tags ? { tags: [...parsed.metadata.tags] } : {}),
+        ...(Object.keys(requirements).length ? { requirements } : {}),
       },
       content: loaded.content,
       _documents: linked.documents,
@@ -893,6 +948,80 @@ export class SkillsStore {
   async list() {
     await this.#settled();
     return (await this.#discover()).map((skill) => publicSkill(skill));
+  }
+
+  async catalogSkills({ ids = null, maxSkills = HARD_MAX_RUNTIME_SKILLS, strictRequested = false } = {}) {
+    await this.#settled();
+    const skillLimit = Math.max(0, Math.min(HARD_MAX_RUNTIME_SKILLS, Number.isFinite(maxSkills) ? Math.floor(maxSkills) : HARD_MAX_RUNTIME_SKILLS));
+    const requestedIds = Array.isArray(ids)
+      ? [...new Set(ids.filter((id) => typeof id === "string" && PUBLIC_ID_RE.test(id)))]
+      : null;
+    if (strictRequested && requestedIds && requestedIds.length > skillLimit) {
+      fail("skill_catalog_skill_limit", "Skill catalog exceeds the configured skill limit");
+    }
+    const discovered = (await this.#discover()).map((skill) => publicSkill(skill));
+    const byId = new Map(discovered.map((skill) => [skill.id, skill]));
+    const unavailable = [];
+    const skills = [];
+    if (requestedIds) {
+      for (const id of requestedIds) {
+        const skill = byId.get(id);
+        if (skill) skills.push(skill);
+        else {
+          skills.push({
+            id,
+            name: id,
+            description: "",
+            provenance: "custom",
+            owned: false,
+            enabled: false,
+            compatible: false,
+            availability: "unavailable",
+            reasonCode: "skill_not_found",
+            usage: 0,
+            rootId: "",
+            relativePath: "",
+            metadata: {},
+            documents: [],
+            references: [],
+          });
+          unavailable.push({ skillId: id, code: "skill_not_found" });
+        }
+      }
+    } else {
+      skills.push(...discovered.slice(0, skillLimit));
+    }
+    for (const skill of skills) {
+      if (skill.reasonCode) unavailable.push({ skillId: skill.id, code: skill.reasonCode });
+    }
+    if (strictRequested && unavailable.length) {
+      const error = new SkillsStoreError("skill_catalog_incomplete", "Requested Skills are unavailable in the catalog");
+      error.unavailable = unavailable;
+      throw error;
+    }
+    return {
+      skills,
+      total: requestedIds ? skills.length : discovered.length,
+      included: skills.length,
+      truncated: !requestedIds && skills.length < discovered.length,
+      unavailable,
+    };
+  }
+
+  async readRuntimeSkill(skillId) {
+    await this.#settled();
+    if (typeof skillId !== "string" || !PUBLIC_ID_RE.test(skillId)) {
+      return { skillId: String(skillId ?? ""), code: "skill_not_found" };
+    }
+    const skill = (await this.#discover({ linkedDocumentIds: new Set([skillId]) })).find((candidate) => candidate.id === skillId);
+    if (!skill) return { skillId, code: "skill_not_found" };
+    if (!skill.enabled) return { skillId, code: "skill_disabled" };
+    if (skill.availability === "incompatible") return { skillId, code: skill.reasonCode || "skill_incompatible" };
+    if (skill.availability === "unavailable") return { skillId, code: skill.reasonCode || "skill_unavailable" };
+    if (typeof skill.content !== "string" || Buffer.byteLength(skill.content, "utf8") > RUNTIME_SKILL_READ_MAX_CHARS) {
+      return { skillId, code: "skill_content_unavailable" };
+    }
+    return { skill: publicSkill(skill, true) };
   }
 
   async get(id) {

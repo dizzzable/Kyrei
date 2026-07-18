@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { createAppUpdater } from "../electron/app-updater.js";
+import { createAppUpdater, isNewerAppVersion } from "../electron/app-updater.js";
 
 function makeAutoUpdater() {
   const emitter = new EventEmitter();
@@ -18,6 +18,30 @@ function makeAutoUpdater() {
 }
 
 describe("createAppUpdater", () => {
+  it("never advertises a downgrade or the installed release as an update", async () => {
+    expect(isNewerAppVersion("0.7.1", "0.7.0")).toBe(true);
+    expect(isNewerAppVersion("0.7.0", "0.7.0")).toBe(false);
+    expect(isNewerAppVersion("0.6.2", "0.7.0")).toBe(false);
+
+    const autoUpdater = makeAutoUpdater();
+    const updater = createAppUpdater({
+      app: { getVersion: () => "0.7.0", isPackaged: true },
+      autoUpdater,
+      env: {},
+    });
+    autoUpdater.checkForUpdates.mockImplementation(async () => {
+      autoUpdater.emit("update-available", { version: "0.6.2", releaseName: "Kyrei v0.6.2" });
+      return { updateInfo: { version: "0.6.2" } };
+    });
+
+    await expect(updater.check()).resolves.toMatchObject({
+      phase: "not-available",
+      currentVersion: "0.7.0",
+      latestVersion: "0.6.2",
+    });
+    await expect(updater.download()).rejects.toThrow("update_not_available_to_download");
+  });
+
   it("disables auto-install for unpackaged and portable builds", () => {
     const autoUpdater = makeAutoUpdater();
     const dev = createAppUpdater({

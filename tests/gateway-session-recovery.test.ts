@@ -320,7 +320,7 @@ describe("gateway active-turn durability", () => {
     await vi.waitFor(async () => {
       const history = await messages(session.id);
       expect(history.at(-1)?.parts).toEqual([
-        { type: "reasoning", text: "Checked evidence" },
+        expect.objectContaining({ type: "reasoning", text: "Checked evidence", state: "streaming" }),
         expect.objectContaining({ type: "tool", toolCallId: "call-trace", name: "read_file", result: "ok", running: false }),
         { type: "text", text: "Final answer" },
       ]);
@@ -550,7 +550,7 @@ describe("gateway active-turn durability", () => {
     let releaseSetup!: () => void;
     const entered = new Promise<void>((resolve) => { setupEntered = resolve; });
     const gate = new Promise<void>((resolve) => { releaseSetup = resolve; });
-    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "runtimeSkills").mockImplementation(async () => {
+    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "catalogSkills").mockImplementation(async () => {
       setupEntered();
       await gate;
       return { skills: [] } as never;

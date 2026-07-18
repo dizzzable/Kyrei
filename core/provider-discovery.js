@@ -14,6 +14,7 @@ const DEFAULT_MAX_MODELS = 2_000;
 const MAX_MODEL_ID = 512;
 const MAX_MODEL_NAME = 512;
 const USER_AGENT = "Kyrei-Provider-Discovery/1.0";
+const DEFAULT_MAX_REDIRECTS = 3;
 
 export class ProviderDiscoveryError extends Error {
   constructor(code) {
@@ -189,6 +190,31 @@ function parseEndpoint(baseURL, protocol) {
 function isHttpsFqdn(url) {
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   return url.protocol === "https:" && isIP(host) === 0 && host.includes(".");
+}
+
+function normalizedOrigin(url) {
+  return new URL(url.origin).href.replace(/\/+$/, "");
+}
+
+function allowedInsecureOrigins(value) {
+  const rows = Array.isArray(value) ? value : [];
+  const origins = new Set();
+  for (const row of rows) {
+    if (typeof row !== "string" || !row.trim()) continue;
+    try {
+      const url = new URL(row.trim());
+      if (url.protocol !== "http:" || url.username || url.password || url.search || url.hash) continue;
+      origins.add(normalizedOrigin(url));
+    } catch {
+      // ignore malformed entries
+    }
+  }
+  return origins;
+}
+
+function redirectLocation(headers) {
+  const value = headerValue(headers, "location");
+  return typeof value === "string" ? value.trim() : "";
 }
 
 async function resolveTarget(url, resolveHost, { allowBenchmarkNetwork = false } = {}) {
@@ -423,65 +449,96 @@ function safeHeaders(value, apiKey, protocol) {
   return headers;
 }
 
-async function performDiscovery(options, signal) {
-  const endpoint = parseEndpoint(options.baseURL, options.protocol);
+function assertAllowedDiscoveryOrigin(endpoint, pinnedAddress, options) {
   if (options.allowBenchmarkNetwork === true && !isHttpsFqdn(endpoint)) {
     throw discoveryError("provider_discovery_target_blocked");
   }
-  const pinnedAddress = await resolveTarget(endpoint, options.resolveHost ?? defaultResolveHost, {
-    allowBenchmarkNetwork: options.allowBenchmarkNetwork === true,
-  });
   // HTTP is allowed only for trusted local targets (loopback or RFC1918 LAN).
-  // Public internet discovery still requires HTTPS.
+  // Public internet discovery requires an exact-origin opt-in.
   if (endpoint.protocol !== "https:" && !pinnedAddress.loopback && !pinnedAddress.privateLan) {
-    throw discoveryError("provider_discovery_target_blocked");
+    const allowedOrigins = allowedInsecureOrigins(options.allowInsecureHttpOrigins);
+    if (!allowedOrigins.has(normalizedOrigin(endpoint))) {
+      throw discoveryError("provider_discovery_target_blocked");
+    }
   }
-  if (signal.aborted) throw new Error("aborted");
-  let response;
-  try {
-    response = await (options.request ?? defaultRequest)(endpoint, {
-      headers: safeHeaders(options.headers, options.credentials?.apiKey, options.protocol),
-      signal,
-      pinnedAddress,
-      redirect: "manual",
+}
+
+async function performDiscovery(options, signal) {
+  const resolveHost = options.resolveHost ?? defaultResolveHost;
+  const request = options.request ?? defaultRequest;
+  const headers = safeHeaders(options.headers, options.credentials?.apiKey, options.protocol);
+  const maxRedirects = Math.min(DEFAULT_MAX_REDIRECTS, Math.max(0, Number.isFinite(Number(options.maxRedirects)) ? Math.floor(Number(options.maxRedirects)) : DEFAULT_MAX_REDIRECTS));
+  let endpoint = parseEndpoint(options.baseURL, options.protocol);
+  const origin = normalizedOrigin(endpoint);
+  for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
+    const pinnedAddress = await resolveTarget(endpoint, resolveHost, {
+      allowBenchmarkNetwork: options.allowBenchmarkNetwork === true,
     });
-  } catch (error) {
-    if (error instanceof ProviderDiscoveryError) throw error;
-    throw new Error("request-failed");
+    assertAllowedDiscoveryOrigin(endpoint, pinnedAddress, options);
+    if (signal.aborted) throw new Error("aborted");
+    let response;
+    try {
+      response = await request(endpoint, {
+        headers,
+        signal,
+        pinnedAddress,
+        redirect: "manual",
+      });
+    } catch (error) {
+      if (error instanceof ProviderDiscoveryError) throw error;
+      throw new Error("request-failed");
+    }
+    const status = Number(response?.status ?? 0);
+    if (status >= 300 && status < 400) {
+      const location = redirectLocation(response?.headers);
+      disposeResponseBody(response);
+      if (!location) throw discoveryError("provider_discovery_redirect_blocked");
+      let next;
+      try {
+        next = new URL(location, endpoint);
+      } catch {
+        throw discoveryError("provider_discovery_redirect_blocked");
+      }
+      if (
+        (next.protocol !== "http:" && next.protocol !== "https:")
+        || next.username
+        || next.password
+        || next.hash
+        || normalizedOrigin(next) !== origin
+      ) throw discoveryError("provider_discovery_redirect_blocked");
+      endpoint = next;
+      continue;
+    }
+    if (status === 401 || status === 403) {
+      disposeResponseBody(response);
+      throw discoveryError("provider_discovery_unauthorized");
+    }
+    if (status === 429) {
+      disposeResponseBody(response);
+      throw discoveryError("provider_discovery_rate_limited");
+    }
+    if (status < 200 || status >= 300) {
+      disposeResponseBody(response);
+      throw discoveryError("provider_discovery_unavailable");
+    }
+    const body = await readBoundedBody(response, options.maxBytes ?? DEFAULT_MAX_BYTES);
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      throw discoveryError("provider_discovery_invalid_response");
+    }
+    const requestedMax = Number(options.maxModels ?? DEFAULT_MAX_MODELS);
+    const maxModels = Math.min(DEFAULT_MAX_MODELS, Math.max(1, Number.isFinite(requestedMax) ? Math.floor(requestedMax) : DEFAULT_MAX_MODELS));
+    const retrievedAt = typeof options.now === "function" ? options.now() : Date.now();
+    return sanitizeModels(payload, maxModels, options.credentials, {
+      providerId: options.providerId,
+      baseURL: options.baseURL,
+      protocol: options.protocol,
+      retrievedAt,
+    });
   }
-  const status = Number(response?.status ?? 0);
-  if (status >= 300 && status < 400) {
-    disposeResponseBody(response);
-    throw discoveryError("provider_discovery_redirect_blocked");
-  }
-  if (status === 401 || status === 403) {
-    disposeResponseBody(response);
-    throw discoveryError("provider_discovery_unauthorized");
-  }
-  if (status === 429) {
-    disposeResponseBody(response);
-    throw discoveryError("provider_discovery_rate_limited");
-  }
-  if (status < 200 || status >= 300) {
-    disposeResponseBody(response);
-    throw discoveryError("provider_discovery_unavailable");
-  }
-  const body = await readBoundedBody(response, options.maxBytes ?? DEFAULT_MAX_BYTES);
-  let payload;
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    throw discoveryError("provider_discovery_invalid_response");
-  }
-  const requestedMax = Number(options.maxModels ?? DEFAULT_MAX_MODELS);
-  const maxModels = Math.min(DEFAULT_MAX_MODELS, Math.max(1, Number.isFinite(requestedMax) ? Math.floor(requestedMax) : DEFAULT_MAX_MODELS));
-  const retrievedAt = typeof options.now === "function" ? options.now() : Date.now();
-  return sanitizeModels(payload, maxModels, options.credentials, {
-    providerId: options.providerId,
-    baseURL: options.baseURL,
-    protocol: options.protocol,
-    retrievedAt,
-  });
+  throw discoveryError("provider_discovery_redirect_blocked");
 }
 
 /** Discover models from bounded official/OpenAI-compatible read-only model catalogs. */

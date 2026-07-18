@@ -95,7 +95,7 @@ export const Message = memo(function Message({
         if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
         if (part.type === "approval") return <ApprovalCard key={part.approvalId || i} part={part} onDecision={onApprovalDecision} />;
         if (part.type === "reasoning" && showReasoning)
-          return <ThinkingDisclosure key={i} text={part.text} pending={message.pending} />;
+          return <ThinkingDisclosure key={part.id || i} part={part} />;
         if (part.type === "reasoning") return null;
         const text = sanitizeAssistantDisplayText(part.text);
         if (!text.trim()) return null;

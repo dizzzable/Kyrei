@@ -1773,7 +1773,7 @@ describe("gateway provider registry", () => {
     });
   });
 
-  it("marks terminal authentication failures without recording a successful turn", async () => {
+  it("keeps a bare first 401 recoverable without recording a successful turn", async () => {
     const runKyreiChat = vi.fn(async (rawOpts: Record<string, unknown>) => {
       const lifecycle = rawOpts.providerAttemptLifecycle as {
         acquire(target: Record<string, unknown>): unknown | null;
@@ -1820,7 +1820,7 @@ describe("gateway provider registry", () => {
       accounts: Array<{ id: string; status: string; inflight: number }>;
     }>(`/api/providers/${providerId}/accounts`);
     expect(snapshot.accounts.find((account) => account.id === "primary")).toMatchObject({
-      status: "auth-required",
+      status: "cooldown",
       inflight: 0,
     });
     const history = await request<{ messages: Array<{ role: string }> }>(`/api/sessions/${session.id}/messages`);

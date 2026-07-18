@@ -23,6 +23,8 @@ export const DEFAULT_TEAM_LIMITS = Object.freeze({
   maxTasks: 12,
   maxStepsPerAgent: 8,
   timeoutMs: 180_000,
+  idleTimeoutMs: 180_000,
+  maxRuntimeMs: 1_800_000,
 });
 
 export const MAX_TEAM_PROFILES = 256;
@@ -52,6 +54,8 @@ const LIMIT_RULES = Object.freeze({
   maxTasks: { min: 1, max: 64, fallback: DEFAULT_TEAM_LIMITS.maxTasks },
   maxStepsPerAgent: { min: 1, max: 64, fallback: DEFAULT_TEAM_LIMITS.maxStepsPerAgent },
   timeoutMs: { min: 1_000, max: 3_600_000, fallback: DEFAULT_TEAM_LIMITS.timeoutMs },
+  idleTimeoutMs: { min: 1_000, max: 3_600_000, fallback: DEFAULT_TEAM_LIMITS.idleTimeoutMs },
+  maxRuntimeMs: { min: 1_000, max: 7_200_000, fallback: DEFAULT_TEAM_LIMITS.maxRuntimeMs },
 });
 
 function object(value) {
@@ -100,6 +104,9 @@ function normalizeLimits(value) {
   for (const [key, rule] of Object.entries(LIMIT_RULES)) {
     limits[key] = integer(source[key], rule);
   }
+  if (source.idleTimeoutMs === undefined) limits.idleTimeoutMs = limits.timeoutMs;
+  if (source.timeoutMs === undefined) limits.timeoutMs = limits.idleTimeoutMs;
+  limits.maxRuntimeMs = Math.max(limits.idleTimeoutMs, limits.maxRuntimeMs);
   limits.maxParallel = Math.min(limits.maxParallel, limits.maxAgents, limits.maxTasks);
   return limits;
 }

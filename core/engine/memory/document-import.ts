@@ -15,6 +15,8 @@ const TEXT_EXTENSIONS = new Set([
 
 export interface ProjectDocumentInput {
   fileName: string;
+  /** Optional root-relative path supplied by a folder import. */
+  relativePath?: string;
   bytes: Uint8Array;
 }
 
@@ -29,7 +31,7 @@ export interface ImportedProjectDocument {
 
 export interface RejectedProjectDocument {
   fileName: string;
-  code: "document_type_unsupported" | "document_too_large" | "document_binary_unsupported" | "document_invalid_name";
+  code: "document_type_unsupported" | "document_too_large" | "document_binary_unsupported" | "document_invalid_name" | "document_path_invalid";
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -47,6 +49,16 @@ function safeName(raw: string): string {
     .slice(0, 140)
     .trim();
   return normalized;
+}
+
+function safeRelativeDirectory(raw: string | undefined): string[] | null {
+  if (raw === undefined) return [];
+  const value = String(raw).replace(/\\/g, "/");
+  if (!value || value.startsWith("/") || /^[A-Za-z]:\//.test(value) || value.includes("\0")) return null;
+  const segments = value.split("/");
+  if (segments.length > 32 || segments.some((segment) => !segment || segment === "." || segment === "..")) return null;
+  const folders = segments.slice(0, -1).map(safeName);
+  return folders.some((segment) => !segment) ? null : folders;
 }
 
 function decodeText(bytes: Uint8Array): string | null {
@@ -81,6 +93,11 @@ export async function importProjectDocuments(input: {
       rejected.push({ fileName: String(file.fileName ?? ""), code: "document_invalid_name" });
       continue;
     }
+    const relativeDirectory = safeRelativeDirectory(file.relativePath);
+    if (!relativeDirectory) {
+      rejected.push({ fileName, code: "document_path_invalid" });
+      continue;
+    }
     const extension = extname(fileName).toLowerCase();
     if (!TEXT_EXTENSIONS.has(extension)) {
       rejected.push({ fileName, code: "document_type_unsupported" });
@@ -100,7 +117,9 @@ export async function importProjectDocuments(input: {
     const digest = sha256(file.bytes);
     const stem = fileName.slice(0, Math.max(1, fileName.length - extension.length));
     const storedName = `${stem}-${digest.slice(0, 10)}${extension}`;
-    const path = join(destination, storedName);
+    const documentDirectory = join(destination, ...relativeDirectory);
+    await mkdir(documentDirectory, { recursive: true });
+    const path = join(documentDirectory, storedName);
     let deduped = false;
     try {
       const current = await readFile(path);
@@ -120,7 +139,7 @@ export async function importProjectDocuments(input: {
     imported.push({
       fileName,
       path,
-      relativePath: `.kyrei/memory/imports/${storedName}`,
+      relativePath: [".kyrei", "memory", "imports", ...relativeDirectory, storedName].join("/"),
       contentHash: digest,
       bytes: file.bytes.byteLength,
       deduped,

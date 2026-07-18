@@ -201,6 +201,20 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
     }
   };
 
+  const resetRuntime = async (current: ProviderDraft) => {
+    if (!current.editingId) return;
+    setSaving(true);
+    setErrorKey(null);
+    try {
+      await gateway.resetProviderRuntime(current.editingId);
+      onSaved(await gateway.getConfig());
+    } catch (reason) {
+      setErrorKey(requestErrorKey(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const refreshConfig = () => {
     void gateway.getConfig().then(onSaved).catch(() => setErrorKey("settings.providers.error.operationFailed"));
   };
@@ -253,6 +267,7 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
         onCancel={() => { setErrorKey(null); setDraft(null); }}
         onSave={(current) => void save(current)}
         onClearCredentials={(current) => void clearCredentials(current)}
+        onResetRuntime={(current) => void resetRuntime(current)}
         onDelete={config.providers.length > 1 ? (current) => void remove(current) : undefined}
       />
 

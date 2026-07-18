@@ -4,18 +4,23 @@ import type { ProviderProtocol } from "@/lib/types";
 import { executableModelParams, supportsModelTuning } from "./model-capabilities";
 
 describe("supportsModelTuning", () => {
-  it.each<ProviderProtocol>(["openai-chat", "openai-responses"])(
-    "enables executable reasoning controls for %s",
-    (protocol) => expect(supportsModelTuning(protocol)).toBe(true),
-  );
-
   it.each<ProviderProtocol>([
+    "openai-chat",
+    "openai-responses",
     "anthropic-messages",
     "google-generative-ai",
     "amazon-bedrock",
     "google-vertex",
-  ])("does not advertise unsupported model tuning for %s", (protocol) => {
-    expect(supportsModelTuning(protocol)).toBe(false);
+  ])(
+    "enables executable reasoning controls for %s",
+    (protocol) => expect(supportsModelTuning(protocol)).toBe(true),
+  );
+
+  it("honors explicit live metadata that disables reasoning for a model", () => {
+    expect(supportsModelTuning("anthropic-messages", {
+      provenance: { source: "live-provider", confidence: "high", fields: {} },
+      features: { reasoning: false },
+    })).toBe(false);
   });
 
   it("defaults unknown provider metadata to unsupported", () => {
@@ -24,8 +29,8 @@ describe("supportsModelTuning", () => {
 });
 
 describe("executableModelParams", () => {
-  it("never sends tuning to protocols that ignore it", () => {
-    expect(executableModelParams("anthropic-messages", { effort: "high", fast: true })).toBeUndefined();
+  it("sends tuning to supported non-OpenAI protocols too", () => {
+    expect(executableModelParams("anthropic-messages", { effort: "high", fast: true })).toEqual({ fast: true });
   });
 
   it("keeps Fast executable by omitting a stale explicit effort", () => {
@@ -42,6 +47,7 @@ describe("executableModelParams", () => {
     expect(executableModelParams("openai-chat", {})).toBeUndefined();
     expect(executableModelParams("openai-chat", { effort: "high" })).toEqual({ effort: "high" });
     expect(executableModelParams("openai-chat", { thinking: true })).toEqual({ effort: "medium" });
+    expect(executableModelParams("google-generative-ai", { thinking: true })).toEqual({ effort: "medium" });
   });
 
   it("forwards bounded manual limits independently of protocol tuning support", () => {
@@ -49,7 +55,7 @@ describe("executableModelParams", () => {
       effort: "high",
       contextWindowOverride: 200_000,
       maxOutputOverride: 64_000,
-    })).toEqual({ contextWindowOverride: 200_000, maxOutputOverride: 64_000 });
+    })).toEqual({ effort: "high", contextWindowOverride: 200_000, maxOutputOverride: 64_000 });
     expect(executableModelParams("openai-responses", {
       effort: "high",
       contextWindowOverride: 1_050_000,

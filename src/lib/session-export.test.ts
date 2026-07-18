@@ -10,7 +10,14 @@ const session: SessionInfo = {
 
 const messages: ChatMessage[] = [
   { id: "m1", role: "user", parts: [{ type: "text", text: "hello" }] },
-  { id: "m2", role: "assistant", parts: [{ type: "text", text: "hi there" }] },
+  {
+    id: "m2",
+    role: "assistant",
+    parts: [
+      { type: "reasoning", id: "r1", text: "thinking", state: "complete" },
+      { type: "text", text: "hi there" },
+    ],
+  },
 ];
 
 describe("buildSessionExport", () => {
@@ -20,7 +27,10 @@ describe("buildSessionExport", () => {
       session_id: "sess-1",
       title: "My Session",
       message_count: 2,
-      messages,
+      messages: [
+        messages[0],
+        { ...messages[1], parts: [{ type: "text", text: "hi there" }] },
+      ],
     });
     expect(typeof out.exported_at).toBe("string");
     expect(Number.isNaN(Date.parse(out.exported_at))).toBe(false);
@@ -33,6 +43,11 @@ describe("buildSessionExport", () => {
 
   it("keeps an untitled session locale-neutral", () => {
     expect(buildSessionExport({ id: "x" }, []).title).toBe("");
+  });
+
+  it("retains reasoning only when explicitly requested", () => {
+    expect(buildSessionExport(session, messages).messages[1]?.parts).toEqual([{ type: "text", text: "hi there" }]);
+    expect(buildSessionExport(session, messages, { includeReasoning: true }).messages[1]?.parts).toEqual(messages[1]?.parts);
   });
 });
 

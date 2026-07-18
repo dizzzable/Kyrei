@@ -52,4 +52,26 @@ describe("importProjectDocuments", () => {
       "document_binary_unsupported",
     ]);
   });
+
+  it("preserves an explicit folder-relative path and rejects traversal", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kyrei-doc-import-tree-"));
+    roots.push(workspace);
+
+    const result = await importProjectDocuments({
+      workspace,
+      files: [{
+        fileName: "guide.md",
+        relativePath: "Product/Architecture/guide.md",
+        bytes: new TextEncoder().encode("# Nested guide"),
+      }, {
+        fileName: "secret.md",
+        relativePath: "Product/../secret.md",
+        bytes: new TextEncoder().encode("must not import"),
+      }],
+    });
+
+    expect(result.imported[0]?.relativePath).toMatch(/^\.kyrei\/memory\/imports\/Product\/Architecture\/guide-[a-f0-9]{10}\.md$/);
+    expect(await readFile(result.imported[0]!.path, "utf8")).toContain("Nested guide");
+    expect(result.rejected).toContainEqual({ fileName: "secret.md", code: "document_path_invalid" });
+  });
 });

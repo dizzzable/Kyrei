@@ -71,6 +71,9 @@ import {
 import { CronStore } from "./cron-store.js";
 import { CronScheduler } from "./cron-scheduler.js";
 import { TeamRunStore } from "./team-run-store.js";
+import { AgentRunStore } from "./agent-run-store.js";
+import { EvolutionStore } from "./evolution-store.js";
+import { RuntimeHealthGate } from "./runtime-health.js";
 import { PipelineRunStore } from "./pipeline-run-store.js";
 import { PipelineMissionRunner } from "./pipeline-mission-runner.js";
 import { WorkspaceLeaseStore } from "./workspace-lease-store.js";
@@ -250,18 +253,50 @@ function publicStoredMessages(messages) {
   });
 }
 
-function appendTurnStreamPart(parts, type, text) {
+function appendTurnStreamPart(parts, type, text, meta = {}) {
   if (typeof text !== "string" || !text) return parts;
   const next = [...parts];
-  for (let index = next.length - 1; index >= 0; index -= 1) {
-    const part = next[index];
-    if (part?.type === type) {
-      next[index] = { ...part, text: `${part.text ?? ""}${text}` };
+  if (type === "text") {
+    const last = next.at(-1);
+    if (last?.type === "text") {
+      next[next.length - 1] = { ...last, text: `${last.text ?? ""}${text}` };
       return next;
     }
-    if (part?.type !== "text" && part?.type !== "reasoning") break;
+    next.push({ type, text });
+    return next;
   }
-  next.push({ type, text });
+  const reasoningId = typeof meta.id === "string" && meta.id ? meta.id : "";
+  const last = next.at(-1);
+  if (reasoningId) {
+    const index = next.findIndex(part => part?.type === "reasoning" && part.id === reasoningId);
+    if (index >= 0) {
+      if (next[index] !== last) return parts;
+      next[index] = {
+        ...next[index],
+        text: `${next[index].text ?? ""}${text}`,
+        state: "streaming",
+        ...(typeof meta.sequence === "number" ? { sequence: meta.sequence } : {}),
+        ...(typeof meta.attempt === "number" ? { attempt: meta.attempt } : {}),
+      };
+      return next;
+    }
+  }
+  if (last?.type === "reasoning" && !last.id && !reasoningId) {
+    next[next.length - 1] = { ...last, text: `${last.text ?? ""}${text}`, state: "streaming" };
+    return next;
+  }
+  next.push({
+    type,
+    text,
+    ...(reasoningId ? { id: reasoningId } : {}),
+    ...(typeof meta.sequence === "number" ? { sequence: meta.sequence } : {}),
+    ...(typeof meta.attempt === "number" ? { attempt: meta.attempt } : {}),
+    ...(typeof meta.started_at === "number" ? { startedAt: meta.started_at } : {}),
+    ...(typeof meta.provider_id === "string" ? { providerId: meta.provider_id } : {}),
+    ...(typeof meta.model_id === "string" ? { modelId: meta.model_id } : {}),
+    ...(typeof meta.source === "string" ? { source: meta.source } : {}),
+    state: "streaming",
+  });
   return next;
 }
 
@@ -280,7 +315,42 @@ function turnToolIndex(parts, payload) {
 function foldTurnDraftEvent(parts, event) {
   const payload = event?.payload ?? {};
   if (event?.type === "message.delta") return appendTurnStreamPart(parts, "text", payload.text);
-  if (event?.type === "reasoning.delta") return appendTurnStreamPart(parts, "reasoning", payload.text);
+  if (event?.type === "reasoning.start") {
+    if (typeof payload.id !== "string" || !payload.id) return parts;
+    const index = parts.findIndex(part => part?.type === "reasoning" && part.id === payload.id);
+    if (index < 0) return parts;
+    const nextPart = {
+      type: "reasoning",
+      id: payload.id,
+      state: "streaming",
+      ...(typeof payload.sequence === "number" ? { sequence: payload.sequence } : {}),
+      ...(typeof payload.attempt === "number" ? { attempt: payload.attempt } : {}),
+      ...(typeof payload.started_at === "number" ? { startedAt: payload.started_at } : {}),
+      ...(typeof payload.provider_id === "string" ? { providerId: payload.provider_id } : {}),
+      ...(typeof payload.model_id === "string" ? { modelId: payload.model_id } : {}),
+      ...(typeof payload.source === "string" ? { source: payload.source } : {}),
+    };
+    const next = [...parts];
+    next[index] = { ...next[index], ...nextPart };
+    return next;
+  }
+  if (event?.type === "reasoning.delta") return appendTurnStreamPart(parts, "reasoning", payload.text, payload);
+  if (event?.type === "reasoning.complete") {
+    if (typeof payload.id !== "string" || !payload.id) return parts;
+    const index = parts.findIndex(part => part?.type === "reasoning" && part.id === payload.id);
+    if (index < 0) return parts;
+    const next = [...parts];
+    const reasoning = {
+      ...next[index],
+      state: typeof payload.state === "string" ? payload.state : "complete",
+      ...(typeof payload.completed_at === "number" ? { completedAt: payload.completed_at } : {}),
+      ...(typeof payload.sequence === "number" ? { sequence: payload.sequence } : {}),
+      ...(typeof payload.attempt === "number" ? { attempt: payload.attempt } : {}),
+    };
+    if (typeof reasoning.text === "string" && !reasoning.text.trim()) return next.filter((_, currentIndex) => currentIndex !== index);
+    next[index] = reasoning;
+    return next;
+  }
   if (event?.type === "tool.start") {
     const index = turnToolIndex(parts, payload);
     const tool = {
@@ -396,8 +466,15 @@ function mergeTerminalTurnParts(streamed, terminal) {
     }
     // Do not duplicate a streamed text/reasoning segment with the same
     // aggregate content. If no stream exists for that channel, retain it.
+    if (finalPart.type === "reasoning" && finalPart.id) {
+      const existingIndex = next.findIndex(part => part?.type === "reasoning" && part.id === finalPart.id);
+      if (existingIndex >= 0) {
+        next[existingIndex] = { ...next[existingIndex], ...finalPart };
+        continue;
+      }
+    }
     if ((finalPart.type === "text" || finalPart.type === "reasoning")
-      && next.some(part => part?.type === finalPart.type)) continue;
+      && next.some(part => part?.type === finalPart.type && (!finalPart.id || part.id === finalPart.id))) continue;
     next.push(finalPart);
   }
   return next;
@@ -917,6 +994,9 @@ export function requestErrorStatus(error) {
   if (code === "invalid_json") return 400;
   if (code === "request_body_too_large") return 413;
   if (code === "gateway_shutdown") return 503;
+  if (code.startsWith("evolution_") && (code.endsWith("_conflict") || code.endsWith("_exists") || code.endsWith("_transition_invalid"))) return 409;
+  if (code.startsWith("evolution_") && code.endsWith("_not_found")) return 404;
+  if (code.startsWith("evolution_")) return 400;
   if (
     code === "gbrain_command_unavailable"
     || code === "gbrain_adapter_unavailable"
@@ -2044,6 +2124,15 @@ export async function startGateway({
     const normalized = normalizeStoredModelCapabilities(value);
     return normalized ? digestJson(normalized) : "";
   };
+  const insecureDiscoveryOrigins = (provider) => {
+    if (provider?.allowInsecureHttp !== true) return [];
+    try {
+      const url = new URL(String(provider.baseURL ?? ""));
+      return url.protocol === "http:" ? [url.origin] : [];
+    } catch {
+      return [];
+    }
+  };
   const pruneCapabilityReceipts = () => {
     const now = Date.now();
     for (const [key, receipt] of capabilityReceipts) {
@@ -2877,6 +2966,24 @@ export async function startGateway({
   const isVerifiedTruthGate = (receipt) => Boolean(receipt && typeof receipt === "object" && truthGateReceiptRegistry.has(receipt));
   const teamRunStore = new TeamRunStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
   await teamRunStore.recoverInterrupted().catch(() => []);
+  const agentRunStore = new AgentRunStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
+  const recoveredAgentRuns = await agentRunStore.recoverRecoverable().catch(() => []);
+  const evolutionStore = new EvolutionStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
+  const currentEvolutionConfig = () => {
+    const source = isPlainRecord(config.engine?.evolution) ? config.engine.evolution : {};
+    return {
+      harvestEnabled: source.harvestEnabled !== false,
+      evaluationEnabled: source.evaluationEnabled === true,
+      promotionMode: ["off", "manual", "low-risk-canary"].includes(source.promotionMode)
+        ? source.promotionMode
+        : "manual",
+      maxCandidates: Math.min(10_000, Math.max(10, Math.floor(Number(source.maxCandidates) || 500))),
+      retentionDays: Math.min(3_650, Math.max(7, Math.floor(Number(source.retentionDays) || 180))),
+      maxEvaluationCostUsd: Number.isFinite(Number(source.maxEvaluationCostUsd)) && Number(source.maxEvaluationCostUsd) > 0
+        ? Number(source.maxEvaluationCostUsd)
+        : null,
+    };
+  };
   const pipelineRunStore = new PipelineRunStore({
     dataDir,
     getSensitiveValues: runtimeSensitiveValues,
@@ -2939,7 +3046,10 @@ export async function startGateway({
     const ids = normalizePromptSkillIds(value);
     if (!ids) return undefined;
     const available = new Set((await skillsStore.list())
-      .filter((skill) => skill.enabled)
+      .filter((skill) => skill.enabled !== false
+        && skill.compatible !== false
+        && skill.availability !== "unavailable"
+        && skill.availability !== "incompatible")
       .map((skill) => skill.id));
     if (ids.some((id) => !available.has(id))) throw new TypeError("prompt_skill_unavailable");
     return ids;
@@ -2947,8 +3057,8 @@ export async function startGateway({
 
   function runtimeSkillsForPrompt(skillIds, { strictRequested = false } = {}) {
     return skillIds?.length
-      ? skillsStore.runtimeSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS, strictRequested })
-      : skillsStore.runtimeSkills();
+      ? skillsStore.catalogSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS, strictRequested })
+      : skillsStore.catalogSkills();
   }
 
   const buildPipelineRuntimeIdentity = async (definition, configSnapshot = config, secretsSnapshot = secrets) => {
@@ -3091,6 +3201,10 @@ export async function startGateway({
   const runtimeActivity = new Map(); // sessionId -> public live/last turn activity
   const activePromptProviders = new Map(); // sessionId -> provider ids whose credentials may be in flight
   const subagentRuns = new Map(); // subagentId -> cross-session runtime summary
+  for (const recovered of recoveredAgentRuns) {
+    if (!recovered?.agentId) continue;
+    subagentRuns.set(recovered.agentId, checkpointToSubagentRun(recovered));
+  }
   /** Session-scoped protected-path allow-once (after tool approval). Survives rest of session only. */
   const sessionProtectedAllowOnce = new Map(); // sessionId -> string[]
   const shutdownController = new AbortController();
@@ -3183,21 +3297,43 @@ export async function startGateway({
    * deliberately a health-only operation: it never sends a provider key,
    * writes personal knowledge, or starts an installer.
    */
-  const gbrainHealthCache = { key: "", at: 0, value: null, promise: null };
+  const gbrainHealthGate = new RuntimeHealthGate({
+    cacheTtlMs: 5_000,
+    failureThreshold: 2,
+    retryDelayMs: 5_000,
+    classify: (value) => value?.state === "ready"
+      ? "healthy"
+      : value?.state === "error" || value?.state === "unavailable"
+        ? "failure"
+        : "neutral",
+  });
+  const sessionMirrorHealthGate = new RuntimeHealthGate({
+    cacheTtlMs: 2_000,
+    failureThreshold: 2,
+    retryDelayMs: 3_000,
+    classify: (value) => value?.state === "ready"
+      ? "healthy"
+      : value?.state === "error"
+        ? "failure"
+        : "neutral",
+  });
+  const openVikingHealthGate = new RuntimeHealthGate({
+    cacheTtlMs: 5_000,
+    failureThreshold: 2,
+    retryDelayMs: 5_000,
+    classify: (value) => value?.state === "ready"
+      ? "healthy"
+      : value?.state === "error"
+        ? "failure"
+        : "neutral",
+  });
   const inspectGBrain = async ({ command, force = false } = {}) => {
     const configured = configuredGBrainRuntime(config.engine);
     const gbrain = typeof command === "string" && command.trim() && command.length <= 1_024
       ? { ...configured, command: command.trim() }
       : configured;
     const key = `${gbrain.provider}|${gbrain.command ?? ""}|${gbrain.timeoutMs}|${gbrain.maxOutputBytes}`;
-    const now = Date.now();
-    if (!force && gbrainHealthCache.key === key && gbrainHealthCache.value && now - gbrainHealthCache.at < 5_000) {
-      return gbrainHealthCache.value;
-    }
-    if (!force && gbrainHealthCache.key === key && gbrainHealthCache.promise) {
-      return gbrainHealthCache.promise;
-    }
-    const probe = (async () => {
+    const probe = async () => {
       let mod;
       try {
         mod = await getEngine();
@@ -3237,17 +3373,8 @@ export async function startGateway({
       } catch (error) {
         return { ...gbrainFailureState(error), provider: gbrain.provider, mode: gbrain.mode, doctorStatus: "unknown" };
       }
-    })();
-    gbrainHealthCache.key = key;
-    gbrainHealthCache.promise = probe;
-    try {
-      const result = await probe;
-      gbrainHealthCache.value = result;
-      gbrainHealthCache.at = Date.now();
-      return result;
-    } finally {
-      if (gbrainHealthCache.promise === probe) gbrainHealthCache.promise = null;
-    }
+    };
+    return gbrainHealthGate.probe(key, probe, { force });
   };
 
   const persistGBrainConfig = async (patch) => mutateConfig(async () => {
@@ -3298,6 +3425,30 @@ export async function startGateway({
     } finally {
       await manager.close().catch(() => undefined);
     }
+  };
+
+  const inspectOpenViking = async ({ force = false } = {}) => {
+    const engineConfig = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engineConfig.memory) ? engineConfig.memory : {};
+    const openviking = isPlainRecord(memory.openviking) ? memory.openviking : {};
+    if (openviking.enabled !== true) return { state: "disabled", reason: "source_disabled" };
+    const baseURL = typeof openviking.baseURL === "string" && openviking.baseURL.trim()
+      ? openviking.baseURL.trim()
+      : "http://127.0.0.1:1933";
+    return openVikingHealthGate.probe(baseURL, async () => {
+      try {
+        const mod = await getEngine();
+        if (typeof mod?.createOpenVikingClient !== "function") return { state: "error", reason: "adapter_unavailable" };
+        const client = mod.createOpenVikingClient({ baseURL, timeoutMs: 2_500 });
+        await client.health();
+        return { state: "ready" };
+      } catch (error) {
+        return {
+          state: "error",
+          reason: redactSensitiveText(error?.message ?? "health_check_failed", runtimeSensitiveValues()).slice(0, 200),
+        };
+      }
+    }, { force });
   };
 
   /**
@@ -3454,25 +3605,31 @@ export async function startGateway({
       config: builtinMemoryIndexConfig(),
     });
   };
-  let memoryIndexInspectPromise = null;
-  let memoryIndexInspectAt = 0;
-  let memoryIndexInspectValue = null;
-  const inspectBuiltinMemoryIndex = async () => {
-    // Status is read-only and can be requested by three Settings cards at
-    // once. Share the probe and keep a short snapshot so a transient SQLite
-    // open/reindex cannot make the UI alternate between ready and error.
-    const now = Date.now();
-    if (memoryIndexInspectValue && now - memoryIndexInspectAt < 2_000) return memoryIndexInspectValue;
-    if (!memoryIndexInspectPromise) {
-      memoryIndexInspectPromise = inspectBuiltinMemoryIndexRaw();
-      void memoryIndexInspectPromise.then((value) => {
-        memoryIndexInspectValue = value;
-        memoryIndexInspectAt = Date.now();
-      }).catch(() => undefined).finally(() => {
-        memoryIndexInspectPromise = null;
-      });
-    }
-    return memoryIndexInspectPromise;
+  const memoryIndexHealthGate = new RuntimeHealthGate({
+    cacheTtlMs: 2_000,
+    failureThreshold: 2,
+    retryDelayMs: 3_000,
+    classify: (value) => value?.state === "ready"
+      ? "healthy"
+      : value?.state === "error"
+        ? "failure"
+        : "neutral",
+  });
+  const inspectBuiltinMemoryIndex = async ({ force = false } = {}) => {
+    // Status is read-only and can be requested by several Settings cards at
+    // once. A single transient SQLite/open/reindex failure keeps the last-good
+    // snapshot visible and marks it stale instead of flickering unavailable.
+    const index = builtinMemoryIndexConfig();
+    const key = [
+      typeof config.workspace === "string" ? config.workspace : "",
+      index.enabled,
+      index.backend,
+      index.connectionString ? digestJson(index.connectionString) : "",
+      index.embed.mode,
+      index.embed.baseURL ?? "",
+      index.embed.model ?? "",
+    ].join("|");
+    return memoryIndexHealthGate.probe(key, inspectBuiltinMemoryIndexRaw, { force });
   };
 
   const extractStoredMessageText = (message) => {
@@ -3571,7 +3728,10 @@ export async function startGateway({
         memory: stores.memory,
         vectors: stores.vectors,
         sensitiveValues: runtimeSensitiveValues(),
-        pruneStale: true,
+        // This path receives only the sessions touched since the last turn.
+        // Pruning here would delete every other session projection. Stale
+        // cleanup is reserved for the explicit full-snapshot rebuild below.
+        pruneStale: false,
       });
     } catch {
       /* fail-open projection */
@@ -4020,6 +4180,171 @@ export async function startGateway({
     };
   };
 
+  function agentStatusFromCheckpointState(state) {
+    switch (state) {
+      case "queued": return "queued";
+      case "recovering": return "recovering";
+      case "partial": return "partial";
+      case "completed": return "completed";
+      case "failed": return "failed";
+      case "interrupted": return "interrupted";
+      default: return "running";
+    }
+  }
+
+  function normalizeCheckpointManifest(value, fallbackState) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return fallbackState
+        ? {
+            version: 1,
+            state: fallbackState,
+            recoverable: fallbackState === "recovering" || fallbackState === "partial",
+            startedTaskIds: [],
+            completedTaskIds: [],
+            failedTaskIds: [],
+          }
+        : undefined;
+    }
+    const source = value;
+    const list = (candidate) => Array.isArray(candidate)
+      ? candidate
+        .filter((item) => typeof item === "string" && item.trim())
+        .map((item) => item.trim().slice(0, 120))
+        .slice(0, 256)
+      : [];
+    const state = typeof source.state === "string" && source.state.trim()
+      ? source.state.trim().slice(0, 40)
+      : (fallbackState ?? "recovering");
+    return {
+      version: 1,
+      state,
+      recoverable: source.recoverable !== false,
+      ...(typeof source.reason === "string" && source.reason.trim() ? { reason: source.reason.trim().slice(0, 200) } : {}),
+      startedTaskIds: list(source.startedTaskIds),
+      completedTaskIds: list(source.completedTaskIds),
+      failedTaskIds: list(source.failedTaskIds),
+    };
+  }
+
+  function checkpointToSubagentRun(checkpoint) {
+    const startedAt = Number.isFinite(checkpoint?.startedAt) ? checkpoint.startedAt : Date.now();
+    const updatedAt = Number.isFinite(checkpoint?.updatedAt)
+      ? checkpoint.updatedAt
+      : Date.parse(checkpoint?.createdAt ?? "") || startedAt;
+    const lastProgressAt = Number.isFinite(checkpoint?.lastObservedProgressAt)
+      ? checkpoint.lastObservedProgressAt
+      : updatedAt;
+    const status = agentStatusFromCheckpointState(checkpoint?.state);
+    const checkpointManifest = normalizeCheckpointManifest(
+      checkpoint?.checkpointManifest,
+      status === "recovering" || status === "partial" ? status : undefined,
+    );
+    return {
+      id: checkpoint.agentId,
+      ...(checkpoint.parentId ? { parentId: checkpoint.parentId } : {}),
+      ...(checkpoint.sessionId ? { sessionId: checkpoint.sessionId } : {}),
+      goal: typeof checkpoint.goal === "string" && checkpoint.goal
+        ? checkpoint.goal
+        : typeof checkpoint.partialSummary === "string" && checkpoint.partialSummary
+          ? checkpoint.partialSummary
+          : "Recovered subagent",
+      ...(checkpoint.model ? { model: checkpoint.model } : {}),
+      status,
+      startedAt,
+      updatedAt,
+      lastProgressAt,
+      ...(Number.isFinite(checkpoint.durationSeconds) ? { durationSeconds: checkpoint.durationSeconds } : {}),
+      ...(Number.isFinite(checkpoint.inputTokens) ? { inputTokens: checkpoint.inputTokens } : {}),
+      ...(Number.isFinite(checkpoint.outputTokens) ? { outputTokens: checkpoint.outputTokens } : {}),
+      ...(Number.isFinite(checkpoint.toolCount) ? { toolCount: checkpoint.toolCount } : {}),
+      filesRead: Array.isArray(checkpoint.filesRead) ? checkpoint.filesRead : [],
+      filesWritten: Array.isArray(checkpoint.filesWritten) ? checkpoint.filesWritten : [],
+      ...(checkpoint.currentTool ? { currentTool: checkpoint.currentTool } : {}),
+      ...(checkpoint.summary || checkpoint.partialSummary ? { summary: checkpoint.summary ?? checkpoint.partialSummary } : {}),
+      ...(checkpoint.error || checkpoint.terminalReason ? { error: checkpoint.error ?? checkpoint.terminalReason } : {}),
+      ...(checkpoint.providerId ? { providerId: checkpoint.providerId } : {}),
+      ...(checkpoint.runId ? { runId: checkpoint.runId } : {}),
+      ...(checkpoint.taskId ? { taskId: checkpoint.taskId } : {}),
+      ...(checkpoint.roleId ? { roleId: checkpoint.roleId } : {}),
+      ...(Array.isArray(checkpoint.provenance) ? { provenance: checkpoint.provenance } : {}),
+      evidenceCount: Number.isFinite(checkpoint.evidenceCount)
+        ? checkpoint.evidenceCount
+        : Array.isArray(checkpoint.evidence) ? checkpoint.evidence.length : 0,
+      recoverable: checkpoint.recoverable !== false && ["recovering", "partial", "failed", "interrupted"].includes(status),
+      ...(checkpointManifest ? { checkpointManifest } : {}),
+    };
+  }
+
+  function persistSubagentCheckpoint(run) {
+    const goal = typeof run.goal === "string" ? run.goal : "";
+    const checkpointManifest = normalizeCheckpointManifest(
+      run.checkpointManifest,
+      run.status === "recovering" || run.status === "partial" ? run.status : undefined,
+    );
+    return agentRunStore.append({
+      agentId: run.id,
+      ...(run.parentId ? { parentId: run.parentId } : {}),
+      ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+      ...(goal ? { goal } : {}),
+      goalDigest: createHash("sha256").update(goal).digest("hex"),
+      ...(run.model ? { model: run.model } : {}),
+      state: run.status,
+      startedAt: run.startedAt,
+      updatedAt: run.updatedAt,
+      lastObservedProgressAt: run.lastProgressAt ?? run.updatedAt,
+      ...(Number.isFinite(run.durationSeconds) ? { durationSeconds: run.durationSeconds } : {}),
+      ...(Number.isFinite(run.inputTokens) ? { inputTokens: run.inputTokens } : {}),
+      ...(Number.isFinite(run.outputTokens) ? { outputTokens: run.outputTokens } : {}),
+      ...(Number.isFinite(run.toolCount) ? { toolCount: run.toolCount } : {}),
+      filesRead: run.filesRead ?? [],
+      filesWritten: run.filesWritten ?? [],
+      ...(run.currentTool ? { currentTool: run.currentTool } : {}),
+      ...(run.summary ? { summary: run.summary } : {}),
+      ...(run.status === "partial" ? { partialSummary: run.summary } : {}),
+      ...(run.error ? { error: run.error, terminalReason: run.error } : {}),
+      ...(run.providerId ? { providerId: run.providerId } : {}),
+      ...(run.runId ? { runId: run.runId } : {}),
+      ...(run.taskId ? { taskId: run.taskId } : {}),
+      ...(run.roleId ? { roleId: run.roleId } : {}),
+      ...(Array.isArray(run.provenance) ? { provenance: run.provenance } : {}),
+      evidenceCount: Number.isFinite(run.evidenceCount) ? run.evidenceCount : 0,
+      recoverable: run.recoverable === true,
+      readOnly: true,
+      ...(checkpointManifest ? { checkpointManifest } : {}),
+    }).catch(() => undefined);
+  }
+
+  function agentHasSessionPrimitive(run) {
+    return typeof run?.sessionId === "string"
+      && run.sessionId
+      && !run.sessionId.startsWith("pipeline:")
+      && Boolean(store.getSession(run.sessionId));
+  }
+
+  function subagentLegalActions(run) {
+    const hasSession = agentHasSessionPrimitive(run);
+    const activeTurn = hasSession ? activeTurns.get(run.sessionId) : null;
+    const busy = hasSession && (controllers.has(run.sessionId) || sessionReservations.has(run.sessionId));
+    return {
+      retry: Boolean(
+        hasSession
+        && ["failed", "interrupted", "partial", "recovering"].includes(run.status)
+        && !busy
+        && !hasPendingFileReview(run.sessionId)
+        && !store.hasUnconsumedApprovals(run.sessionId)
+      ),
+      resume: false,
+      cancel: Boolean(activeTurn && ["queued", "running", "recovering"].includes(run.status)),
+    };
+  }
+
+  function publicSubagentRun(run) {
+    return {
+      ...run,
+      actions: subagentLegalActions(run),
+    };
+  }
+
   function trackSubagentEvent(sessionId, event) {
     if (!event?.type?.startsWith("subagent.")) return;
     const payload = event.payload ?? {};
@@ -4028,19 +4353,32 @@ export async function startGateway({
     const now = Date.now();
     const previous = subagentRuns.get(id);
     const status = event.type === "subagent.complete"
-      ? "completed"
+      ? payload.status === "partial" || payload.incomplete === true ? "partial" : "completed"
       : event.type === "subagent.failed"
-        ? payload.status === "interrupted" ? "interrupted" : "failed"
-        : "running";
-    subagentRuns.set(id, {
+        ? payload.status === "recovering"
+          ? "recovering"
+          : payload.status === "interrupted"
+            ? "interrupted"
+            : "failed"
+        : payload.status === "queued"
+          ? "queued"
+          : "running";
+    const checkpointManifest = normalizeCheckpointManifest(
+      payload.checkpoint_manifest,
+      status === "recovering" || status === "partial" ? status : undefined,
+    ) ?? previous?.checkpointManifest;
+    const next = {
       id,
-      parentId: payload.parent_id ?? undefined,
-      sessionId,
+      parentId: payload.parent_id ?? previous?.parentId,
+      sessionId: previous?.sessionId ?? sessionId,
       goal: payload.goal ?? previous?.goal ?? "",
       model: payload.model ?? previous?.model,
       status,
       startedAt: previous?.startedAt ?? now,
       updatedAt: now,
+      lastProgressAt: event.type === "subagent.start" || event.type === "subagent.progress"
+        ? now
+        : previous?.lastProgressAt ?? now,
       durationSeconds: payload.duration_seconds ?? previous?.durationSeconds,
       inputTokens: payload.input_tokens ?? previous?.inputTokens,
       outputTokens: payload.output_tokens ?? previous?.outputTokens,
@@ -4050,7 +4388,17 @@ export async function startGateway({
       currentTool: payload.current_tool ?? previous?.currentTool,
       summary: payload.summary ?? previous?.summary,
       error: payload.error ?? previous?.error,
-    });
+      providerId: payload.provider_id ?? previous?.providerId,
+      runId: payload.run_id ?? previous?.runId,
+      taskId: payload.task_id ?? previous?.taskId,
+      roleId: payload.role_id ?? previous?.roleId,
+      provenance: Array.isArray(payload.provenance) ? payload.provenance : previous?.provenance,
+      evidenceCount: Array.isArray(payload.evidence) ? payload.evidence.length : previous?.evidenceCount ?? 0,
+      recoverable: status === "recovering" || status === "partial" || checkpointManifest?.recoverable === true,
+      ...(checkpointManifest ? { checkpointManifest } : {}),
+    };
+    subagentRuns.set(id, next);
+    void persistSubagentCheckpoint(next);
     if (subagentRuns.size > 200) {
       const oldest = [...subagentRuns.values()].sort((left, right) => left.updatedAt - right.updatedAt)[0];
       if (oldest) subagentRuns.delete(oldest.id);
@@ -4318,13 +4666,16 @@ export async function startGateway({
     runtimeStatus.delete(turn.sessionId);
     const now = Date.now();
     for (const [id, run] of subagentRuns) {
-      if (run.sessionId !== turn.sessionId || (run.status !== "queued" && run.status !== "running")) continue;
-      subagentRuns.set(id, {
+      if (run.sessionId !== turn.sessionId || !["queued", "running", "recovering"].includes(run.status)) continue;
+      const next = {
         ...run,
         status: "interrupted",
         updatedAt: now,
+        recoverable: run.recoverable === true || run.status === "recovering" || run.status === "running",
         error: run.error ?? "turn_interrupted",
-      });
+      };
+      subagentRuns.set(id, next);
+      void persistSubagentCheckpoint(next);
     }
     const activity = runtimeActivity.get(turn.sessionId);
     if (activity?.active) {
@@ -4775,7 +5126,7 @@ export async function startGateway({
    * runtime; the profile is validated against this same aggregate cap.
    */
   function runtimeSkillsForTeamProfile(profile) {
-    return skillsStore.runtimeSkills({
+    return skillsStore.catalogSkills({
       ids: teamProfileSkillIds(profile),
       maxSkills: MAX_TEAM_PROFILE_SKILLS,
       strictRequested: true,
@@ -5241,7 +5592,19 @@ export async function startGateway({
           : ["global", "project", "custom", "kiro"].includes(skill.provenance)
             ? skill.provenance
             : "custom",
-        content: typeof skill.content === "string" ? skill.content : "",
+        ...(typeof skill.content === "string" ? { content: skill.content } : {}),
+        ...(typeof skill.owned === "boolean" ? { owned: skill.owned } : {}),
+        ...(typeof skill.enabled === "boolean" ? { enabled: skill.enabled } : {}),
+        ...(typeof skill.compatible === "boolean" ? { compatible: skill.compatible } : {}),
+        ...(typeof skill.availability === "string" ? { availability: skill.availability } : {}),
+        ...(typeof skill.reasonCode === "string" ? { reasonCode: skill.reasonCode } : {}),
+        ...(typeof skill.usage === "number" ? { usage: skill.usage } : {}),
+        ...(typeof skill.lastUsedAt === "string" ? { lastUsedAt: skill.lastUsedAt } : {}),
+        ...(typeof skill.rootId === "string" ? { rootId: skill.rootId } : {}),
+        ...(typeof skill.relativePath === "string" ? { relativePath: skill.relativePath } : {}),
+        ...(typeof skill.contentDigest === "string" ? { contentDigest: skill.contentDigest } : {}),
+        ...(Number.isFinite(skill.mtimeMs) ? { mtimeMs: skill.mtimeMs } : {}),
+        ...(skill.metadata && typeof skill.metadata === "object" ? { metadata: skill.metadata } : {}),
         documents: (Array.isArray(skill.documents) ? skill.documents : []).flatMap((document) => {
           if (!document || typeof document.id !== "string") return [];
           return [{
@@ -5330,6 +5693,7 @@ export async function startGateway({
           ...(stageCodingMode ? { codingMode: stageCodingMode } : {}),
         },
         skills: runtimeSkillsForEngine(runtimeSkills.skills),
+        readSkill: (skillId) => skillsStore.readRuntimeSkill(skillId),
         readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         dependencyArtifacts: departmentInputArtifacts(dependencyArtifacts),
         sensitiveValues,
@@ -5577,6 +5941,15 @@ export async function startGateway({
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  function latestRetryableUserMessage(sessionId) {
+    const rows = store.getMessages(sessionId);
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const message = rows[index];
+      if (message?.role === "user") return message;
+    }
+    return null;
   }
 
   /**
@@ -5960,6 +6333,7 @@ export async function startGateway({
         ...(commandRunner ? { commandRunner } : {}),
         skills: runtimeSkillsForEngine(runtimeSkills.skills),
         ...(skillIds?.length && !activeTeamProfile ? { requiredSkillIds: skillIds } : {}),
+        readSkill: (skillId) => skillsStore.readRuntimeSkill(skillId),
         readSkillDocument: (skillId, documentId) => skillsStore.readRuntimeDocument(skillId, documentId),
         onSkillUsed: id => skillsStore.recordUsage(id).then(() => undefined).catch(() => undefined),
       };
@@ -6370,9 +6744,71 @@ export async function startGateway({
             active: pipelineRuns.filter((run) => !["completed", "failed", "cancelled"].includes(run.status)).length,
             total: pipelineRuns.length,
           },
-          agents: [...subagentRuns.values()].sort((left, right) => right.updatedAt - left.updatedAt),
+          agents: [...subagentRuns.values()].sort((left, right) => right.updatedAt - left.updatedAt).map(publicSubagentRun),
           ...(lastHarnessMetrics ? { harness: lastHarnessMetrics } : {}),
         });
+      }
+
+      const agentMatch = path.match(/^\/api\/agents\/([^/]+)(\/(?:retry|resume|cancel))?$/);
+      if (agentMatch && req.method === "POST") {
+        let agentId = "";
+        try {
+          agentId = decodeURIComponent(agentMatch[1]).trim();
+        } catch {
+          return sendJson(res, 400, { code: "agent_id_invalid", error: "agent_id_invalid" });
+        }
+        if (!agentId || agentId.length > 300 || agentId.includes("\0")) {
+          return sendJson(res, 400, { code: "agent_id_invalid", error: "agent_id_invalid" });
+        }
+        const run = subagentRuns.get(agentId);
+        if (!run) return sendJson(res, 404, { code: "agent_not_found", error: "agent_not_found" });
+        const action = agentMatch[2] || "";
+        if (action === "/resume") {
+          return sendJson(res, 409, {
+            code: "agent_resume_unavailable",
+            error: "agent_resume_unavailable",
+            recoverable: run.recoverable === true,
+            checkpoint_manifest: run.checkpointManifest,
+          });
+        }
+        if (!agentHasSessionPrimitive(run)) {
+          return sendJson(res, 409, { code: "agent_session_primitive_unavailable", error: "agent_session_primitive_unavailable" });
+        }
+        if (action === "/cancel") {
+          const turn = activeTurns.get(run.sessionId);
+          if (!turn || !["queued", "running", "recovering"].includes(run.status)) {
+            return sendJson(res, 409, { code: "agent_cancel_unavailable", error: "agent_cancel_unavailable" });
+          }
+          const messageId = await cancelActiveTurn(turn, "agent-cancelled");
+          return sendJson(res, 200, {
+            ok: true,
+            status: "interrupted",
+            ...(messageId ? { message_id: messageId } : {}),
+          });
+        }
+        if (action === "/retry") {
+          if (!["failed", "interrupted", "partial", "recovering"].includes(run.status)) {
+            return sendJson(res, 409, { code: "agent_retry_unavailable", error: "agent_retry_unavailable" });
+          }
+          await releaseFinalizedTurn(run.sessionId);
+          if (controllers.has(run.sessionId) || sessionReservations.has(run.sessionId)) {
+            return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
+          }
+          if (hasPendingFileReview(run.sessionId)) {
+            return sendJson(res, 409, { code: "file_review_pending", error: "file_review_pending" });
+          }
+          if (store.hasUnconsumedApprovals(run.sessionId)) {
+            return sendJson(res, 409, { code: "approval_required", error: "approval_required" });
+          }
+          if (!latestRetryableUserMessage(run.sessionId)) {
+            return sendJson(res, 409, { code: "agent_retry_unavailable", error: "agent_retry_unavailable" });
+          }
+          const reservationToken = Symbol("agent-retry");
+          sessionReservations.set(run.sessionId, reservationToken);
+          sendJson(res, 200, { ok: true, status: "streaming", mode: "retry", sessionId: run.sessionId });
+          void runPrompt(run.sessionId, "", undefined, undefined, reservationToken, { appendUser: false });
+          return;
+        }
       }
 
       const teamRunMatch = path.match(/^\/api\/team-runs\/([^/]+)$/);
@@ -7058,6 +7494,45 @@ export async function startGateway({
         return sendJson(res, 200, await inspectGBrain());
       }
 
+      // Proposal-first evolution control plane. These endpoints only journal
+      // redacted candidates and review state; they never mutate active config,
+      // prompts, Skills or workspace files.
+      if (path === "/api/evolution/candidates") {
+        const evolutionConfig = currentEvolutionConfig();
+        if (req.method === "GET") {
+          const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+          const requestedStatus = url.searchParams.get("status") || undefined;
+          const candidates = await evolutionStore.list({ status: requestedStatus, limit });
+          return sendJson(res, 200, { config: evolutionConfig, candidates });
+        }
+        if (req.method === "POST") {
+          if (evolutionConfig.harvestEnabled !== true) {
+            return sendJson(res, 409, { code: "evolution_harvest_disabled", error: "evolution_harvest_disabled" });
+          }
+          const body = await readBody(req);
+          const candidate = await evolutionStore.create(body);
+          return sendJson(res, 201, { candidate });
+        }
+      }
+
+      const evolutionCandidateMatch = path.match(/^\/api\/evolution\/candidates\/([^/]+)\/transition$/);
+      if (evolutionCandidateMatch && req.method === "POST") {
+        const id = decodeURIComponent(evolutionCandidateMatch[1]);
+        const body = await readBody(req);
+        const nextStatus = typeof body?.status === "string" ? body.status : "";
+        const evolutionConfig = currentEvolutionConfig();
+        if (["evaluating", "approved"].includes(nextStatus) && evolutionConfig.evaluationEnabled !== true) {
+          return sendJson(res, 409, { code: "evolution_evaluation_disabled", error: "evolution_evaluation_disabled" });
+        }
+        if (["canary", "promoted", "rolled-back"].includes(nextStatus)) {
+          // Promotion is intentionally unavailable until a verified config/workspace
+          // action receipt can be registered by the deterministic executor.
+          return sendJson(res, 409, { code: "evolution_apply_unavailable", error: "evolution_apply_unavailable" });
+        }
+        const candidate = await evolutionStore.transition(id, body);
+        return sendJson(res, 200, { candidate });
+      }
+
       if (path === "/api/memory/mcp" && req.method === "GET") {
         return sendJson(res, 200, await inspectMcp());
       }
@@ -7111,6 +7586,105 @@ export async function startGateway({
         }
       }
 
+      if (path === "/api/memory/atlas" && req.method === "GET") {
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) return sendJson(res, 400, { code: "workspace_not_configured", error: "workspace_not_configured" });
+        try {
+          const mod = await getEngine();
+          if (typeof mod?.getWorkspaceMemoryAtlas !== "function") {
+            return sendJson(res, 503, { code: "memory_atlas_unavailable", error: "memory_atlas_unavailable" });
+          }
+          const listedSkills = await skillsStore.list().catch(() => []);
+          const skills = listedSkills.map((skill) => ({
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            path: skill.relativePath,
+            rootKind: skill.provenance,
+            enabled: skill.enabled === true,
+            compatible: skill.compatible !== false
+              && skill.availability !== "incompatible"
+              && skill.availability !== "unavailable",
+            digest: typeof skill.contentDigest === "string" && skill.contentDigest
+              ? skill.contentDigest
+              : digestJson({
+              id: skill.id,
+              name: skill.name,
+              description: skill.description,
+              provenance: skill.provenance,
+              relativePath: skill.relativePath,
+              metadata: skill.metadata,
+              }),
+            linkedDocuments: Array.isArray(skill.references)
+              ? skill.references.map((reference) => ({
+                  id: reference.id,
+                  title: reference.label,
+                  path: reference.relativePath,
+                }))
+              : [],
+          }));
+          const evolution = (await evolutionStore.list({ limit: currentEvolutionConfig().maxCandidates })).map((candidate) => ({
+            id: candidate.id,
+            title: candidate.title,
+            summary: candidate.summary,
+            status: candidate.status,
+            risk: candidate.risk,
+            targetKind: candidate.target.kind,
+            targetId: candidate.target.id,
+            updatedAt: candidate.updatedAt,
+            digest: candidate.proposalDigest,
+          }));
+          const optionalSources = [
+            {
+              descriptor: { id: "gbrain", label: "GBrain", capability: "search-only" },
+              load: async () => {
+                const status = await inspectGBrain();
+                return {
+                  nodes: [],
+                  edges: [],
+                  tree: [],
+                  health: status.state === "ready"
+                    ? status.degraded ? "degraded" : "ready"
+                    : status.state === "not_initialized"
+                      ? "stale"
+                      : "unavailable",
+                  reason: status.healthReason ?? status.reason ?? status.state,
+                };
+              },
+            },
+            {
+              descriptor: { id: "openviking", label: "OpenViking", capability: "health-only" },
+              load: async () => {
+                const status = await inspectOpenViking();
+                return {
+                  nodes: [],
+                  edges: [],
+                  tree: [],
+                  health: status.state === "ready"
+                    ? status.degraded ? "degraded" : "ready"
+                    : status.state === "disabled"
+                      ? "stale"
+                      : "unavailable",
+                  reason: status.healthReason ?? status.reason ?? status.state,
+                };
+              },
+            },
+          ];
+          return sendJson(res, 200, { atlas: await mod.getWorkspaceMemoryAtlas({
+            workspace,
+            config: builtinMemoryIndexConfig(),
+            skills,
+            evolution,
+            optionalSources,
+          }) });
+        } catch (error) {
+          return sendJson(res, 500, {
+            code: "memory_atlas_failed",
+            error: error?.message ?? "memory_atlas_failed",
+          });
+        }
+      }
+
       if (path === "/api/memory/documents/import" && req.method === "POST") {
         assertGatewayAcceptingMutations();
         const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
@@ -7122,9 +7696,10 @@ export async function startGateway({
         for (const file of files) {
           if (!file || typeof file !== "object") continue;
           const fileName = typeof file.fileName === "string" ? file.fileName.slice(0, 260) : "";
+          const relativePath = typeof file.relativePath === "string" ? file.relativePath.slice(0, 2_048) : undefined;
           const encoded = typeof file.contentBase64 === "string" ? file.contentBase64 : "";
           if (!fileName || !encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) continue;
-          decoded.push({ fileName, bytes: new Uint8Array(Buffer.from(encoded, "base64")) });
+          decoded.push({ fileName, ...(relativePath ? { relativePath } : {}), bytes: new Uint8Array(Buffer.from(encoded, "base64")) });
         }
         if (!decoded.length) return sendJson(res, 400, { code: "documents_invalid", error: "documents_invalid" });
         try {
@@ -7429,45 +8004,54 @@ export async function startGateway({
             sync: sessionMirrorSyncProgress(),
           });
         }
-        try {
-          const mirror = await ensureSessionMirror();
-          if (!mirror) {
-            return sendJson(res, 200, {
+        const syncProgress = sessionMirrorSyncProgress();
+        const key = [
+          cfg.enabled,
+          cfg.readSearch,
+          cfg.enginePrimary,
+          config.workspace ?? "",
+          syncProgress.state,
+          syncProgress.completedSessions,
+        ].join("|");
+        const status = await sessionMirrorHealthGate.probe(key, async () => {
+          try {
+            const mirror = await ensureSessionMirror();
+            if (!mirror) {
+              return {
+                enabled: true,
+                readSearch: cfg.readSearch,
+                enginePrimary: cfg.enginePrimary,
+                state: "error",
+                sessionCount: 0,
+                message: "mirror_unavailable",
+              };
+            }
+            const sessions = await mirror.listSessions({
+              ...(typeof config.workspace === "string" ? { workspace: config.workspace } : {}),
+            });
+            return {
+              enabled: true,
+              readSearch: cfg.readSearch,
+              enginePrimary: cfg.enginePrimary,
+              state: "ready",
+              sessionCount: sessions.length,
+              path: join(dataDir, "session-mirror"),
+              note: cfg.enginePrimary
+                ? "A4b: public GET prefers engine when caught up; JSON remains write path for approvals/rewind."
+                : "JSON remains write path; mirror is dual-write FTS. Enable enginePrimary for public GET preference.",
+            };
+          } catch (error) {
+            return {
               enabled: true,
               readSearch: cfg.readSearch,
               enginePrimary: cfg.enginePrimary,
               state: "error",
               sessionCount: 0,
-              message: "mirror_unavailable",
-              sync: sessionMirrorSyncProgress(),
-            });
+              message: error?.message ?? "mirror_error",
+            };
           }
-          const sessions = await mirror.listSessions({
-            ...(typeof config.workspace === "string" ? { workspace: config.workspace } : {}),
-          });
-          return sendJson(res, 200, {
-            enabled: true,
-            readSearch: cfg.readSearch,
-            enginePrimary: cfg.enginePrimary,
-            state: "ready",
-            sessionCount: sessions.length,
-            path: join(dataDir, "session-mirror"),
-            note: cfg.enginePrimary
-              ? "A4b: public GET prefers engine when caught up; JSON remains write path for approvals/rewind."
-              : "JSON remains write path; mirror is dual-write FTS. Enable enginePrimary for public GET preference.",
-            sync: sessionMirrorSyncProgress(),
-          });
-        } catch (error) {
-          return sendJson(res, 200, {
-            enabled: true,
-            readSearch: cfg.readSearch,
-            enginePrimary: cfg.enginePrimary,
-            state: "error",
-            sessionCount: 0,
-            message: error?.message ?? "mirror_error",
-            sync: sessionMirrorSyncProgress(),
-          });
-        }
+        });
+        return sendJson(res, 200, { ...status, sync: sessionMirrorSyncProgress() });
       }
 
       if (path === "/api/memory/session-mirror/search" && req.method === "GET") {
@@ -8253,6 +8837,7 @@ export async function startGateway({
           headers: profile.headers,
           credentials,
           allowBenchmarkNetwork: profile.allowBenchmarkNetwork === true,
+          allowInsecureHttpOrigins: insecureDiscoveryOrigins(profile),
         });
         rememberDiscoveredCapabilities({ protocol: profile.protocol, baseURL: profile.baseURL, models });
         return sendJson(res, 200, { models, count: models.length });
@@ -8426,6 +9011,7 @@ export async function startGateway({
             baseURL: existing.baseURL,
             headers: existing.headers,
             credentials,
+            allowInsecureHttpOrigins: insecureDiscoveryOrigins(existing),
           });
           rememberDiscoveredCapabilities({ protocol: existing.protocol, baseURL: existing.baseURL, models });
           return sendJson(res, 200, { models, count: models.length });
@@ -8514,6 +9100,26 @@ export async function startGateway({
         }
       }
 
+      const providerRuntimeResetMatch = path.match(/^\/api\/providers\/([^/]+)\/runtime\/reset$/);
+      if (providerRuntimeResetMatch && req.method === "POST") {
+        const providerId = decodeURIComponent(providerRuntimeResetMatch[1]);
+        const provider = config.providers.find((candidate) => candidate.id === providerId);
+        if (!provider) throw new ProviderConfigError("provider_not_found");
+        const body = await readBody(req).catch(() => ({}));
+        const accountId = typeof body?.accountId === "string" && body.accountId.trim()
+          ? body.accountId.trim()
+          : undefined;
+        const router = accountPoolRouterFor(provider);
+        const reset = router.resetRuntime(accountId);
+        if (accountId && !reset) throw new ProviderConfigError("provider_account_not_found");
+        return sendJson(res, 200, {
+          ok: true,
+          scope: accountId ? "account" : "provider",
+          ...(accountId ? { accountId } : {}),
+          runtime: publicProviderAccountPool(providerId),
+        });
+      }
+
       const providerMatch = path.match(/^\/api\/providers\/([^/]+)(\/(?:secret|discover))?$/);
       if (providerMatch) {
         const providerId = decodeURIComponent(providerMatch[1]);
@@ -8533,6 +9139,7 @@ export async function startGateway({
             headers: existing.headers,
             credentials,
             allowBenchmarkNetwork: Boolean(body && typeof body === "object" && !Array.isArray(body) && body.allowBenchmarkNetwork === true),
+            allowInsecureHttpOrigins: insecureDiscoveryOrigins(existing),
           });
           rememberDiscoveredCapabilities({ protocol: existing.protocol, baseURL: existing.baseURL, models });
           return sendJson(res, 200, { models, count: models.length });
@@ -10193,6 +10800,8 @@ export async function startGateway({
       await configMutationTail;
       await persistence.drain();
       await teamRunStore.flush();
+      await agentRunStore.flush();
+      await evolutionStore.flush();
       await pipelineRunStore.flush();
       await workspaceLeaseStore.flush();
       await store.close();

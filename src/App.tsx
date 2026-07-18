@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommandPalette } from "@/components/CommandPalette";
 import { Composer } from "@/components/Composer";
 import { ChangesPanel } from "@/components/chat/ChangesPanel";
+import { useConversationScroll } from "@/components/conversation/useConversationScroll";
 import { CronPanel } from "@/components/cron/CronPanel";
 import { PipelineMissionPanel } from "@/components/pipeline/PipelineMissionPanel";
 import { Message } from "@/components/Message";
@@ -24,8 +25,10 @@ import {
   approvalResolved,
   appendReasoning,
   appendText,
+  completeReasoning,
   hasLegacyHealHandoff,
   redactLegacyHealHandoff,
+  startReasoning,
   toolComplete,
   toolProgress,
   toolStart,
@@ -54,7 +57,7 @@ import { applyTheme, getTheme, THEMES, type ThemeId } from "@/lib/theme";
 import type { AppConfig, ChatMessage, GatewayEvent, GatewayStatus, MessagePart, SessionInfo, StoredChatMessage, SubagentRun } from "@/lib/types";
 import { useModelPreset } from "@/store/model-presets";
 import { togglePinned } from "@/store/sessions-ui";
-import { getUiSettings, notifyTurnComplete } from "@/store/settings";
+import { getUiSettings, notifyTurnComplete, useUiSettings } from "@/store/settings";
 
 export function App() {
   const { t } = useI18n();
@@ -97,7 +100,6 @@ export function App() {
   ));
 
   const pendingIdRef = useRef<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
   const sessionPollRequestRef = useRef(0);
   const sessionMutationRevisionRef = useRef(0);
   const sessionMutationsInFlightRef = useRef(0);
@@ -114,7 +116,6 @@ export function App() {
       revision: selectedSessionViewRef.current.revision + 1,
     };
   }
-
   const beginSessionMutation = useCallback(() => {
     sessionMutationsInFlightRef.current += 1;
     sessionMutationRevisionRef.current += 1;
@@ -227,6 +228,20 @@ export function App() {
   const currentProviderId = currentSession?.providerId ?? config?.activeProviderId ?? "";
   const currentModelId = currentSession?.modelId ?? config?.activeModelId ?? "";
   const currentModelPreset = useModelPreset(currentProviderId, currentModelId);
+  const ui = useUiSettings();
+  const {
+    contentRef,
+    followMode,
+    handleKeyDownCapture,
+    handleScroll,
+    handleTouchEndCapture,
+    handleTouchMoveCapture,
+    handleTouchStartCapture,
+    handleWheelCapture,
+    resumeFollowing,
+    scrollRef,
+    showJumpToLatest,
+  } = useConversationScroll(currentId, messages);
 
   useEffect(() => {
     if (!config) {
@@ -300,7 +315,7 @@ export function App() {
       return [...current, {
         id: nextId,
         role: "assistant",
-        parts: [{ type: "reasoning", text: "" }],
+        parts: [],
         pending: true,
       }];
     });
@@ -367,25 +382,58 @@ export function App() {
                     ...message,
                     id: canonicalId,
                     pending: true,
-                    parts: message.parts.length ? message.parts : [{ type: "reasoning", text: "" }],
+                    parts: message.parts,
                   }
                 : message);
             }
             return [...current, {
               id: canonicalId,
               role: "assistant",
-              parts: [{ type: "reasoning", text: "" }],
+              parts: [],
               pending: true,
             }];
           });
-          updatePending((parts) => parts.length ? parts : [{ type: "reasoning", text: "" }]);
           break;
         }
         case "message.delta":
           if (payload.text) updatePending((parts) => appendText(parts, payload.text!));
           break;
+        case "reasoning.start":
+          if (payload.id) {
+            updatePending((parts) => startReasoning(parts, {
+              id: payload.id,
+              source: payload.source,
+              providerId: payload.provider_id,
+              modelId: payload.model_id,
+              attempt: payload.attempt,
+              startedAt: payload.started_at,
+              sequence: payload.sequence,
+            }));
+          }
+          break;
         case "reasoning.delta":
-          if (payload.text) updatePending((parts) => appendReasoning(parts, payload.text!));
+          if (payload.text) {
+            updatePending((parts) => appendReasoning(parts, payload.text!, {
+              id: payload.id,
+              source: payload.source,
+              providerId: payload.provider_id,
+              modelId: payload.model_id,
+              startedAt: payload.started_at,
+              attempt: payload.attempt,
+              sequence: payload.sequence,
+            }));
+          }
+          break;
+        case "reasoning.complete":
+          if (payload.id) {
+            updatePending((parts) => completeReasoning(parts, {
+              id: payload.id,
+              state: "complete",
+              completedAt: payload.completed_at,
+              attempt: payload.attempt,
+              sequence: payload.sequence,
+            }));
+          }
           break;
         case "tool.start":
           updatePending((parts) => toolStart(parts, { toolCallId: payload.tool_call_id, name: payload.name, args: payload.args }));
@@ -598,10 +646,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, describeError]);
 
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (element) element.scrollTop = messages.length === 0 ? 0 : element.scrollHeight;
-  }, [messages]);
+
 
   // Soft-archive restore from Settings → Sessions.
   useEffect(() => {
@@ -619,6 +664,7 @@ export function App() {
   ) => {
     if (!currentId || rewinding || approvalBlocked || fileReviewBlocked) return;
     if (!text.trim() && !(images && images.length)) return;
+    resumeFollowing();
     const userId = `msg-${globalThis.crypto.randomUUID()}`;
     const assistantId = pendingAssistantId(currentId);
     pendingIdRef.current = assistantId;
@@ -647,7 +693,7 @@ export function App() {
       setRunState("idle");
       setTurnStartedAt(null);
     });
-  }, [approvalBlocked, fileReviewBlocked, currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding]);
+  }, [approvalBlocked, fileReviewBlocked, currentId, config, currentProviderId, currentModelId, currentModelPreset, describeError, rewinding, resumeFollowing]);
 
   const respondToFileReview = useCallback(async (accept: boolean) => {
     if (!currentId || streaming || rewinding) return;
@@ -1245,13 +1291,22 @@ export function App() {
   );
 
   const conversation = (
-    <main className="conversation-shell flex h-full min-w-0 flex-1 flex-col">
-      <div ref={scrollRef} className="conversation-scroll min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4">
+    <main className="conversation-shell relative flex h-full min-w-0 flex-1 flex-col" data-chat-surface={ui.chatBackground}>
+      <div
+        ref={scrollRef}
+        className="conversation-scroll min-h-0 flex-1 overflow-y-auto"
+        onKeyDownCapture={handleKeyDownCapture}
+        onScroll={handleScroll}
+        onTouchEndCapture={handleTouchEndCapture}
+        onTouchMoveCapture={handleTouchMoveCapture}
+        onTouchStartCapture={handleTouchStartCapture}
+        onWheelCapture={handleWheelCapture}
+      >
+        <div ref={contentRef} className="mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4">
           {startupError && <div className="mb-4 rounded-md border border-danger/35 bg-danger/8 px-3 py-2 text-[11px] text-danger">{startupError}</div>}
           <div className="space-y-7 pb-4">
             {messages.map((message) => (
-              <div key={message.id} className="msg-in">
+              <div key={message.id} className="msg-in" data-message-id={message.id}>
                 <Message
                   message={message}
                   onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
@@ -1266,6 +1321,17 @@ export function App() {
           </div>
         </div>
       </div>
+      {showJumpToLatest && followMode === "paused" && (
+        <div className="conversation-jump-latest">
+          <button
+            type="button"
+            className="conversation-jump-latest-button"
+            onClick={resumeFollowing}
+          >
+            {t("chat.jumpToLatest")}
+          </button>
+        </div>
+      )}
       <Composer
         streaming={streaming}
         stopping={stopping}

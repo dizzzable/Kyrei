@@ -49,6 +49,15 @@ export interface SubagentEventMetadata {
   files_written?: string[];
   /** Child finished operationally but did not produce a trustworthy conclusion. */
   incomplete?: boolean;
+  checkpoint_manifest?: {
+    version: 1;
+    state: "recovering" | "partial" | "interrupted" | "failed" | "completed";
+    recoverable?: boolean;
+    reason?: string;
+    started_task_ids?: string[];
+    completed_task_ids?: string[];
+    failed_task_ids?: string[];
+  };
   input_tokens?: number;
   model?: string;
   output_tokens?: number;
@@ -76,7 +85,7 @@ export type SubagentEvent =
       payload: SubagentEventBasePayload &
         SubagentEventMetadata & {
           duration_seconds: number;
-          status: "completed";
+          status: "completed" | "partial";
           summary: string;
         };
     }
@@ -86,7 +95,7 @@ export type SubagentEvent =
         SubagentEventMetadata & {
           duration_seconds: number;
           error: string;
-          status: "failed" | "interrupted";
+          status: "failed" | "interrupted" | "recovering";
           summary: string;
         };
     };
@@ -155,14 +164,57 @@ export type KyreiEvent =
       payload: {
         run_id: string;
         profile_id: string;
-        status: "completed" | "failed" | "interrupted";
+        status: "completed" | "partial" | "failed" | "interrupted" | "recovering";
         completed_tasks: number;
         failed_tasks: number;
+        checkpoint_manifest?: {
+          version: 1;
+          state: "recovering" | "partial" | "interrupted" | "failed" | "completed";
+          recoverable?: boolean;
+          reason?: string;
+          started_task_ids?: string[];
+          completed_task_ids?: string[];
+          failed_task_ids?: string[];
+        };
       };
     }
-  | { type: "message.start" }
+  | { type: "message.start"; payload?: { message_id?: string } }
   | { type: "message.delta"; payload: { text: string } }
-  | { type: "reasoning.delta"; payload: { text: string } }
+  | {
+      type: "reasoning.start";
+      payload: {
+        id: string;
+        source: "provider" | "kyrei-status";
+        provider_id?: string;
+        model_id?: string;
+        attempt?: number;
+        sequence: number;
+        started_at: number;
+      };
+    }
+  | {
+      type: "reasoning.delta";
+      payload: {
+        id?: string;
+        text: string;
+        sequence?: number;
+        attempt?: number;
+        source?: "provider" | "kyrei-status";
+        provider_id?: string;
+        model_id?: string;
+        started_at?: number;
+      };
+    }
+  | {
+      type: "reasoning.complete";
+      payload: {
+        id: string;
+        state?: "complete" | "redacted" | "interrupted";
+        sequence: number;
+        completed_at: number;
+        attempt?: number;
+      };
+    }
   | { type: "tool.start"; payload: { tool_call_id: string; name: string; args: unknown } }
   | { type: "tool.progress"; payload: { tool_call_id: string; text: string } }
   | {
@@ -202,7 +254,19 @@ export type KyreiEvent =
 /** Structured message part for durable persistence (compatible with v1). */
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
+  | {
+      type: "reasoning";
+      text: string;
+      id?: string;
+      source?: "provider" | "kyrei-status";
+      providerId?: string;
+      modelId?: string;
+      attempt?: number;
+      state?: "streaming" | "complete" | "redacted" | "interrupted";
+      startedAt?: number;
+      completedAt?: number;
+      sequence?: number;
+    }
   | {
       type: "approval";
       approvalId: string;
@@ -267,8 +331,12 @@ export interface DelegationConfig {
   maxParallel: number;
   /** Maximum model/tool loop steps available to each read-only child. */
   maxSteps: number;
-  /** Hard wall-clock limit for one read-only child, including every model/tool step. */
+  /** Legacy alias for the child idle lease; preserved for config compatibility. */
   timeoutMs: number;
+  /** Idle lease renewed only by observed progress. */
+  idleTimeoutMs: number;
+  /** Separate non-renewable ceiling for one delegated child. */
+  maxRuntimeMs: number;
 }
 
 /** User-authored behaviour profile. It is advisory and always subordinate to Kyrei policy. */
@@ -618,6 +686,19 @@ export interface EngineConfig {
     };
   };
   /**
+   * Proposal-first self-improvement control plane. Harvesting stores only
+   * redacted local evidence; model evaluation is opt-in and promotion remains
+   * verifier-gated. Immutable core policy is outside this contract.
+   */
+  evolution: {
+    harvestEnabled: boolean;
+    evaluationEnabled: boolean;
+    promotionMode: "off" | "manual" | "low-risk-canary";
+    maxCandidates: number;
+    retentionDays: number;
+    maxEvaluationCostUsd: number | null;
+  };
+  /**
    * Soft/hard spend caps evaluated against the durable usage ledger (gateway).
    * Soft → warn; hard → block new turns until the window resets.
    */
@@ -681,7 +762,9 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     maxTasks: 3,
     maxParallel: 3,
     maxSteps: 8,
-    timeoutMs: 90_000,
+    timeoutMs: 180_000,
+    idleTimeoutMs: 180_000,
+    maxRuntimeMs: 1_800_000,
   },
   memory: {
     gbrain: {
@@ -732,6 +815,14 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       minTopScore: 4,
       minHits: 1,
     },
+  },
+  evolution: {
+    harvestEnabled: true,
+    evaluationEnabled: false,
+    promotionMode: "manual",
+    maxCandidates: 500,
+    retentionDays: 180,
+    maxEvaluationCostUsd: null,
   },
   /** Local plan-as-files under .kyrei/plan — on by default (no external deps). */
   planning: { enabled: true },
@@ -830,9 +921,41 @@ export interface RuntimeSkill {
   name: string;
   description: string;
   provenance: "global" | "project" | "custom" | "kiro";
-  content: string;
+  content?: string;
+  owned?: boolean;
+  enabled?: boolean;
+  compatible?: boolean;
+  availability?: "ready" | "incompatible" | "unavailable";
+  reasonCode?: string;
+  usage?: number;
+  lastUsedAt?: string;
+  rootId?: string;
+  relativePath?: string;
+  contentDigest?: string;
+  mtimeMs?: number;
+  metadata?: {
+    version?: string;
+    author?: string;
+    tags?: string[];
+    requirements?: {
+      tools?: string[];
+      platforms?: string[];
+      capabilities?: string[];
+      network?: boolean;
+    };
+  };
   /** Private runtime-only documents explicitly linked from this skill. */
   documents?: RuntimeSkillDocument[];
+}
+
+export interface RuntimeSkillReadResult {
+  skill: RuntimeSkill;
+}
+
+export interface RuntimeSkillReadUnavailable {
+  skillId: string;
+  code: string;
+  message?: string;
 }
 
 export interface RuntimeSkillDocument {
@@ -899,6 +1022,7 @@ export type ProviderFailureClass =
   | "rate_limit"
   | "server"
   | "auth_definite"
+  | "auth_uncertain"
   | "auth_soft"
   | "client"
   | "unknown";
@@ -944,7 +1068,10 @@ export interface RuntimeTeamLimits {
   maxAgents: number;
   maxTasks: number;
   maxStepsPerAgent: number;
+  /** Legacy alias for the per-task idle lease. */
   timeoutMs: number;
+  idleTimeoutMs: number;
+  maxRuntimeMs: number;
 }
 
 /** Gateway-resolved role. Credentials never cross back into public config/events. */
@@ -1069,6 +1196,8 @@ export interface RunKyreiChatOpts {
   requiredSkillIds?: string[];
   /** Gateway-owned usage recorder; never supplied by the renderer. */
   onSkillUsed?: (id: string) => void | Promise<void>;
+  /** Gateway-owned lazy reader for full SKILL.md bodies by stable id. */
+  readSkill?: (skillId: string) => Promise<RuntimeSkillReadResult | RuntimeSkillReadUnavailable | null>;
   /** Gateway-owned lazy reader; document contents never ride in runtime config. */
   readSkillDocument?: (skillId: string, documentId: string) => Promise<RuntimeSkillDocumentContent | null>;
 }

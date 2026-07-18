@@ -8,6 +8,7 @@ import { persistentJsonAtom, useAtom } from "@/store/atom";
 
 export type ToolViewMode = "compact" | "technical";
 export type UiDensity = "comfortable" | "compact";
+export type ChatBackgroundMode = "follow-theme" | "peonies";
 
 export interface UiSettings {
   /** Root font scale (0.85–1.3). Applied to <html> as a CSS var. */
@@ -16,6 +17,8 @@ export interface UiSettings {
   toolView: ToolViewMode;
   /** Layout density. */
   density: UiDensity;
+  /** Conversation surface background treatment. */
+  chatBackground: ChatBackgroundMode;
   /** Show/hide model reasoning blocks in assistant messages. */
   showReasoning: boolean;
   /** Master switch for all notifications. */
@@ -40,6 +43,7 @@ export const DEFAULT_UI_SETTINGS: UiSettings = {
   scale: 1,
   toolView: "compact",
   density: "comfortable",
+  chatBackground: "follow-theme",
   showReasoning: true,
   notify: true,
   notifySound: true,

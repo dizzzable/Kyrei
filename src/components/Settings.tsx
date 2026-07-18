@@ -728,6 +728,21 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       : gbrainStatus?.state === "unavailable"
         ? t("settings.gbrain.status.unavailableHint")
         : undefined;
+  const runtimeHealthHint = (status: {
+    degraded?: boolean;
+    stale?: boolean;
+    healthReason?: string;
+    consecutiveFailures?: number;
+  } | null | undefined) => status?.stale
+    ? t("settings.runtimeHealth.stale", {
+        reason: status.healthReason || t("settings.runtimeHealth.unknownReason"),
+      })
+    : status?.degraded
+      ? t("settings.runtimeHealth.degraded", {
+          count: status.consecutiveFailures ?? 1,
+          reason: status.healthReason || t("settings.runtimeHealth.unknownReason"),
+        })
+      : null;
 
   const overlay = (
     <div
@@ -1346,6 +1361,16 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       ]}
                       onChange={(value) => setUiSetting("density", value)}
                     />
+                    <EnumField
+                      label={t("settings.chatBackground.label")}
+                      hint={t("settings.chatBackground.hint")}
+                      value={ui.chatBackground}
+                      options={[
+                        { value: "follow-theme", label: t("settings.chatBackground.followTheme") },
+                        { value: "peonies", label: t("settings.chatBackground.peonies") },
+                      ]}
+                      onChange={(value) => setUiSetting("chatBackground", value)}
+                    />
                   </div>
                 </div>
               )}
@@ -1668,6 +1693,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                                   })}
                                 </p>
                               )}
+                              {runtimeHealthHint(memoryIndexStatus) && (
+                                <p className="mt-1 text-[12px] text-warning" role="status">
+                                  {runtimeHealthHint(memoryIndexStatus)}
+                                </p>
+                              )}
                               {memoryIndexStatus && (
                                 <p className="mt-0.5 text-[12px] leading-snug text-muted">
                                   {t("settings.projectMemory.status.tierA", {
@@ -1914,6 +1944,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                                   {sessionMirrorNote && (
                                     <p className="mt-1 text-[12px] text-muted">{sessionMirrorNote}</p>
                                   )}
+                                  {runtimeHealthHint(sessionMirrorStatus) && (
+                                    <p className="mt-1 text-[12px] text-warning" role="status">
+                                      {runtimeHealthHint(sessionMirrorStatus)}
+                                    </p>
+                                  )}
                                   {sessionMirrorStatus?.sync?.state === "running" && (
                                     <p className="mt-1 text-[12px] text-muted">
                                       {t("settings.projectMemory.sessionMirror.progress", {
@@ -2049,6 +2084,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                             <div className="min-w-0">
                               <p className="text-[13px] font-medium text-foreground" role="status">{gbrainStatusTitle}</p>
                               {gbrainStatusHint && <p className="mt-0.5 text-[12px] leading-snug text-muted">{gbrainStatusHint}</p>}
+                              {runtimeHealthHint(gbrainStatus) && (
+                                <p className="mt-1 text-[12px] text-warning" role="status">
+                                  {runtimeHealthHint(gbrainStatus)}
+                                </p>
+                              )}
                             </div>
                             <div className="flex shrink-0 flex-wrap items-center gap-2">
                               <Button variant="outline" size="sm" onClick={() => void checkGBrain()} disabled={gbrainBusy}>

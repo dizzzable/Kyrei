@@ -15,7 +15,30 @@ function safeRunId(value) {
 }
 
 function terminalType(type) {
-  return type === "team.complete" || type === "team.failed" || type === "team.interrupted" || type === "team.cancelled";
+  return type === "team.complete" || type === "team.failed" || type === "team.interrupted" || type === "team.cancelled" || type === "team.partial";
+}
+
+function checkpointManifest(runId, payload = {}) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const list = (value) => Array.isArray(value)
+    ? value
+      .slice(0, 256)
+      .filter((item) => typeof item === "string" && item.trim())
+      .map((item) => item.trim().slice(0, 120))
+    : [];
+  const state = typeof source.state === "string" && source.state.trim()
+    ? source.state.trim().slice(0, 40)
+    : "recovering";
+  return {
+    version: 1,
+    runId,
+    state,
+    recoverable: source.recoverable !== false,
+    ...(typeof source.reason === "string" && source.reason.trim() ? { reason: source.reason.trim().slice(0, 200) } : {}),
+    startedTaskIds: list(source.startedTaskIds),
+    completedTaskIds: list(source.completedTaskIds),
+    failedTaskIds: list(source.failedTaskIds),
+  };
 }
 
 export class TeamRunStore {
@@ -80,6 +103,17 @@ export class TeamRunStore {
     return rows.slice(-this.maxEventsPerRun);
   }
 
+  async latest(runId) {
+    const rows = await this.read(runId);
+    return rows.at(-1) ?? null;
+  }
+
+  async appendCheckpoint(runId, manifest) {
+    const id = safeRunId(runId);
+    const normalized = checkpointManifest(id, manifest);
+    return this.append(id, { type: "team.checkpoint", payload: { checkpoint_manifest: normalized } });
+  }
+
   async recoverInterrupted() {
     await mkdir(this.dir, { recursive: true });
     const recovered = [];
@@ -97,7 +131,32 @@ export class TeamRunStore {
       const last = rows.at(-1);
       const started = rows.some((row) => row?.type === "team.start");
       if (!started || !last?.runId || terminalType(last.type)) continue;
-      await this.append(last.runId, { type: "team.interrupted", payload: { reason: "gateway_restart" } });
+      const startedTaskIds = rows
+        .filter((row) => row?.type === "subagent.start" && typeof row?.payload?.task_id === "string")
+        .map((row) => row.payload.task_id);
+      const completedTaskIds = rows
+        .filter((row) => row?.type === "subagent.complete" && typeof row?.payload?.task_id === "string")
+        .map((row) => row.payload.task_id);
+      const failedTaskIds = rows
+        .filter((row) => row?.type === "subagent.failed" && typeof row?.payload?.task_id === "string")
+        .map((row) => row.payload.task_id);
+      const manifest = checkpointManifest(last.runId, {
+        state: "recovering",
+        recoverable: true,
+        reason: "gateway_restart",
+        startedTaskIds,
+        completedTaskIds,
+        failedTaskIds,
+      });
+      await this.appendCheckpoint(last.runId, manifest);
+      await this.append(last.runId, {
+        type: "team.interrupted",
+        payload: {
+          reason: "gateway_restart",
+          next_status: "recovering",
+          checkpoint_manifest: manifest,
+        },
+      });
       recovered.push(last.runId);
     }
     return recovered.sort();

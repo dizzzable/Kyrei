@@ -8,6 +8,7 @@ import {
   enqueueQueuedPrompt,
   removeQueuedPrompt,
 } from "@/store/composer-queue";
+import { subscribeComposerSkillSelection } from "@/store/composer-skills";
 import { useAtom } from "@/store/atom";
 import { setUiSetting, useUiSettings } from "@/store/settings";
 import { addSnippet, useSnippets } from "@/store/snippets";
@@ -456,6 +457,13 @@ export function Composer({
       </button>
     </div>
   );
+
+  useEffect(() => subscribeComposerSkillSelection((skillId) => {
+    setSelectedSkillIds((current) => current.includes(skillId) || current.length >= MAX_SELECTED_SKILLS
+      ? current
+      : [...current, skillId]);
+    requestAnimationFrame(() => ref.current?.focus());
+  }), []);
 
   const pickSuggestion = (index: number) => {
     const c = suggestions[index];

@@ -81,4 +81,27 @@ describe("memory workbench gateway", () => {
     expect(response.status).toBe(422);
     expect(body.rejected[0]?.code).toBe("document_type_unsupported");
   });
+
+  it("exposes the v2 Atlas tree without requiring optional sources", async () => {
+    const response = await request("/api/memory/atlas");
+    const body = await response.json() as {
+      atlas: {
+        version: number;
+        snapshotId: string;
+        sources: Array<{ id: string; capability: string; health: string }>;
+        tree: Array<{ id: string; sourceId: string }>;
+        nodes: Array<{ id: string; kind: string }>;
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.atlas.version).toBe(2);
+    expect(body.atlas.snapshotId).toMatch(/^[a-f0-9]{24}$/);
+    expect(body.atlas.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "code", capability: "browse" }),
+      expect.objectContaining({ id: "skills", capability: "browse", health: "ready" }),
+    ]));
+    expect(body.atlas.nodes.some((node) => node.id === "project:root" && node.kind === "project")).toBe(true);
+    expect(body.atlas.tree.some((node) => node.sourceId === "code")).toBe(true);
+  });
 });

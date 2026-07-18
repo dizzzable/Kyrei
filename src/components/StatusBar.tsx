@@ -92,8 +92,8 @@ export function StatusBar({
     };
   }, []);
 
-  const activeAgents = agents.filter((run) => run.status === "running" || run.status === "queued").length;
-  const failedAgents = agents.filter((run) => run.status === "failed" || run.status === "interrupted").length;
+  const activeAgents = agents.filter((run) => run.status === "running" || run.status === "queued" || run.status === "recovering").length;
+  const failedAgents = agents.filter((run) => run.status === "failed" || run.status === "interrupted" || run.status === "partial").length;
   const activeMissions = status?.pipelines?.active ?? 0;
   const metric = useMemo(() => contextMetric(tokens ?? 0, contextWindow ?? 0), [tokens, contextWindow]);
   const sessionTime = sessionStartedAt ? Date.parse(sessionStartedAt) : Number.NaN;

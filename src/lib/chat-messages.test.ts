@@ -4,9 +4,11 @@ import {
   approvalResolved,
   appendReasoning,
   appendText,
+  completeReasoning,
   hasLegacyHealHandoff,
   messageText,
   redactLegacyHealHandoff,
+  startReasoning,
   toolComplete,
   toolStart,
 } from "@/lib/chat-messages";
@@ -69,19 +71,29 @@ describe("appendText / appendReasoning coalescing", () => {
     expect(messageText(parts)).toBe("Hello, world");
   });
 
-  it("does not create a third text part when reasoning interleaves two text deltas", () => {
+  it("preserves chronology when reasoning interleaves two text deltas", () => {
     let parts: MessagePart[] = [];
     parts = appendText(parts, "The answer ");
-    parts = appendReasoning(parts, "thinking...");
+    parts = startReasoning(parts, { id: "r1" });
+    parts = appendReasoning(parts, "thinking...", { id: "r1", sequence: 2 });
+    parts = completeReasoning(parts, { id: "r1", sequence: 3 });
     parts = appendText(parts, "is 42");
 
-    // Reasoning is transparent within the segment: the second text delta lands
-    // on the existing text part instead of opening a new one.
     const textParts = parts.filter(p => p.type === "text");
     const reasoningParts = parts.filter(p => p.type === "reasoning");
-    expect(textParts).toHaveLength(1);
+    expect(textParts).toHaveLength(2);
     expect(reasoningParts).toHaveLength(1);
+    expect(reasoningParts[0]).toMatchObject({ id: "r1", state: "complete", text: "thinking..." });
     expect(messageText(parts)).toBe("The answer is 42");
+  });
+
+  it("ignores out-of-order reasoning deltas for an older sequence", () => {
+    const parts = appendReasoning(
+      startReasoning([], { id: "r1", sequence: 1 }),
+      "new",
+      { id: "r1", sequence: 3 },
+    );
+    expect(appendReasoning(parts, "old", { id: "r1", sequence: 2 })).toEqual(parts);
   });
 
   it("opens a fresh text segment after a tool part", () => {

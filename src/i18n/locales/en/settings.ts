@@ -1,6 +1,9 @@
 import type { MessageCatalog } from "../../types";
 
 export const enSettings = {
+  "settings.runtimeHealth.degraded": "Temporarily degraded after {{count}} failed check(s): {{reason}}. Keeping the last healthy state to prevent status flicker.",
+  "settings.runtimeHealth.stale": "Showing the last healthy state while the live check recovers: {{reason}}.",
+  "settings.runtimeHealth.unknownReason": "temporary check failure",
   "settings.title": "Settings",
   "settings.sectionNav": "Settings section",
   "settings.saved": "Saved",
@@ -724,6 +727,10 @@ export const enSettings = {
   "settings.scale.label": "Interface scale",
   "settings.scale.hint": "Size of text and controls.",
   "settings.density.label": "Density",
+  "settings.chatBackground.label": "Chat background",
+  "settings.chatBackground.hint": "Follow the active theme by default, or opt back into the floral surface.",
+  "settings.chatBackground.followTheme": "Follow theme",
+  "settings.chatBackground.peonies": "Peonies",
   "settings.options.comfortable": "Comfortable",
   "settings.options.dense": "Compact",
   "settings.theme.switcher": "Theme: {name}",
@@ -1328,6 +1335,8 @@ export const enSettings = {
   "settings.providers.transport": "Transport",
   "settings.providers.baseUrl": "Base URL",
   "settings.providers.baseUrlPlaceholder": "https://api.example.com/v1",
+  "settings.providers.insecureHttp": "Allow insecure HTTP for {origin}",
+  "settings.providers.insecureHttpHint": "Exact-origin acknowledgement for a server you control. HTTPS is preferred. This does not disable SSRF, DNS-rebinding, redirect, metadata-address or TLS protection globally.",
   "settings.providers.models": "Models — one per line or comma-separated",
   "settings.providers.manualModels": "Manual model IDs",
   "settings.providers.manualModelsPlaceholder": "model-id, one per line",
@@ -1360,6 +1369,8 @@ export const enSettings = {
   "settings.providers.keyStoredHint": "Credentials are saved. Kyrei never returns the stored value to the interface.",
   "settings.providers.clearCredentials": "Remove primary credentials",
   "settings.providers.clearCredentialsHint": "Remove this provider's primary credentials. Additional pool accounts are managed separately.",
+  "settings.providers.resetRuntime": "Reset runtime state",
+  "settings.providers.resetRuntimeHint": "Clear temporary cooldown and authentication strikes without changing this provider, its manual models or saved credentials.",
   "settings.providers.clearCredentialsConfirm": "Remove the primary credentials for {name}? The primary account will become unavailable; additional pool accounts are unchanged.",
   "settings.providers.keyPrivacyHint": "The key is sent only to the local gateway and is excluded from configuration exports.",
   "settings.providers.deleteConfirm": "Delete provider {name}? Sessions using it will fall back to the default model.",

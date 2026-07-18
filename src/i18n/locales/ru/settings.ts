@@ -2,6 +2,9 @@ import type { LocaleFor } from "../../types";
 import type { enSettings } from "../en/settings";
 
 export const ruSettings = {
+  "settings.runtimeHealth.degraded": "Временно нестабильно после {{count}} неудачных проверок: {{reason}}. Последнее рабочее состояние сохранено, чтобы статус не мигал.",
+  "settings.runtimeHealth.stale": "Показано последнее рабочее состояние, пока живая проверка восстанавливается: {{reason}}.",
+  "settings.runtimeHealth.unknownReason": "временный сбой проверки",
   "settings.title": "Настройки",
   "settings.sectionNav": "Раздел настроек",
   "settings.saved": "Сохранено",
@@ -660,6 +663,10 @@ export const ruSettings = {
   "settings.richRendering.hint": "Markdown, подсветка кода и формулы.",
   "settings.showReasoning.label": "Показывать рассуждение",
   "settings.showReasoning.hint": "Отображать reasoning-блоки модели в ответах ассистента.",
+  "settings.chatBackground.label": "Фон чата",
+  "settings.chatBackground.hint": "По умолчанию брать фон из активной темы или вернуть цветочный фон вручную.",
+  "settings.chatBackground.followTheme": "Следовать теме",
+  "settings.chatBackground.peonies": "Пионы",
   "settings.timezone.label": "Часовой пояс",
   "settings.timezone.hint": "IANA-зона (например Europe/Moscow) в системный промпт для локального времени. Пусто = не указывать.",
   "settings.timezone.placeholder": "Europe/Moscow",
@@ -1333,6 +1340,8 @@ export const ruSettings = {
   "settings.providers.transport": "Транспорт",
   "settings.providers.baseUrl": "Base URL",
   "settings.providers.baseUrlPlaceholder": "https://api.example.com/v1",
+  "settings.providers.insecureHttp": "Разрешить небезопасный HTTP для {origin}",
+  "settings.providers.insecureHttpHint": "Точечное доверие только этому origin вашего сервера. HTTPS предпочтительнее. SSRF, DNS-rebinding, редиректы, служебные адреса и TLS-защита глобально не отключаются.",
   "settings.providers.models": "Модели — по одной на строку или через запятую",
   "settings.providers.manualModels": "ID моделей вручную",
   "settings.providers.manualModelsPlaceholder": "model-id, по одной на строку",
@@ -1365,6 +1374,8 @@ export const ruSettings = {
   "settings.providers.keyStoredHint": "Учётные данные сохранены. Kyrei никогда не возвращает сохранённое значение в интерфейс.",
   "settings.providers.clearCredentials": "Удалить основные учётные данные",
   "settings.providers.clearCredentialsHint": "Удалить основные данные доступа провайдера. Дополнительные аккаунты пула настраиваются отдельно.",
+  "settings.providers.resetRuntime": "Сбросить runtime-состояние",
+  "settings.providers.resetRuntimeHint": "Очистить временный cooldown и auth-strikes, не меняя провайдера, ручные модели и сохранённые учётные данные.",
   "settings.providers.clearCredentialsConfirm": "Удалить основные данные доступа для {name}? Основной аккаунт станет недоступен; дополнительные аккаунты пула не изменятся.",
   "settings.providers.keyPrivacyHint": "Ключ передаётся только локальному шлюзу и не попадает в экспорт конфигурации.",
   "settings.providers.deleteConfirm": "Удалить провайдера {name}? Сессии с ним вернутся к модели по умолчанию.",

@@ -171,6 +171,73 @@ function combineSignals(...candidates: Array<AbortSignal | undefined>): { signal
   };
 }
 
+interface TaskDeadline {
+  signal: AbortSignal;
+  timeoutError: Error & {
+    code: "team_task_timeout" | "team_task_max_runtime";
+    timeoutMs: number;
+    reason: "idle" | "runtime";
+  };
+  refresh: () => void;
+  cleanup: () => void;
+}
+
+function createTaskDeadline(
+  parent: AbortSignal,
+  configuredTimeoutMs: number,
+  configuredMaxRuntimeMs?: number,
+): TaskDeadline {
+  const timeoutMs = Math.min(300_000, Math.max(1_000, Math.floor(configuredTimeoutMs || 0) || 180_000));
+  const maxRuntimeMs = Math.min(7_200_000, Math.max(timeoutMs, Math.floor(configuredMaxRuntimeMs || 0) || 1_800_000));
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort(parent.reason);
+  if (parent.aborted) onParentAbort();
+  else parent.addEventListener("abort", onParentAbort, { once: true });
+  const timeoutError = (timeout: number, reason: "idle" | "runtime") => Object.assign(
+    new Error(`Team task timed out after ${timeout}ms`),
+    { name: "TimeoutError", code: reason === "runtime" ? "team_task_max_runtime" as const : "team_task_timeout" as const, timeoutMs: timeout, reason },
+  );
+  let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  const armIdleTimeout = () => {
+    if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
+    if (controller.signal.aborted) return;
+    idleTimeoutId = setTimeout(() => controller.abort(timeoutError(timeoutMs, "idle")), timeoutMs);
+  };
+  armIdleTimeout();
+  const maxRuntimeId = controller.signal.aborted
+    ? undefined
+    : setTimeout(() => controller.abort(timeoutError(maxRuntimeMs, "runtime")), maxRuntimeMs);
+  return {
+    signal: controller.signal,
+    timeoutError: timeoutError(timeoutMs, "idle"),
+    refresh: armIdleTimeout,
+    cleanup: () => {
+      if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
+      if (maxRuntimeId !== undefined) clearTimeout(maxRuntimeId);
+      parent.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
+
+function waitForTaskWithDeadline<T>(task: Promise<T>, deadline: TaskDeadline): Promise<T> {
+  if (deadline.signal.aborted) return Promise.reject(deadline.signal.reason ?? deadline.timeoutError);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      deadline.signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(deadline.signal.reason ?? deadline.timeoutError));
+    deadline.signal.addEventListener("abort", onAbort, { once: true });
+    task.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 function taskResultForModel(result: TeamTaskResult, summaryChars = 600): Record<string, unknown> {
   switch (result.status) {
     case "succeeded":
@@ -316,12 +383,7 @@ export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet
           agentsUsed += 1;
         };
 
-        const timeout = new AbortController();
-        const timeoutId = setTimeout(
-          () => timeout.abort(new Error("team_run_timeout")),
-          options.spec.limits.timeoutMs,
-        );
-        const combined = combineSignals(options.abortSignal, executionOptions.abortSignal, timeout.signal);
+        const combined = combineSignals(options.abortSignal, executionOptions.abortSignal);
 
         options.emit({
           type: "team.start",
@@ -376,28 +438,37 @@ export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet
                 provider_id: executor.role.target.providerId,
               } as const;
               const release = await taskSlots.acquire(combined.signal);
+              const taskDeadline = createTaskDeadline(
+                combined.signal,
+                options.spec.limits.timeoutMs,
+                (options.spec.limits as RuntimeTeamSpec["limits"] & { maxRuntimeMs?: number }).maxRuntimeMs,
+              );
               const startedAt = Date.now();
               startedTaskIds.add(context.task.id);
               options.emit({ type: "subagent.start", payload: { ...base, status: "running" } });
               try {
-                const rawArtifact = await executor.run(context, {
-                  runId,
-                  subagentId,
-                  reserveNestedAgent,
-                  onProgress: (text) => {
-                    const progress = compact(text, 1_200);
-                    if (!progress || combined.signal.aborted) return;
-                    options.emit({
-                      type: "subagent.progress",
-                      payload: {
-                        ...base,
-                        model: executor.role.target.model,
-                        status: "running",
-                        text: progress,
-                      },
-                    });
-                  },
-                });
+                const rawArtifact = await waitForTaskWithDeadline(
+                  executor.run({ ...context, signal: taskDeadline.signal }, {
+                    runId,
+                    subagentId,
+                    reserveNestedAgent,
+                    onProgress: (text) => {
+                      const progress = compact(text, 1_200);
+                      if (!progress || combined.signal.aborted || taskDeadline.signal.aborted) return;
+                      taskDeadline.refresh();
+                      options.emit({
+                        type: "subagent.progress",
+                        payload: {
+                          ...base,
+                          model: executor.role.target.model,
+                          status: "running",
+                          text: progress,
+                        },
+                      });
+                    },
+                  }),
+                  taskDeadline,
+                );
                 if (combined.signal.aborted) {
                   const reason = combined.signal.reason;
                   const error = reason instanceof Error ? reason : new Error(errorMessage(reason ?? "team run interrupted"));
@@ -459,6 +530,7 @@ export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet
                 });
                 throw error;
               } finally {
+                taskDeadline.cleanup();
                 release();
               }
             },
@@ -510,7 +582,6 @@ export function buildTeamDelegateTool(options: TeamDelegateToolOptions): ToolSet
           emitTerminal(combined.signal.aborted ? "interrupted" : "failed", 0, tasks.length);
           throw error;
         } finally {
-          clearTimeout(timeoutId);
           combined.cleanup();
         }
       },

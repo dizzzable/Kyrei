@@ -347,6 +347,17 @@ const DelegationConfigSchema = z.object({
   maxParallel: z.number().int().min(1).max(8).default(DEFAULT_ENGINE_CONFIG.delegation.maxParallel),
   maxSteps: z.number().int().min(1).max(24).default(DEFAULT_ENGINE_CONFIG.delegation.maxSteps),
   timeoutMs: z.number().int().min(1_000).max(300_000).default(DEFAULT_ENGINE_CONFIG.delegation.timeoutMs),
+  idleTimeoutMs: z.number().int().min(1_000).max(300_000).default(DEFAULT_ENGINE_CONFIG.delegation.idleTimeoutMs),
+  maxRuntimeMs: z.number().int().min(1_000).max(7_200_000).default(DEFAULT_ENGINE_CONFIG.delegation.maxRuntimeMs),
+});
+
+const EvolutionConfigSchema = z.object({
+  harvestEnabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.evolution.harvestEnabled),
+  evaluationEnabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.evolution.evaluationEnabled),
+  promotionMode: z.enum(["off", "manual", "low-risk-canary"]).default(DEFAULT_ENGINE_CONFIG.evolution.promotionMode),
+  maxCandidates: z.number().int().min(10).max(10_000).default(DEFAULT_ENGINE_CONFIG.evolution.maxCandidates),
+  retentionDays: z.number().int().min(7).max(3_650).default(DEFAULT_ENGINE_CONFIG.evolution.retentionDays),
+  maxEvaluationCostUsd: z.number().positive().max(10_000).nullable().default(null),
 });
 
 const PromptProfileIdSchema = z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
@@ -404,6 +415,7 @@ export const EngineConfigSchema = z.object({
   messaging: MessagingConfigSchema.default(DEFAULT_ENGINE_CONFIG.messaging),
   mcp: McpConfigSchema.default(DEFAULT_ENGINE_CONFIG.mcp),
   skills: SkillsConfigSchema.default(DEFAULT_ENGINE_CONFIG.skills),
+  evolution: EvolutionConfigSchema.default(DEFAULT_ENGINE_CONFIG.evolution),
   usageBudget: z.object({
     enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.usageBudget.enabled),
     window: z.enum(["day", "month"]).default(DEFAULT_ENGINE_CONFIG.usageBudget.window),
@@ -646,6 +658,17 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
       migrated = true;
       warnings.push("migrated Hermes 'delegation.child_timeout_seconds' → delegation.timeoutMs");
     }
+    if (delegation["idleTimeoutMs"] == null && typeof delegation["timeoutMs"] === "number") {
+      const legacyTimeout = delegation["timeoutMs"];
+      const idleTimeout = legacyTimeout === 90_000 ? 180_000 : legacyTimeout;
+      delegation["idleTimeoutMs"] = idleTimeout;
+      delegation["timeoutMs"] = idleTimeout;
+      if (legacyTimeout === 90_000) warnings.push("migrated the legacy 90-second delegation cutoff to a 180-second progress-aware idle lease");
+    } else if (delegation["idleTimeoutMs"] === 90_000 && delegation["timeoutMs"] === 90_000) {
+      delegation["idleTimeoutMs"] = 180_000;
+      delegation["timeoutMs"] = 180_000;
+      warnings.push("migrated the legacy 90-second delegation cutoff to a 180-second progress-aware idle lease");
+    }
     if (migrated && !warnings.some((w) => w.includes("max_concurrent_children") || w.includes("max_iterations") || w.includes("child_timeout"))) {
       warnings.push("migrated Hermes 'delegation.max_concurrent_children' to maxTasks/maxParallel");
     } else if (migrated && typeof legacyConcurrency === "number") {
@@ -679,6 +702,14 @@ export function resolveEngineConfig(raw?: unknown): ResolveResult {
     if (cfg.delegation.maxParallel > cfg.delegation.maxTasks) {
       warnings.push("delegation.maxParallel > maxTasks - clamped to maxTasks");
       cfg.delegation = { ...cfg.delegation, maxParallel: cfg.delegation.maxTasks };
+    }
+    if (cfg.delegation.idleTimeoutMs !== cfg.delegation.timeoutMs) {
+      warnings.push("delegation.timeoutMs is a legacy alias - normalized to delegation.idleTimeoutMs");
+      cfg.delegation = { ...cfg.delegation, timeoutMs: cfg.delegation.idleTimeoutMs };
+    }
+    if (cfg.delegation.maxRuntimeMs < cfg.delegation.idleTimeoutMs) {
+      warnings.push("delegation.maxRuntimeMs < idleTimeoutMs - clamped to idleTimeoutMs");
+      cfg.delegation = { ...cfg.delegation, maxRuntimeMs: cfg.delegation.idleTimeoutMs };
     }
     if (cfg.activePromptProfileId && !cfg.promptProfiles.some((profile) => profile.id === cfg.activePromptProfileId)) {
       warnings.push("activePromptProfileId does not reference an available prompt profile - cleared");

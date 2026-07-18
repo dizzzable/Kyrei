@@ -24,7 +24,9 @@ function definitions(...names: string[]): ToolSet {
 
 describe("read-only child runner", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    generateTextMock.mockReset();
+    isStepCountMock.mockReset();
+    isStepCountMock.mockImplementation((steps: number) => ({ steps }));
   });
 
   it("selects capabilities by allowlist and excludes every mutating or recursive tool", () => {
@@ -507,6 +509,183 @@ describe("read-only child runner", () => {
         outcome: "interrupted",
         phase: "stream",
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("renews the child idle lease on observed progress so long-running research can finish", async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | undefined;
+      generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
+        providerSignal = options["abortSignal"] as AbortSignal;
+        const onToolExecutionStart = options["onToolExecutionStart"] as (event: unknown) => void;
+        const onStepEnd = options["onStepEnd"] as (event: unknown) => void;
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            onToolExecutionStart({ toolCall: { toolName: "read_file", input: { path: "src\\renewed.ts" } } });
+          }, 800);
+          setTimeout(() => {
+            onStepEnd({ stepNumber: 0, usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 } });
+          }, 1_600);
+          setTimeout(() => {
+            resolve({
+              text: "Long-running evidence completed",
+              steps: [{ text: "Long-running evidence completed" }],
+              toolCalls: [{ toolName: "read_file" }],
+              usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 },
+            });
+          }, 2_400);
+        });
+      });
+      const runner = createReadOnlyChildRunner({
+        model: { id: "slow-worker" } as unknown as LanguageModel,
+        modelId: "slow-worker",
+        tools: definitions("read_file"),
+        maxSteps: 2,
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        cost: { inputPerM: 0, outputPerM: 0 },
+      });
+
+      const pending = runner({
+        childId: "child-renewed-timeout",
+        goal: "Keep going while progress is real",
+        index: 0,
+        readOnly: true,
+        allowDelegation: false,
+        onProgress: () => undefined,
+      });
+
+      await vi.advanceTimersByTimeAsync(900);
+      expect(providerSignal?.aborted).not.toBe(true);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(providerSignal?.aborted).not.toBe(true);
+      await vi.advanceTimersByTimeAsync(900);
+      await expect(pending).resolves.toMatchObject({
+        summary: "Long-running evidence completed",
+        filesRead: ["src/renewed.ts"],
+      });
+      expect(providerSignal?.aborted).not.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns bounded partial evidence instead of failing when a timed-out child already inspected sources", async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | undefined;
+      let rejectLate: ((error: Error) => void) | undefined;
+      generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
+        providerSignal = options["abortSignal"] as AbortSignal;
+        const onToolExecutionStart = options["onToolExecutionStart"] as (event: unknown) => void;
+        onToolExecutionStart({ toolCall: { toolName: "read_file", input: { path: "src\\partial.ts" } } });
+        return new Promise((_resolve, reject) => {
+          rejectLate = reject;
+        });
+      });
+      const handle = { lease: "worker-partial-timeout" };
+      const acquire = vi.fn(() => handle);
+      const release = vi.fn();
+      const runner = createReadOnlyChildRunner({
+        model: { id: "slow-worker" } as unknown as LanguageModel,
+        modelId: "slow-worker",
+        tools: definitions("read_file"),
+        maxSteps: 2,
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        cost: { inputPerM: 0, outputPerM: 0 },
+        providerAttempt: {
+          lifecycle: { acquire, release },
+          target: { providerId: "worker-provider", accountId: "partial", modelId: "slow-worker" },
+        },
+      });
+
+      const pending = runner({
+        childId: "child-partial-timeout",
+        goal: "Return whatever evidence exists",
+        index: 0,
+        readOnly: true,
+        allowDelegation: false,
+        onProgress: () => undefined,
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toMatchObject({
+        incomplete: true,
+        filesRead: ["src/partial.ts"],
+        summary: expect.stringContaining("Treat this as non-evidence"),
+      });
+      expect(providerSignal?.aborted).toBe(true);
+      expect(release).not.toHaveBeenCalled();
+
+      rejectLate?.(new Error("late provider failure"));
+      await vi.runAllTicks();
+      expect(release).toHaveBeenCalledWith(handle, {
+        providerId: "worker-provider",
+        accountId: "partial",
+        modelId: "slow-worker",
+        outcome: "interrupted",
+        phase: "stream",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes the child timeout while real tool progress keeps arriving", async () => {
+    vi.useFakeTimers();
+    try {
+      let providerSignal: AbortSignal | undefined;
+      let rejectLate: ((error: Error) => void) | undefined;
+      generateTextMock.mockImplementationOnce((options: Record<string, unknown>) => {
+        providerSignal = options["abortSignal"] as AbortSignal;
+        const onToolExecutionStart = options["onToolExecutionStart"] as (event: unknown) => void;
+        return new Promise((_resolve, reject) => {
+          rejectLate = reject;
+          setTimeout(() => {
+            onToolExecutionStart({
+              toolCall: { toolName: "read_file", input: { path: "src/a.ts" } },
+            });
+          }, 900);
+        });
+      });
+      const runner = createReadOnlyChildRunner({
+        model: { id: "slow-worker" } as unknown as LanguageModel,
+        modelId: "slow-worker",
+        tools: definitions("read_file"),
+        maxSteps: 2,
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        cost: { inputPerM: 0, outputPerM: 0 },
+      });
+
+      const pending = runner({
+        childId: "child-progress-refresh",
+        goal: "Keep working",
+        index: 0,
+        readOnly: true,
+        allowDelegation: false,
+        onProgress: () => undefined,
+      });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(providerSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(850);
+      expect(providerSignal?.aborted).toBe(false);
+
+      const resolved = expect(pending).resolves.toMatchObject({
+        incomplete: true,
+        filesRead: ["src/a.ts"],
+        summary: expect.stringContaining("Treat this as non-evidence"),
+      });
+      await vi.advanceTimersByTimeAsync(151);
+      await resolved;
+
+      rejectLate?.(new Error("late provider failure"));
+      await vi.runAllTicks();
     } finally {
       vi.useRealTimers();
     }

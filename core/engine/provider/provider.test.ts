@@ -215,13 +215,15 @@ describe("errors classification", () => {
     expect(isNetworkError({ message: "fetch failed" })).toBe(true);
     expect(isNetworkError({ statusCode: 503, message: "network" })).toBe(false);
     expect(classifyProviderFailure({ code: "ETIMEDOUT" })).toBe("network");
-    expect(isDefiniteAuthFailure({ statusCode: 401 })).toBe(true);
+    expect(isDefiniteAuthFailure({ statusCode: 401 })).toBe(false);
+    expect(isDefiniteAuthFailure({ statusCode: 401, message: "Invalid API key" })).toBe(true);
     expect(isDefiniteAuthFailure({ statusCode: 403, message: "Invalid API key" })).toBe(true);
     expect(isSoftAuthFailure({ statusCode: 403, message: "cloudflare ray id blocked" })).toBe(true);
     expect(isDefiniteAuthFailure({ statusCode: 403, message: "cloudflare ray id blocked" })).toBe(false);
     expect(isRetryable({ statusCode: 403, message: "edge blocked" })).toBe(true);
     expect(classifyProviderFailure({ statusCode: 403 })).toBe("auth_soft");
-    expect(classifyProviderFailure({ statusCode: 401 })).toBe("auth_definite");
+    expect(classifyProviderFailure({ statusCode: 401 })).toBe("auth_uncertain");
+    expect(classifyProviderFailure({ statusCode: 401, message: "Invalid API key" })).toBe("auth_definite");
     expect(classifyProviderFailure({ statusCode: 429 })).toBe("rate_limit");
   });
   it("tool unsupported detection", () => {

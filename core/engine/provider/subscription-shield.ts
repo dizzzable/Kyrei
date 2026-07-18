@@ -31,6 +31,13 @@ export interface SubscriptionShieldConfig {
   maxConnectionsPerOrigin: number;
 }
 
+export interface SubscriptionShieldTimeoutError extends Error {
+  code: "ETIMEDOUT";
+  reason: "subscription_shield_timeout";
+  phase: "headers";
+  timeoutMs: number;
+}
+
 export const SUBSCRIPTION_SHIELD_MODES: readonly SubscriptionShieldMode[] = [
   "off",
   "standard",
@@ -98,6 +105,16 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function createSubscriptionShieldTimeoutError(timeoutMs: number): SubscriptionShieldTimeoutError {
+  return Object.assign(new Error("subscription_shield_timeout"), {
+    name: "TimeoutError",
+    code: "ETIMEDOUT" as const,
+    reason: "subscription_shield_timeout" as const,
+    phase: "headers" as const,
+    timeoutMs,
+  });
 }
 
 /**
@@ -258,10 +275,7 @@ export function wrapFetchWithSubscriptionShield(
     if (controller && timeoutMs > 0) {
       timeoutId = setTimeout(() => {
         timedOut = true;
-        controller.abort(Object.assign(new Error("subscription_shield_timeout"), {
-          code: "ETIMEDOUT",
-          name: "TimeoutError",
-        }));
+        controller.abort(createSubscriptionShieldTimeoutError(timeoutMs));
       }, timeoutMs);
     }
 
@@ -274,11 +288,7 @@ export function wrapFetchWithSubscriptionShield(
       return response;
     } catch (error) {
       if (timedOut) {
-        throw Object.assign(new Error("subscription_shield_timeout"), {
-          code: "ETIMEDOUT",
-          name: "TimeoutError",
-          cause: error,
-        });
+        throw Object.assign(createSubscriptionShieldTimeoutError(timeoutMs), { cause: error });
       }
       throw error;
     } finally {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applySubscriptionShieldHeaders,
   closeSubscriptionShieldDispatcher,
+  createSubscriptionShieldTimeoutError,
   normalizeSubscriptionShield,
   paceSubscriptionRequest,
   resetSubscriptionShieldPaceForTests,
@@ -57,6 +58,17 @@ describe("subscription shield headers", () => {
   it("standard mode stays minimal", () => {
     expect(subscriptionShieldDefaultHeaders("standard")).toEqual({ Accept: "application/json" });
     expect(shouldHideEngineIdentity({ mode: "standard" })).toBe(false);
+  });
+
+  it("builds a typed retryable timeout error for header waits", () => {
+    expect(createSubscriptionShieldTimeoutError(12_345)).toMatchObject({
+      name: "TimeoutError",
+      code: "ETIMEDOUT",
+      reason: "subscription_shield_timeout",
+      phase: "headers",
+      timeoutMs: 12_345,
+      message: "subscription_shield_timeout",
+    });
   });
 });
 

@@ -210,7 +210,7 @@ export function streamAttemptsFromError(error: unknown): ProviderStreamAttemptOu
     const statusCode = Number(source["statusCode"]);
     const retryAfterMs = Number(source["retryAfterMs"]);
     const failureClasses: ProviderFailureClass[] = [
-      "network", "rate_limit", "server", "auth_definite", "auth_soft", "client", "unknown",
+      "network", "rate_limit", "server", "auth_definite", "auth_uncertain", "auth_soft", "client", "unknown",
     ];
     const failureClass = failureClasses.includes(source["failureClass"] as ProviderFailureClass)
       ? source["failureClass"] as ProviderFailureClass

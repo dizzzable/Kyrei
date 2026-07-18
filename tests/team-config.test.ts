@@ -125,6 +125,8 @@ describe("team orchestration config", () => {
         maxTasks: 1,
         maxStepsPerAgent: 64,
         timeoutMs: 3_600_000,
+        idleTimeoutMs: 3_600_000,
+        maxRuntimeMs: 3_600_000,
       },
     });
     expect(config.profiles[0]?.roles[0]).toMatchObject({
@@ -161,6 +163,25 @@ describe("team orchestration config", () => {
       })],
     }, providers);
     expect(delegated.profiles[0]?.roles[0]).toMatchObject({ canSpawn: true, maxChildren: 2 });
+  });
+
+  it("keeps runtime ceilings coherent when only one timeout field is provided", () => {
+    const config = normalizeOrchestration({
+      defaultMode: "team",
+      activeProfileId: "research-team",
+      profiles: [profile({
+        limits: {
+          timeoutMs: 240_000,
+          maxRuntimeMs: 120_000,
+        },
+      })],
+    }, providers);
+
+    expect(config.profiles[0]?.limits).toMatchObject({
+      timeoutMs: 240_000,
+      idleTimeoutMs: 240_000,
+      maxRuntimeMs: 240_000,
+    });
   });
 
   it("disables profiles with dangling model refs and never activates them", () => {

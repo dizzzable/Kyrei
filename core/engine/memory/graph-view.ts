@@ -3,6 +3,7 @@ import type { MemoryDoc, MemoryStore } from "../data/ports.js";
 import { createStores, createStoresAsync, type Stores } from "../data/index.js";
 import type { MemoryIndexConfig } from "./index-backend.js";
 import { loadProjectIndex } from "../intel/project-index.js";
+import { buildMemoryAtlas, memoryAtlasToGraphV1 } from "./atlas-view.js";
 import { normalizeWorkspaceTag, sameWorkspaceTag } from "./workspace-id.js";
 
 export type MemoryGraphGroup = "project" | "code" | "document" | "decision" | "plan" | "handoff" | "session" | "memory";
@@ -139,10 +140,10 @@ export async function getWorkspaceMemoryGraph(input: {
         ? await createStoresAsync({ baseDir, backend: "postgres", connectionString: input.config.connectionString })
         : createStores(baseDir);
     }
-    return await buildWorkspaceMemoryGraph({
+    return memoryAtlasToGraphV1(await buildMemoryAtlas({
       workspace: input.workspace,
       ...(stores?.memory ? { memory: stores.memory } : {}),
-    });
+    }));
   } finally {
     if (stores) {
       try {

@@ -81,6 +81,7 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
   };
   const tuningSupported = supportsModelTuning(
     config.providers.find((provider) => provider.id === providerId)?.protocol,
+    selectedModel?.capabilities,
   );
 
   useEffect(() => {

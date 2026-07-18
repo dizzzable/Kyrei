@@ -19,13 +19,23 @@ export interface SessionExport {
  * the result into a download. Adapted from Hermes' `exportSession` payload,
  * trimmed to our types.
  */
-export function buildSessionExport(session: SessionInfo, messages: ChatMessage[]): SessionExport {
+export function buildSessionExport(
+  session: SessionInfo,
+  messages: ChatMessage[],
+  options: { includeReasoning?: boolean } = {},
+): SessionExport {
+  const includeReasoning = options.includeReasoning === true;
   return {
     exported_at: new Date().toISOString(),
     session_id: session.id,
     title: sessionTitle(session),
     message_count: messages.length,
-    messages,
+    messages: messages.map((message) => ({
+      ...message,
+      parts: includeReasoning
+        ? message.parts
+        : message.parts.filter((part) => part.type !== "reasoning"),
+    })),
   };
 }
 

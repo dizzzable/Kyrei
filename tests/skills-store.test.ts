@@ -438,6 +438,22 @@ describe("SkillsStore safety and owned mutations", () => {
 });
 
 describe("frontmatter and runtime aggregation", () => {
+  it("keeps the five-hundredth enabled Skill searchable without preloading bodies", async () => {
+    const rootSkills = join(dataDir, "skills");
+    await Promise.all(Array.from({ length: 500 }, (_, index) =>
+      writeSkill(join(rootSkills, `catalog-${String(index).padStart(3, "0")}`), `catalog-${String(index).padStart(3, "0")}`),
+    ));
+    const store = new SkillsStore({ dataDir, workspace });
+    await store.load();
+    const catalog = await store.catalogSkills({ maxSkills: 1_000 });
+    expect(catalog.skills).toHaveLength(500);
+    expect(catalog.skills.every((skill) => !("content" in skill))).toBe(true);
+    const last = catalog.skills.find((skill) => skill.name === "catalog-499")!;
+    await expect(store.readRuntimeSkill(last.id)).resolves.toMatchObject({
+      skill: { id: last.id, content: expect.stringContaining("# catalog-499") },
+    });
+  });
+
   it("parses only inert allowlisted metadata without prototype pollution", () => {
     const parsed = parseSkillFrontmatter(`---
 name: safe-skill

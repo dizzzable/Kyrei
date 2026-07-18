@@ -70,6 +70,15 @@ function canUseBenchmarkNetwork(draft: ProviderDraft): boolean {
   }
 }
 
+function insecureHttpOrigin(draft: ProviderDraft): string | null {
+  try {
+    const url = new URL(draft.baseURL.trim());
+    return url.protocol === "http:" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
 interface ProviderSetupDialogProps {
   draft: ProviderDraft | null;
   saving: boolean;
@@ -79,6 +88,7 @@ interface ProviderSetupDialogProps {
   onCancel: () => void;
   onSave: (draft: ProviderDraft) => void;
   onClearCredentials?: (draft: ProviderDraft) => void;
+  onResetRuntime?: (draft: ProviderDraft) => void;
   onDelete?: (draft: ProviderDraft) => void;
 }
 
@@ -91,6 +101,7 @@ export function ProviderSetupDialog({
   onCancel,
   onSave,
   onClearCredentials,
+  onResetRuntime,
   onDelete,
 }: ProviderSetupDialogProps) {
   const { t } = useI18n();
@@ -123,6 +134,7 @@ export function ProviderSetupDialog({
   const unavailable = saving || discovering;
   const editing = Boolean(draft.editingId);
   const benchmarkNetworkAvailable = canUseBenchmarkNetwork(draft);
+  const insecureOrigin = insecureHttpOrigin(draft);
   const discoverySupported = providerSupportsModelDiscovery(draft.protocol);
   const storageUnavailable = errorKey === "settings.providers.error.secretStorageUnavailable";
   const desktopPlatform = desktopRuntime.platform();
@@ -195,6 +207,15 @@ export function ProviderSetupDialog({
                     <span className="mt-0.5 block text-[9.5px] leading-4 text-muted">{t("settings.providers.discovery.allowBenchmarkNetworkHint")}</span>
                   </span>
                   <Switch checked={draft.allowBenchmarkNetwork} disabled={unavailable} onCheckedChange={(allowBenchmarkNetwork) => update({ allowBenchmarkNetwork })} aria-label={t("settings.providers.discovery.allowBenchmarkNetwork")} />
+                </label>
+              ) : null}
+              {insecureOrigin ? (
+                <label className="flex items-center justify-between gap-4 rounded-md border border-warning/30 bg-warning/5 px-3 py-2">
+                  <span>
+                    <span className="block text-[11px] font-medium text-secondary">{t("settings.providers.insecureHttp", { origin: insecureOrigin })}</span>
+                    <span className="mt-0.5 block text-[9.5px] leading-4 text-muted">{t("settings.providers.insecureHttpHint")}</span>
+                  </span>
+                  <Switch checked={draft.allowInsecureHttp} disabled={unavailable} onCheckedChange={(allowInsecureHttp) => update({ allowInsecureHttp })} aria-label={t("settings.providers.insecureHttp", { origin: insecureOrigin })} />
                 </label>
               ) : null}
             </section>
@@ -276,6 +297,15 @@ export function ProviderSetupDialog({
                   </div>
                 ) : null}
               </section>
+            ) : null}
+
+            {editing && onResetRuntime ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border-soft bg-bg/25 px-3 py-2">
+                <span className="max-w-md text-[9.5px] leading-4 text-muted">{t("settings.providers.resetRuntimeHint")}</span>
+                <Button variant="ghost" size="sm" disabled={unavailable} onClick={() => onResetRuntime(draft)}>
+                  <RefreshCw className="size-3.5" aria-hidden /> {t("settings.providers.resetRuntime")}
+                </Button>
+              </div>
             ) : null}
 
             <section className="space-y-3" aria-labelledby={`${formId}-models`}>

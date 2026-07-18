@@ -43,7 +43,7 @@ describe("session synchronization", () => {
     expect(mergeSessionHydration(durable, [], pendingId, true)).toEqual({
       messages: [
         durable[0],
-        { id: pendingId, role: "assistant", parts: [{ type: "reasoning", text: "" }], pending: true },
+        { id: pendingId, role: "assistant", parts: [], pending: true },
       ],
       pendingId,
     });

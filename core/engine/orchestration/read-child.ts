@@ -63,6 +63,8 @@ export interface ReadOnlyChildRunnerOptions {
   maxRetries: number;
   /** Defensive optionality keeps internal callers bounded during config migrations. */
   timeoutMs?: number;
+  idleTimeoutMs?: number;
+  maxRuntimeMs?: number;
   cost: ModelCost;
   providerOptions?: import("../provider/build.js").ProviderOptionsMap;
   workspace?: string;
@@ -72,7 +74,12 @@ export interface ReadOnlyChildRunnerOptions {
 
 interface ChildDeadline {
   signal: AbortSignal;
-  timeoutError: Error & { code: "delegation_timeout"; timeoutMs: number };
+  timeoutError: Error & {
+    code: "delegation_timeout" | "delegation_max_runtime";
+    timeoutMs: number;
+    reason: "idle" | "runtime";
+  };
+  refresh: () => void;
   cleanup: () => void;
 }
 
@@ -81,11 +88,20 @@ function normalizedTimeoutMs(value: number | undefined): number {
   return Math.min(300_000, Math.max(1_000, value as number));
 }
 
-function delegationTimeoutError(timeoutMs: number): ChildDeadline["timeoutError"] {
+function normalizedMaxRuntimeMs(value: number | undefined, timeoutMs: number): number {
+  if (!Number.isSafeInteger(value)) return Math.max(1_800_000, timeoutMs);
+  return Math.min(7_200_000, Math.max(timeoutMs, value as number));
+}
+
+function delegationTimeoutError(
+  timeoutMs: number,
+  reason: "idle" | "runtime" = "idle",
+): ChildDeadline["timeoutError"] {
   return Object.assign(new Error(`Delegated research timed out after ${timeoutMs}ms`), {
     name: "TimeoutError",
-    code: "delegation_timeout" as const,
+    code: reason === "runtime" ? "delegation_max_runtime" as const : "delegation_timeout" as const,
     timeoutMs,
+    reason,
   });
 }
 
@@ -101,24 +117,39 @@ function abortError(signal: AbortSignal): Error {
   return error;
 }
 
-function createChildDeadline(parent: AbortSignal | undefined, configuredTimeoutMs: number | undefined): ChildDeadline {
+function createChildDeadline(
+  parent: AbortSignal | undefined,
+  configuredTimeoutMs: number | undefined,
+  configuredMaxRuntimeMs: number | undefined,
+): ChildDeadline {
   const timeoutMs = normalizedTimeoutMs(configuredTimeoutMs);
-  const timeoutError = delegationTimeoutError(timeoutMs);
+  const timeoutError = delegationTimeoutError(timeoutMs, "idle");
+  const maxRuntimeMs = normalizedMaxRuntimeMs(configuredMaxRuntimeMs, timeoutMs);
+  const maxRuntimeError = delegationTimeoutError(maxRuntimeMs, "runtime");
   const controller = new AbortController();
   const onParentAbort = () => controller.abort(parent?.reason);
 
   if (parent?.aborted) onParentAbort();
   else parent?.addEventListener("abort", onParentAbort, { once: true });
 
-  const timeoutId = controller.signal.aborted
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const armTimeout = () => {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (controller.signal.aborted) return;
+    timeoutId = setTimeout(() => controller.abort(timeoutError), timeoutMs);
+  };
+  armTimeout();
+  const maxRuntimeId = controller.signal.aborted
     ? undefined
-    : setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    : setTimeout(() => controller.abort(maxRuntimeError), maxRuntimeMs);
 
   return {
     signal: controller.signal,
     timeoutError,
+    refresh: armTimeout,
     cleanup: () => {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (maxRuntimeId !== undefined) clearTimeout(maxRuntimeId);
       parent?.removeEventListener("abort", onParentAbort);
     },
   };
@@ -290,7 +321,11 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
     let cumulativeUsage: Usage = {};
     const toolsEnabled = Object.keys(options.tools).length > 0;
 
-    const deadline = createChildDeadline(request.signal, options.timeoutMs);
+    const deadline = createChildDeadline(
+      request.signal,
+      options.idleTimeoutMs ?? options.timeoutMs,
+      options.maxRuntimeMs,
+    );
     // A wall-clock timeout must return control to the orchestrator promptly,
     // but a provider may ignore AbortSignal and continue its HTTP request.
     // Keep the account-pool lease occupied until that late request settles so
@@ -327,7 +362,7 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
         }
       : undefined;
     let completed: {
-      result: Awaited<ReturnType<typeof generateText>>;
+      result: Pick<Awaited<ReturnType<typeof generateText>>, "steps" | "toolCalls" | "usage">;
       summary: string;
       synthesisUsage?: LanguageModelUsage;
       usedSynthesis: boolean;
@@ -356,6 +391,7 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
             maxRetries: options.maxRetries,
             onToolExecutionStart: ({ toolCall }) => {
               if (deadline.signal.aborted) return;
+              deadline.refresh();
               toolCount += 1;
               recordFilesRead(toolCall.toolName, toolCall.input, filesRead);
               request.onProgress({
@@ -369,6 +405,7 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
             },
             onStepEnd: (step) => {
               if (deadline.signal.aborted) return;
+              deadline.refresh();
               cumulativeUsage = addUsage(cumulativeUsage, step.usage);
               request.onProgress({
                 text: `Research step ${step.stepNumber + 1} complete`,
@@ -401,6 +438,7 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
             filesRead: [...filesRead],
             providerCalls: providerCallsFromSteps(result.steps, options.maxSteps),
           });
+          deadline.refresh();
           const synthesis = await runGeneration({
             model: options.model,
             instructions: buildReadOnlyChildSynthesisInstructions(options.workspace),
@@ -435,6 +473,47 @@ export function createReadOnlyChildRunner(options: ReadOnlyChildRunnerOptions): 
         },
         deadline.signal,
       );
+    } catch (error) {
+      const errorCode = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+      const timedOut = error === deadline.timeoutError
+        || (error instanceof Error && (errorCode === "delegation_timeout" || errorCode === "delegation_max_runtime"));
+      const hasEvidence = toolCount > 0 || filesRead.size > 0
+        || cumulativeUsage.inputTokens !== undefined
+        || cumulativeUsage.outputTokens !== undefined
+        || cumulativeUsage.totalTokens !== undefined;
+      if (!timedOut || !hasEvidence) throw error;
+      request.onProgress({
+        text: "Research timed out; returning bounded partial evidence",
+        model: options.modelId,
+        usage: usageWithCost(cumulativeUsage, options.cost),
+        toolCount,
+        filesRead: [...filesRead],
+        providerCalls: Math.max(1, Math.min(options.maxSteps, toolCount || 1)),
+        incomplete: true,
+      });
+      completed = {
+        result: {
+          steps: [],
+          toolCalls: [],
+          usage: {
+            inputTokens: 0,
+            inputTokenDetails: {
+              noCacheTokens: undefined,
+              cacheReadTokens: undefined,
+              cacheWriteTokens: undefined,
+            },
+            outputTokens: 0,
+            outputTokenDetails: {
+              textTokens: undefined,
+              reasoningTokens: undefined,
+            },
+            totalTokens: 0,
+          },
+        },
+        summary: incompleteSummary(toolCount, filesRead),
+        usedSynthesis: false,
+        incomplete: true,
+      };
     } finally {
       deadline.cleanup();
     }

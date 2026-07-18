@@ -93,7 +93,7 @@ export function isRateLimit(err: unknown): boolean {
 
 /** Clear credential rejection signals (invalid/revoked key), not CDN/WAF 403 noise. */
 const DEFINITE_AUTH_RE =
-  /invalid[_\s-]?api[_\s-]?key|incorrect api key|api key (?:is )?(?:invalid|revoked|expired)|unauthorized|authentication[_\s-]?required|invalid[_\s-]?token|token (?:is )?(?:invalid|expired|revoked)|invalid[_\s-]?credentials|credentials? (?:are )?(?:invalid|expired|revoked)|not authenticated|login required|bearer token|x-api-key|permission.?denied|access.?denied|account (?:suspended|disabled|banned|locked)|subscription (?:expired|inactive)|insufficient.?permissions/i;
+  /invalid[_\s-]?api[_\s-]?key|incorrect api key|api key (?:is )?(?:invalid|revoked|expired)|unauthorized|authentication[_\s-]?required|invalid[_\s-]?token|token (?:is )?(?:invalid|expired|revoked)|invalid[_\s-]?credentials?|credentials? (?:are )?(?:invalid|expired|revoked)|not authenticated|login required|bearer token|x-api-key|permission.?denied|access.?denied|account (?:suspended|disabled|banned|locked)|subscription (?:expired|inactive)|insufficient.?permissions/i;
 
 export function hasDefiniteAuthMessage(err: unknown): boolean {
   return DEFINITE_AUTH_RE.test(errorMessageOf(err));
@@ -105,10 +105,14 @@ export function hasDefiniteAuthMessage(err: unknown): boolean {
  */
 export function isDefiniteAuthFailure(err: unknown): boolean {
   const status = statusOf(err);
-  if (status === 401) return true;
-  if (status === 403 && hasDefiniteAuthMessage(err)) return true;
+  if ((status === 401 || status === 403) && hasDefiniteAuthMessage(err)) return true;
   if (status === undefined && hasDefiniteAuthMessage(err) && !isNetworkError(err)) return true;
   return false;
+}
+
+/** A bare 401 from a custom proxy/WAF is evidence, not proof, of a bad key. */
+export function isUncertainAuthFailure(err: unknown): boolean {
+  return statusOf(err) === 401 && !hasDefiniteAuthMessage(err);
 }
 
 /** Ambiguous 403 — often proxy/WAF/geo; prefer cooldown + multi-strike over seat kill. */
@@ -133,6 +137,7 @@ export function isRetryable(err: unknown): boolean {
   if (status === 408 || status === 425) return true;
   // Soft 403 is transient-friendly; stream/open can retry or hop accounts.
   if (isSoftAuthFailure(err)) return true;
+  if (isUncertainAuthFailure(err)) return true;
   return false;
 }
 
@@ -145,6 +150,7 @@ export type ProviderFailureClass =
   | "rate_limit"
   | "server"
   | "auth_definite"
+  | "auth_uncertain"
   | "auth_soft"
   | "client"
   | "unknown";
@@ -154,6 +160,7 @@ export function classifyProviderFailure(err: unknown): ProviderFailureClass {
   if (isRateLimit(err)) return "rate_limit";
   if (isServerError(err)) return "server";
   if (isDefiniteAuthFailure(err)) return "auth_definite";
+  if (isUncertainAuthFailure(err)) return "auth_uncertain";
   if (isSoftAuthFailure(err)) return "auth_soft";
   const status = statusOf(err);
   if (status !== undefined && status >= 400 && status < 500) return "client";

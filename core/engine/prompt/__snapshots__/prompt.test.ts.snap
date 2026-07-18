@@ -90,6 +90,6 @@ Communication:
 - Before the first tool batch, one short sentence of intent is enough; avoid long narration of tool names.
 - End of turn: what changed and whether verification ran. No essay unless asked.
 - Do not claim tests passed or bugs fixed without tool evidence from this session.",
-  "version": "1.28.0",
+  "version": "1.29.0",
 }
 `;

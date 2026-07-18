@@ -76,7 +76,7 @@ describe("Agent Skills tool", () => {
 
   it("never reveals the available documents for an unknown id", async () => {
     const output = await execute(buildSkillTools(skills), { id: "missing" });
-    expect(output).toBe("Skill is unavailable or disabled.");
+    expect(output).toBe("Skill unavailable: skill_not_found");
     expect(output).not.toContain("Code review");
   });
 

@@ -376,6 +376,22 @@ describe("OpenAI-compatible provider discovery", () => {
     });
   });
 
+  it("allows a public HTTPS literal IP with normal TLS pinning", async () => {
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "public-ip-model" }] })));
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://93.184.216.34/v1",
+      credentials: {},
+      request,
+    })).resolves.toEqual([{ id: "public-ip-model" }]);
+    expect(request.mock.calls[0]?.[1].pinnedAddress).toMatchObject({
+      address: "93.184.216.34",
+      family: 4,
+      loopback: false,
+      privateLan: false,
+    });
+  });
+
   it("allows HTTPS hostname that resolves only to RFC1918", async () => {
     const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "home-nas" }] })));
     await expect(discoverProviderModels({
@@ -399,6 +415,30 @@ describe("OpenAI-compatible provider discovery", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("allows a public HTTP literal IP only with an exact-origin insecure opt-in", async () => {
+    const request = vi.fn(async () => response(200, JSON.stringify({ data: [{ id: "public-http-ip" }] })));
+    const options = {
+      protocol: "openai-chat",
+      baseURL: "http://93.184.216.34:8080/v1",
+      credentials: {},
+      request,
+    } as const;
+
+    await expect(discoverProviderModels(options)).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
+    expect(request).not.toHaveBeenCalled();
+
+    await expect(discoverProviderModels({
+      ...options,
+      allowInsecureHttpOrigins: ["http://93.184.216.34:8080"],
+    })).resolves.toEqual([{ id: "public-http-ip" }]);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    await expect(discoverProviderModels({
+      ...options,
+      allowInsecureHttpOrigins: ["http://93.184.216.34:9090"],
+    })).rejects.toMatchObject({ code: "provider_discovery_target_blocked" });
+  });
+
   it.each([
     [302, "provider_discovery_redirect_blocked"],
     [401, "provider_discovery_unauthorized"],
@@ -417,6 +457,42 @@ describe("OpenAI-compatible provider discovery", () => {
     });
     await expect(promise).rejects.toMatchObject({ code });
     await expect(promise).rejects.not.toThrow(credential);
+  });
+
+  it("follows a bounded same-origin redirect and revalidates each hop", async () => {
+    const request = vi.fn(async (url: URL) => {
+      if (url.pathname === "/v1/models") {
+        return response(302, "", { location: "https://models.example/v1/catalog" });
+      }
+      if (url.pathname === "/v1/catalog") {
+        return response(200, JSON.stringify({ data: [{ id: "redirected-model" }] }));
+      }
+      return response(404, "");
+    });
+
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: { apiKey: "redirect-secret" },
+      resolveHost: publicResolver,
+      request,
+    })).resolves.toEqual([{ id: "redirected-model" }]);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[0]?.[1].headers.Authorization).toBe("Bearer redirect-secret");
+    expect(request.mock.calls[1]?.[1].headers.Authorization).toBe("Bearer redirect-secret");
+  });
+
+  it("blocks cross-origin redirects before forwarding credentials to a new host", async () => {
+    const request = vi.fn(async () => response(302, "", { location: "https://evil.example/v1/models" }));
+
+    await expect(discoverProviderModels({
+      protocol: "openai-chat",
+      baseURL: "https://models.example/v1",
+      credentials: { apiKey: "never-forward" },
+      resolveHost: publicResolver,
+      request,
+    })).rejects.toMatchObject({ code: "provider_discovery_redirect_blocked" });
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("destroys response bodies rejected before consumption", async () => {

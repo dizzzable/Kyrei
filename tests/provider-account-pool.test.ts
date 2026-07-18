@@ -82,6 +82,21 @@ describe("provider account pool normalization", () => {
 });
 
 describe("ProviderAccountPoolRouter", () => {
+  it("resets only ephemeral runtime state without enabling a disabled account", () => {
+    const router = new ProviderAccountPoolRouter({
+      config: pool([
+        { id: "primary", name: "Primary", enabled: true },
+        { id: "disabled", name: "Disabled", enabled: false, status: "disabled" },
+      ]),
+    });
+    router.reportFailure("primary", { statusCode: 401, failureClass: "auth_uncertain" });
+    router.reportFailure("primary", { statusCode: 401, failureClass: "auth_uncertain" });
+    expect(router.getMember("primary")?.status).toBe("auth-required");
+
+    expect(router.resetRuntime("primary")).toMatchObject({ status: "ready", failures: 0 });
+    expect(router.resetRuntime("disabled")).toMatchObject({ status: "disabled", enabled: false });
+    expect(router.resetRuntime("missing")).toBeNull();
+  });
   it("balances by weighted inflight load, last use, and then keeps soft session affinity", () => {
     let now = 100;
     const router = new ProviderAccountPoolRouter({
@@ -209,7 +224,7 @@ describe("ProviderAccountPoolRouter", () => {
     })?.cooldownUntil).toBe(now + 24 * 60 * 60_000);
   });
 
-  it("marks authentication failures and disabled members as unavailable", () => {
+  it("marks explicit invalid-key failures and disabled members as unavailable", () => {
     const router = new ProviderAccountPoolRouter({
       config: pool([
         { id: "primary" },
@@ -217,7 +232,10 @@ describe("ProviderAccountPoolRouter", () => {
       ]),
     });
 
-    expect(router.reportFailure("primary", { statusCode: 401 })?.status).toBe("auth-required");
+    expect(router.reportFailure("primary", {
+      statusCode: 401,
+      message: "Invalid API key provided",
+    })?.status).toBe("auth-required");
     expect(router.listMembers().map((entry) => [entry.id, entry.status])).toEqual([
       ["primary", "auth-required"],
       ["disabled", "disabled"],
@@ -251,13 +269,12 @@ describe("ProviderAccountPoolRouter", () => {
     expect(router.reportSuccess("primary")?.status).toBe("ready");
   });
 
-  it("treats soft 403 as multi-strike cooldown instead of an instant ban", () => {
+  it("treats soft 403 as cooldown-only and never escalates it into auth-required", () => {
     let now = Date.parse("2026-01-01T00:00:00Z");
     const router = new ProviderAccountPoolRouter({
       config: pool([{ id: "primary" }]),
       now: () => now,
       baseCooldownMs: 1_000,
-      authSoftStrikesRequired: 3,
     });
 
     const first = router.reportFailure("primary", { statusCode: 403 })!;
@@ -286,7 +303,70 @@ describe("ProviderAccountPoolRouter", () => {
     now = router.getMember("primary")!.cooldownUntil;
     router.reportFailure("primary", { statusCode: 403 });
     now = router.getMember("primary")!.cooldownUntil;
-    expect(router.reportFailure("primary", { statusCode: 403 })?.status).toBe("auth-required");
+    const third = router.reportFailure("primary", { statusCode: 403 })!;
+    expect(third).toMatchObject({
+      status: "cooldown",
+      softAuthStrikes: 3,
+    });
+    expect(Object.hasOwn(third, "authRequired")).toBe(false);
+    now = router.getMember("primary")!.cooldownUntil - 1;
+    expect(router.getMember("primary")?.status).toBe("cooldown");
+    now += 1;
+    expect(router.getMember("primary")?.status).toBe("ready");
+  });
+
+  it("requires two consecutive ambiguous 401 strikes before parking a custom account", () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const router = new ProviderAccountPoolRouter({
+      config: pool([{ id: "primary" }]),
+      now: () => now,
+      baseCooldownMs: 1_000,
+    });
+
+    const first = router.reportFailure("primary", {
+      statusCode: 401,
+      protocol: "openai-chat",
+      providerId: "xpiki",
+      message: "Unauthorized",
+    })!;
+    expect(first).toMatchObject({
+      status: "cooldown",
+      lastFailureClass: "auth_uncertain",
+    });
+    now = first.cooldownUntil;
+    expect(router.getMember("primary")?.status).toBe("ready");
+
+    const second = router.reportFailure("primary", {
+      statusCode: 401,
+      protocol: "openai-chat",
+      providerId: "xpiki",
+      message: "Unauthorized",
+    })!;
+    expect(second.status).toBe("auth-required");
+  });
+
+  it("clears ambiguous-auth accumulation after a non-auth transient failure", () => {
+    let now = Date.parse("2026-01-01T00:00:00Z");
+    const router = new ProviderAccountPoolRouter({
+      config: pool([{ id: "primary" }]),
+      now: () => now,
+      baseCooldownMs: 1_000,
+      networkCooldownMs: 500,
+    });
+
+    const first = router.reportFailure("primary", { statusCode: 401, message: "Unauthorized" })!;
+    expect(first.lastFailureClass).toBe("auth_uncertain");
+    now = first.cooldownUntil;
+
+    router.reportFailure("primary", { failureClass: "network", retryable: true });
+    expect(router.getMember("primary")).toMatchObject({
+      lastFailureClass: "network",
+      definiteAuthStrikes: 0,
+    });
+    now = router.getMember("primary")!.cooldownUntil;
+
+    const second = router.reportFailure("primary", { statusCode: 401, message: "Unauthorized" })!;
+    expect(second.status).toBe("cooldown");
   });
 
   it("moves a soft session lease after its member cools down and supports explicit exclusions", () => {

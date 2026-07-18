@@ -33,6 +33,31 @@ describe("Message reasoning visibility", () => {
     expect(html).toContain("final answer");
   });
 
+  it("hides internal control markers inside reasoning blocks", () => {
+    const html = renderToStaticMarkup(
+      createElement(I18nProvider, null,
+        createElement(TooltipProvider, null, createElement(Message, {
+          message: {
+            id: "assistant-reasoning-internal-lines",
+            role: "assistant",
+            parts: [{
+              type: "reasoning",
+              id: "r1",
+              state: "streaming",
+              text: "Effective phase: build\n\nVisible thought summary.\n[goal-verify] hidden",
+            }, {
+              type: "text",
+              text: "Visible answer.",
+            }],
+          },
+        }))),
+    );
+
+    expect(html).toContain("Visible thought summary.");
+    expect(html).not.toContain("Effective phase:");
+    expect(html).not.toContain("[goal-verify]");
+  });
+
   it("hides reasoning blocks when the UI preference is disabled", () => {
     setUiSetting("showReasoning", false);
 

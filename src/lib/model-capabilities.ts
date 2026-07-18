@@ -1,17 +1,25 @@
-import type { ProviderProtocol } from "@/lib/types";
+import type { ModelCapabilityMetadata, ProviderProtocol } from "@/lib/types";
 
 const MODEL_TUNING_PROTOCOLS: ReadonlySet<ProviderProtocol> = new Set([
   "openai-chat",
   "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+  "google-vertex",
+  "amazon-bedrock",
 ]);
 
 /**
- * The engine currently serializes Reasoning/Fast only for OpenAI request
- * shapes. Keep renderer controls and outbound modelParams aligned with that
- * executable contract.
+ * UI reasoning controls are available only when both layers agree:
+ * - the installed protocol adapter can serialize the setting
+ * - discovered model metadata, when present, does not explicitly disable it
  */
-export function supportsModelTuning(protocol: ProviderProtocol | undefined): boolean {
-  return protocol !== undefined && MODEL_TUNING_PROTOCOLS.has(protocol);
+export function supportsModelTuning(
+  protocol: ProviderProtocol | undefined,
+  capabilities?: ModelCapabilityMetadata,
+): boolean {
+  if (protocol === undefined || !MODEL_TUNING_PROTOCOLS.has(protocol)) return false;
+  return capabilities?.features?.reasoning !== false;
 }
 
 interface ModelTuningPreset {

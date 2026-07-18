@@ -24,6 +24,7 @@ export const PROVIDER_FAILURE_CLASSES = [
   "rate_limit",
   "server",
   "auth_definite",
+  "auth_uncertain",
   "auth_soft",
   "client",
   "unknown",
@@ -41,6 +42,8 @@ const DEFAULT_MAX_SESSION_LEASES = 10_000;
 const DEFAULT_AUTH_SOFT_STRIKES = 3;
 /** Definite 401 / invalid-key text: still one clear signal is enough. */
 const DEFAULT_AUTH_DEFINITE_STRIKES = 1;
+/** Ambiguous custom/proxy 401 needs a second consistent strike before parking. */
+const DEFAULT_AUTH_UNCERTAIN_STRIKES = 2;
 const MAX_MEMBERS = 256;
 const MAX_NAME_LENGTH = 120;
 const MAX_MEMBER_MODELS = 2_000;
@@ -174,6 +177,27 @@ function accountIdFrom(value) {
   return typeof value?.accountId === "string" ? value.accountId : "";
 }
 
+const DEFINITE_AUTH_RE =
+  /invalid[_\s-]?api[_\s-]?key|incorrect api key|api key (?:is )?(?:invalid|revoked|expired)|unauthorized.*api key|authentication[_\s-]?required|invalid[_\s-]?token|token (?:is )?(?:invalid|expired|revoked)|invalid[_\s-]?credentials|credentials? (?:are )?(?:invalid|expired|revoked)|not authenticated|login required|bearer token|x-api-key|permission.?denied|access.?denied|account (?:suspended|disabled|banned|locked)|subscription (?:expired|inactive)|insufficient.?permissions/i;
+
+function authEvidenceText(options = {}) {
+  const parts = [
+    options.message,
+    options.code,
+    options.reason,
+    options.responseBody,
+    typeof options.data === "string" ? options.data : options.data?.error?.message,
+    options.data?.message,
+    options.error?.message,
+    options.error?.code,
+  ];
+  return parts.filter((part) => typeof part === "string" && part.trim()).join(" ").toLowerCase();
+}
+
+function hasExplicitInvalidKeyEvidence(options = {}) {
+  return DEFINITE_AUTH_RE.test(authEvidenceText(options));
+}
+
 /** Normalize optional failure class from engine/gateway (drop unknown values). */
 export function normalizeFailureClass(value) {
   return PROVIDER_FAILURE_CLASSES.includes(value) ? value : "";
@@ -191,7 +215,7 @@ export function inferFailureClass(options = {}) {
   const statusCode = Number.isFinite(Number(options.statusCode ?? options.status))
     ? Number(options.statusCode ?? options.status)
     : 0;
-  if (statusCode === 401) return "auth_definite";
+  if (statusCode === 401) return hasExplicitInvalidKeyEvidence(options) ? "auth_definite" : "auth_uncertain";
   if (statusCode === 403) return "auth_soft";
   if (statusCode === 429) return "rate_limit";
   if (statusCode === 408 || statusCode === 425) return "network";
@@ -213,6 +237,7 @@ export class ProviderAccountPoolRouter {
     maxSessionLeases = DEFAULT_MAX_SESSION_LEASES,
     authSoftStrikesRequired = DEFAULT_AUTH_SOFT_STRIKES,
     authDefiniteStrikesRequired = DEFAULT_AUTH_DEFINITE_STRIKES,
+    authUncertainStrikesRequired = DEFAULT_AUTH_UNCERTAIN_STRIKES,
   } = {}) {
     if (typeof now !== "function") throw new Error("provider_account_pool_now_invalid");
     const normalized = normalizeProviderAccountPool(config);
@@ -227,6 +252,7 @@ export class ProviderAccountPoolRouter {
     this.maxSessionLeases = integer(maxSessionLeases, DEFAULT_MAX_SESSION_LEASES, 1, 100_000);
     this.authSoftStrikesRequired = integer(authSoftStrikesRequired, DEFAULT_AUTH_SOFT_STRIKES, 1, 10);
     this.authDefiniteStrikesRequired = integer(authDefiniteStrikesRequired, DEFAULT_AUTH_DEFINITE_STRIKES, 1, 10);
+    this.authUncertainStrikesRequired = integer(authUncertainStrikesRequired, DEFAULT_AUTH_UNCERTAIN_STRIKES, 1, 10);
     this.states = normalized.members.map((member, order) => ({
       member: { ...member },
       order,
@@ -235,6 +261,7 @@ export class ProviderAccountPoolRouter {
       failures: 0,
       softAuthStrikes: 0,
       definiteAuthStrikes: 0,
+      uncertainAuthStrikes: 0,
       lastFailureClass: "",
       inflight: 0,
       lastUsedAt: 0,
@@ -274,6 +301,7 @@ export class ProviderAccountPoolRouter {
       failures: state.failures,
       softAuthStrikes: state.softAuthStrikes,
       definiteAuthStrikes: state.definiteAuthStrikes,
+      uncertainAuthStrikes: state.uncertainAuthStrikes,
       ...(state.lastFailureClass ? { lastFailureClass: state.lastFailureClass } : {}),
       ...(Object.hasOwn(state.member, "modelIds") ? { modelIds: [...state.member.modelIds] } : {}),
     };
@@ -467,12 +495,32 @@ export class ProviderAccountPoolRouter {
     state.failures = 0;
     state.softAuthStrikes = 0;
     state.definiteAuthStrikes = 0;
+    state.uncertainAuthStrikes = 0;
     state.lastFailureClass = "";
     state.authRequired = false;
     state.cooldownUntil = 0;
     state.lastUsedAt = now;
     if (state.member.enabled) this.rememberSession(sessionId, accountId, now);
     return this.publicState(state, now);
+  }
+
+  /** Clear ephemeral strikes/cooldowns without changing saved enablement or credentials. */
+  resetRuntime(account) {
+    const requestedId = accountIdFrom(account);
+    const targets = requestedId ? [this.stateById.get(requestedId)].filter(Boolean) : this.states;
+    if (requestedId && !targets.length) return null;
+    const now = this.currentTime();
+    for (const state of targets) {
+      state.failures = 0;
+      state.softAuthStrikes = 0;
+      state.definiteAuthStrikes = 0;
+      state.uncertainAuthStrikes = 0;
+      state.lastFailureClass = "";
+      state.authRequired = false;
+      state.cooldownUntil = 0;
+      this.clearAccountSessions(state.member.id);
+    }
+    return requestedId ? this.publicState(targets[0], now) : this.listMembers();
   }
 
   /**
@@ -520,9 +568,11 @@ export class ProviderAccountPoolRouter {
       state.cooldownUntil = 0;
       state.softAuthStrikes = 0;
       state.definiteAuthStrikes = 0;
+      state.uncertainAuthStrikes = 0;
     } else if (options.authRequired === true || failureClass === "auth_definite") {
       // Explicit flag or hard 401 / invalid-key: still multi-strike configurable (default 1).
       state.softAuthStrikes = 0;
+      state.uncertainAuthStrikes = 0;
       state.definiteAuthStrikes = Math.min(31, state.definiteAuthStrikes + 1);
       if (state.definiteAuthStrikes >= this.authDefiniteStrikesRequired) {
         state.authRequired = true;
@@ -530,22 +580,29 @@ export class ProviderAccountPoolRouter {
       } else {
         this.applyCooldown(state, now, { failureClass: "auth_definite", options });
       }
-    } else if (failureClass === "auth_soft") {
-      // Soft 403 (CDN/WAF/geo): short cooldown + consecutive strikes before auth-required.
+    } else if (failureClass === "auth_uncertain") {
+      state.softAuthStrikes = 0;
       state.definiteAuthStrikes = 0;
-      state.softAuthStrikes = Math.min(31, state.softAuthStrikes + 1);
-      if (state.softAuthStrikes >= this.authSoftStrikesRequired) {
+      state.uncertainAuthStrikes = Math.min(31, state.uncertainAuthStrikes + 1);
+      if (state.uncertainAuthStrikes >= this.authUncertainStrikesRequired) {
         state.authRequired = true;
         state.cooldownUntil = 0;
       } else {
-        this.applyCooldown(state, now, { failureClass: "auth_soft", options });
+        this.applyCooldown(state, now, { failureClass: "auth_uncertain", options });
       }
+    } else if (failureClass === "auth_soft") {
+      // Soft 403 (CDN/WAF/geo): cooldown-only; never escalate this class to auth-required.
+      state.uncertainAuthStrikes = 0;
+      state.definiteAuthStrikes = 0;
+      state.softAuthStrikes = Math.min(31, state.softAuthStrikes + 1);
+      this.applyCooldown(state, now, { failureClass: "auth_soft", options });
     } else {
       // Network / rate-limit / server / client / unknown — never escalate to auth-required here.
       // A successful request later clears strikes; a transport blip also resets soft-auth accumulation
       // so intermittent 403+network cannot slowly "ban" a healthy seat.
       if (failureClass === "network" || failureClass === "rate_limit" || failureClass === "server") {
         state.softAuthStrikes = 0;
+        state.uncertainAuthStrikes = 0;
       }
       const retryable = options.retryable === true
         || failureClass === "network"

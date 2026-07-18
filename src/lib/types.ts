@@ -8,6 +8,15 @@ export interface TextPart {
 export interface ReasoningPart {
   type: "reasoning";
   text: string;
+  id?: string;
+  source?: "provider" | "kyrei-status";
+  providerId?: string;
+  modelId?: string;
+  attempt?: number;
+  state?: "streaming" | "complete" | "redacted" | "interrupted";
+  startedAt?: number;
+  completedAt?: number;
+  sequence?: number;
 }
 
 export interface ApprovalPart {
@@ -256,7 +265,7 @@ export interface CronJob {
   runs?: CronRun[];
 }
 
-export type SubagentStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
+export type SubagentStatus = "queued" | "running" | "recovering" | "partial" | "completed" | "failed" | "interrupted";
 
 export interface SubagentRun {
   id: string;
@@ -267,6 +276,7 @@ export interface SubagentRun {
   status: SubagentStatus;
   startedAt: number;
   updatedAt: number;
+  lastProgressAt?: number;
   durationSeconds?: number;
   inputTokens?: number;
   outputTokens?: number;
@@ -276,6 +286,27 @@ export interface SubagentRun {
   currentTool?: string;
   summary?: string;
   error?: string;
+  providerId?: string;
+  runId?: string;
+  taskId?: string;
+  roleId?: string;
+  evidenceCount?: number;
+  recoverable?: boolean;
+  provenance?: string[];
+  checkpointManifest?: {
+    version: 1;
+    state: "recovering" | "partial" | "interrupted" | "failed" | "completed";
+    recoverable?: boolean;
+    reason?: string;
+    startedTaskIds?: string[];
+    completedTaskIds?: string[];
+    failedTaskIds?: string[];
+  };
+  actions?: {
+    retry: boolean;
+    resume: boolean;
+    cancel: boolean;
+  };
 }
 
 export type ModelModality = "text" | "image" | "audio" | "video" | "file";
@@ -641,6 +672,8 @@ export interface ProviderProfile {
   headers?: Record<string, string>;
   models: ProviderModel[];
   enabled: boolean;
+  /** Exact-origin acknowledgement for a user-owned public HTTP endpoint. */
+  allowInsecureHttp?: boolean;
   requiresApiKey: boolean;
   hasKey: boolean;
   hasStoredCredentials?: boolean;
@@ -679,6 +712,8 @@ export interface ProviderDiscoveryInput {
   protocol: ProviderProtocol;
   baseURL: string;
   requiresApiKey: boolean;
+  /** Persisted only for the exact public HTTP origin configured by the user. */
+  allowInsecureHttp?: boolean;
   /** Temporary opt-in for a trusted HTTPS hostname mapped to 198.18.0.0/15. */
   allowBenchmarkNetwork?: boolean;
   models?: ProviderModel[];
@@ -887,6 +922,12 @@ export interface MemoryIndexRuntimeStatus {
     projectIndex: boolean;
   };
   message?: string;
+  degraded?: boolean;
+  stale?: boolean;
+  consecutiveFailures?: number;
+  healthReason?: string;
+  lastGoodAt?: string;
+  nextRetryAt?: string;
 }
 
 export interface MemoryIndexReindexResult {
@@ -934,6 +975,107 @@ export interface WorkspaceMemoryGraph {
     edges: number;
     truncated: boolean;
   };
+}
+
+export type MemoryAtlasSourceCapability = "browse" | "search-only" | "health-only";
+export type MemoryAtlasSourceHealth = "ready" | "degraded" | "stale" | "unavailable";
+export type MemoryAtlasNodeKind = MemoryGraphGroup | "skill" | "evolution";
+
+export interface MemoryAtlasSourceDescriptor {
+  id: string;
+  label: string;
+  capability: MemoryAtlasSourceCapability;
+  health: MemoryAtlasSourceHealth;
+  reason?: string;
+  generatedAt?: string;
+  lastGoodAt?: string;
+  truncated?: boolean;
+  omitted?: number;
+}
+
+export interface MemoryAtlasNode {
+  id: string;
+  entityId?: string;
+  sourceId: string;
+  kind: MemoryAtlasNodeKind;
+  title: string;
+  path?: string;
+  subtitle?: string;
+  preview?: string;
+  updatedAt?: string;
+  digest?: string;
+  enabled?: boolean;
+  compatible?: boolean;
+}
+
+export interface MemoryAtlasTreeNode {
+  id: string;
+  sourceId: string;
+  kind: "source" | "folder" | "item";
+  label: string;
+  parentId?: string;
+  path?: string;
+  nodeId?: string;
+  childCount: number;
+}
+
+export interface MemoryAtlasEdge {
+  source: string;
+  target: string;
+  type: "imports" | "contains" | "references" | "related";
+  sourceId: string;
+}
+
+export interface MemoryAtlasSnapshot {
+  version: 2;
+  snapshotId: string;
+  generatedAt: string;
+  workspace: string;
+  sources: MemoryAtlasSourceDescriptor[];
+  tree: MemoryAtlasTreeNode[];
+  nodes: MemoryAtlasNode[];
+  edges: MemoryAtlasEdge[];
+  stats: {
+    nodes: number;
+    edges: number;
+    code: number;
+    documents: number;
+    decisions: number;
+    sessions: number;
+    skills: number;
+    evolution: number;
+    truncated: boolean;
+    truncationReasons: string[];
+  };
+}
+
+export type EvolutionCandidateStatus = "pending" | "evaluating" | "approved" | "rejected" | "canary" | "promoted" | "rolled-back" | "failed";
+
+export interface EvolutionCandidate {
+  id: string;
+  version: number;
+  target: { kind: "skill" | "prompt-profile" | "memory-ranking" | "reliability-hint"; id: string };
+  title: string;
+  summary: string;
+  risk: "low" | "medium" | "high";
+  status: EvolutionCandidateStatus;
+  revision: number;
+  proposal: Record<string, unknown>;
+  proposalDigest: string;
+  provenance: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  evidence: { tests: string[]; receipts: string[]; metrics: Record<string, unknown>; notes: string };
+  reason?: string;
+}
+
+export interface EvolutionRuntimeConfig {
+  harvestEnabled: boolean;
+  evaluationEnabled: boolean;
+  promotionMode: "off" | "manual" | "low-risk-canary";
+  maxCandidates: number;
+  retentionDays: number;
+  maxEvaluationCostUsd: number | null;
 }
 
 export interface ProjectDocumentImportResult {
@@ -1022,6 +1164,12 @@ export interface SessionMirrorRuntimeStatus {
   path?: string;
   note?: string;
   message?: string;
+  degraded?: boolean;
+  stale?: boolean;
+  consecutiveFailures?: number;
+  healthReason?: string;
+  lastGoodAt?: string;
+  nextRetryAt?: string;
   sync?: SessionMirrorSyncProgress;
 }
 
@@ -1100,6 +1248,12 @@ export interface GBrainRuntimeStatus {
   /** Compact doctor result; no raw local paths or diagnostics are exposed. */
   doctorStatus: "ok" | "warnings" | "error" | "unknown";
   reason?: "command_unavailable" | "adapter_unavailable" | "not_initialized" | "check_failed" | "external_setup_required";
+  degraded?: boolean;
+  stale?: boolean;
+  consecutiveFailures?: number;
+  healthReason?: string;
+  lastGoodAt?: string;
+  nextRetryAt?: string;
 }
 
 export interface GBrainInitializationResult {
@@ -1139,6 +1293,12 @@ export interface GatewayEvent {
   payload?: {
     code?: string;
     text?: string;
+    id?: string;
+    sequence?: number;
+    attempt?: number;
+    started_at?: number;
+    completed_at?: number;
+    source?: "provider" | "kyrei-status";
     tool_call_id?: string;
     approval_id?: string;
     approved?: boolean;

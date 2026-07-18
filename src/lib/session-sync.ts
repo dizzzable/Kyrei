@@ -74,7 +74,7 @@ export function mergeSessionHydration(
       : {
       id: pendingId,
       role: "assistant" as const,
-      parts: [{ type: "reasoning" as const, text: "" }],
+      parts: [],
       pending: true,
     };
 

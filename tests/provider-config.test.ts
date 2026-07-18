@@ -582,6 +582,45 @@ describe("provider registry config", () => {
     expect(() => validateProviderInput({ ...input, models: [] }, { creating: true })).toThrow("provider_models_required");
   });
 
+  it("preserves explicit enabled/manual-model intent for custom providers independent of discovery outcome", () => {
+    const input = validateProviderInput({
+      id: "xpiki",
+      displayName: "Xpiki",
+      protocol: "openai-chat",
+      baseURL: "http://93.184.216.34:8080/v1",
+      models: [{ id: "manual-alpha", name: "Manual alpha" }, { id: "manual-beta" }],
+      enabled: false,
+      requiresApiKey: true,
+      allowInsecureHttp: true,
+    }, { creating: true });
+    expect(input).toMatchObject({
+      id: "xpiki",
+      enabled: false,
+      allowInsecureHttp: true,
+      models: [
+        { id: "manual-alpha", name: "Manual alpha" },
+        { id: "manual-beta" },
+      ],
+    });
+
+    const config = normalizeGatewayConfig({
+      providers: [input],
+      activeProviderId: "xpiki",
+      activeModelId: "manual-beta",
+    });
+    expect(config.providers[0]).toMatchObject({
+      id: "xpiki",
+      enabled: false,
+      allowInsecureHttp: true,
+      models: [
+        { id: "manual-alpha", name: "Manual alpha" },
+        { id: "manual-beta" },
+      ],
+    });
+    expect(config.activeProviderId).toBe("");
+    expect(config.activeModelId).toBe("");
+  });
+
   it("normalizes and reconciles the provider-scoped worker assignment", () => {
     let config = normalizeGatewayConfig({});
     ({ config } = upsertProvider(config, {

@@ -484,6 +484,7 @@ export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID, optio
     ...(Object.keys(headers).length ? { headers } : {}),
     models,
     enabled: source.enabled !== false,
+    allowInsecureHttp: source.allowInsecureHttp === true,
     requiresApiKey: typeof source.requiresApiKey === "boolean" ? source.requiresApiKey : !isLocalProviderUrl(baseURL),
     accountPool: normalizeProviderAccountPool(source.accountPool ?? source.pool, models),
     credentialSource,
@@ -558,6 +559,7 @@ export function validateProviderInput(value, { creating = false, providerId, ver
       ? { browserSubscriptionSessionId }
       : {}),
     enabled: source.enabled !== false,
+    allowInsecureHttp: source.allowInsecureHttp === true,
     requiresApiKey: typeof source.requiresApiKey === "boolean" ? source.requiresApiKey : !isLocalProviderUrl(baseURL),
     accountPool: normalizeProviderAccountPool(source.accountPool ?? source.pool, models),
   };

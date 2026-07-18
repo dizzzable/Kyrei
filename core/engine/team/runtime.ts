@@ -7,6 +7,8 @@ import type {
   ProviderAttemptLifecycle,
   RuntimeSkill,
   RuntimeSkillDocumentContent,
+  RuntimeSkillReadResult,
+  RuntimeSkillReadUnavailable,
   RuntimeTeamRole,
   RuntimeTeamSpec,
 } from "../types.js";
@@ -59,6 +61,7 @@ export interface CreateTeamRoleExecutorsOptions {
   readonly sensitiveValues?: readonly string[];
   readonly emit: (event: KyreiEvent) => void;
   readonly onSkillUsed?: (id: string) => void | Promise<void>;
+  readonly readSkill?: (skillId: string) => Promise<RuntimeSkillReadResult | RuntimeSkillReadUnavailable | null>;
   readonly readSkillDocument?: (skillId: string, documentId: string) => Promise<RuntimeSkillDocumentContent | null>;
   readonly providerAttemptLifecycle?: ProviderAttemptLifecycle;
   /** Pipeline departments force the same Team runtime into a read-only mode. */
@@ -152,6 +155,7 @@ export async function createTeamRoleExecutors(
     const assignedSkillTools = buildSkillTools(assignedSkills, {
       maxOutputChars: options.config.maxToolOutput,
       onUsed: options.onSkillUsed,
+      ...(options.readSkill ? { readSkill: options.readSkill } : {}),
       ...(options.readSkillDocument ? { readDocument: options.readSkillDocument } : {}),
     });
     const canReadWorkspace = role.capabilities.includes("workspace.read");

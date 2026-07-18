@@ -171,7 +171,7 @@ describe("gateway operational capabilities", () => {
   });
 
   it("fails open for ambient skill runtime load errors", async () => {
-    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "runtimeSkills")
+    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "catalogSkills")
       .mockRejectedValueOnce(new Error("skill runtime unavailable"));
     try {
       const config = await request<{ activeProviderId: string }>("/api/config");
@@ -203,8 +203,8 @@ describe("gateway operational capabilities", () => {
   });
 
   it("blocks model execution when an explicit selected Skill cannot be materialized at runtime", async () => {
-    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "runtimeSkills")
-      .mockRejectedValueOnce(Object.assign(new Error("requested skill unavailable"), { code: "runtime_skills_incomplete" }));
+    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "catalogSkills")
+      .mockRejectedValueOnce(Object.assign(new Error("requested skill unavailable"), { code: "skill_catalog_incomplete" }));
     try {
       const config = await request<{ activeProviderId: string }>("/api/config");
       await request(`/api/providers/${config.activeProviderId}/secret`, {
@@ -292,22 +292,20 @@ describe("gateway operational capabilities", () => {
     let enteredSetup!: () => void;
     let releaseSetup!: (value: {
       skills: never[];
-      text: string;
       total: number;
       included: number;
-      chars: number;
       truncated: boolean;
+      unavailable: never[];
     }) => void;
     const setupEntered = new Promise<void>((resolve) => { enteredSetup = resolve; });
     const setupGate = new Promise<{
       skills: never[];
-      text: string;
       total: number;
       included: number;
-      chars: number;
       truncated: boolean;
+      unavailable: never[];
     }>((resolve) => { releaseSetup = resolve; });
-    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "runtimeSkills")
+    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "catalogSkills")
       .mockImplementation(async () => {
         enteredSetup();
         return setupGate;
@@ -330,7 +328,7 @@ describe("gateway operational capabilities", () => {
       await setupEntered;
 
       const closing = server.close();
-      releaseSetup({ skills: [], text: "", total: 0, included: 0, chars: 0, truncated: false });
+      releaseSetup({ skills: [], total: 0, included: 0, truncated: false, unavailable: [] });
       await closing;
       await new Promise<void>((resolve) => setImmediate(resolve));
 

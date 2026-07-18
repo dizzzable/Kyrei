@@ -8,6 +8,8 @@ import type {
   ProviderAttemptLifecycle,
   RuntimeSkill,
   RuntimeSkillDocumentContent,
+  RuntimeSkillReadResult,
+  RuntimeSkillReadUnavailable,
   RuntimeTeamSpec,
 } from "../types.js";
 import { MemoryIndexSession } from "../memory/index-session.js";
@@ -56,6 +58,7 @@ export interface RunTeamDepartmentOptions {
   readonly abortSignal?: AbortSignal;
   readonly emit?: (event: KyreiEvent) => void;
   readonly onSkillUsed?: (id: string) => void | Promise<void>;
+  readonly readSkill?: (skillId: string) => Promise<RuntimeSkillReadResult | RuntimeSkillReadUnavailable | null>;
   readonly readSkillDocument?: (skillId: string, documentId: string) => Promise<RuntimeSkillDocumentContent | null>;
   readonly providerAttemptLifecycle?: ProviderAttemptLifecycle;
 }
@@ -171,6 +174,73 @@ function combineSignals(...candidates: Array<AbortSignal | undefined>): { signal
     signal: controller.signal,
     cleanup: () => listeners.forEach(({ signal, listener }) => signal.removeEventListener("abort", listener)),
   };
+}
+
+interface TaskDeadline {
+  signal: AbortSignal;
+  timeoutError: Error & {
+    code: "team_task_timeout" | "team_task_max_runtime";
+    timeoutMs: number;
+    reason: "idle" | "runtime";
+  };
+  refresh: () => void;
+  cleanup: () => void;
+}
+
+function createTaskDeadline(
+  parent: AbortSignal,
+  configuredTimeoutMs: number,
+  configuredMaxRuntimeMs?: number,
+): TaskDeadline {
+  const timeoutMs = Math.min(300_000, Math.max(1_000, Math.floor(configuredTimeoutMs || 0) || 180_000));
+  const maxRuntimeMs = Math.min(7_200_000, Math.max(timeoutMs, Math.floor(configuredMaxRuntimeMs || 0) || 1_800_000));
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort(parent.reason);
+  if (parent.aborted) onParentAbort();
+  else parent.addEventListener("abort", onParentAbort, { once: true });
+  const timeoutError = (timeout: number, reason: "idle" | "runtime") => Object.assign(
+    new Error(`Team task timed out after ${timeout}ms`),
+    { name: "TimeoutError", code: reason === "runtime" ? "team_task_max_runtime" as const : "team_task_timeout" as const, timeoutMs: timeout, reason },
+  );
+  let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  const armIdleTimeout = () => {
+    if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
+    if (controller.signal.aborted) return;
+    idleTimeoutId = setTimeout(() => controller.abort(timeoutError(timeoutMs, "idle")), timeoutMs);
+  };
+  armIdleTimeout();
+  const maxRuntimeId = controller.signal.aborted
+    ? undefined
+    : setTimeout(() => controller.abort(timeoutError(maxRuntimeMs, "runtime")), maxRuntimeMs);
+  return {
+    signal: controller.signal,
+    timeoutError: timeoutError(timeoutMs, "idle"),
+    refresh: armIdleTimeout,
+    cleanup: () => {
+      if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
+      if (maxRuntimeId !== undefined) clearTimeout(maxRuntimeId);
+      parent.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
+
+function waitForTaskWithDeadline<T>(task: Promise<T>, deadline: TaskDeadline): Promise<T> {
+  if (deadline.signal.aborted) return Promise.reject(deadline.signal.reason ?? deadline.timeoutError);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      deadline.signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(deadline.signal.reason ?? deadline.timeoutError));
+    deadline.signal.addEventListener("abort", onAbort, { once: true });
+    task.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 function dependencyContext(artifacts: readonly TeamDepartmentInputArtifact[], sensitiveValues: readonly string[]): string {
@@ -339,6 +409,7 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
       sensitiveValues: options.sensitiveValues,
       emit,
       onSkillUsed: options.onSkillUsed,
+      ...(options.readSkill ? { readSkill: options.readSkill } : {}),
       ...(options.readSkillDocument ? { readSkillDocument: options.readSkillDocument } : {}),
       providerAttemptLifecycle: options.providerAttemptLifecycle,
       readOnly: true,
@@ -387,12 +458,7 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
     if (agentsUsed >= options.team.limits.maxAgents) throw new Error("team_agent_budget_exceeded");
     agentsUsed += 1;
   };
-  const timeout = new AbortController();
-  const timeoutId = setTimeout(
-    () => timeout.abort(new Error("team_run_timeout")),
-    options.team.limits.timeoutMs,
-  );
-  const combined = combineSignals(options.abortSignal, timeout.signal);
+  const combined = combineSignals(options.abortSignal);
   const started = new Set<string>();
   const taskMetrics = new Map<string, TeamArtifactMetrics>();
   let observedTaskResults: readonly TeamTaskResult[] = [];
@@ -447,22 +513,34 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
         } as const;
         started.add(context.task.id);
         taskMetrics.set(context.task.id, { providerCalls: 1, unmeteredProviderCalls: 1 });
+        const taskDeadline = createTaskDeadline(
+          combined.signal,
+          options.team.limits.timeoutMs,
+          (options.team.limits as RuntimeTeamSpec["limits"] & { maxRuntimeMs?: number }).maxRuntimeMs,
+        );
         emit({ type: "subagent.start", payload: { ...base, status: "running" } });
         try {
-          const artifact = redactedArtifact(await executor.run({ ...context, signal: combined.signal }, {
-            runId,
-            subagentId,
-            reserveNestedAgent,
-            onMetrics: (metrics) => taskMetrics.set(context.task.id, aggregateTeamMetrics([metrics], 1)),
-            onProgress: (progress) => {
-              const message = text(progress, 1_200, sensitiveValues);
-              if (!message || combined.signal.aborted) return;
-              emit({
-                type: "subagent.progress",
-                payload: { ...base, model: executor.role.target.model, status: "running", text: message },
-              });
-            },
-          }), sensitiveValues);
+          const artifact = redactedArtifact(await waitForTaskWithDeadline(
+            executor.run({ ...context, signal: taskDeadline.signal }, {
+              runId,
+              subagentId,
+              reserveNestedAgent,
+              onMetrics: (metrics) => {
+                taskDeadline.refresh();
+                taskMetrics.set(context.task.id, aggregateTeamMetrics([metrics], 1));
+              },
+              onProgress: (progress) => {
+                const message = text(progress, 1_200, sensitiveValues);
+                if (!message || combined.signal.aborted || taskDeadline.signal.aborted) return;
+                taskDeadline.refresh();
+                emit({
+                  type: "subagent.progress",
+                  payload: { ...base, model: executor.role.target.model, status: "running", text: message },
+                });
+              },
+            }),
+            taskDeadline,
+          ), sensitiveValues);
           if (artifact.metrics) taskMetrics.set(context.task.id, artifact.metrics);
           if (combined.signal.aborted) throw abortError(combined.signal);
           emit({
@@ -503,6 +581,8 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
             },
           });
           throw error;
+        } finally {
+          taskDeadline.cleanup();
         }
       },
       { maxConcurrency: options.team.limits.maxParallel, signal: combined.signal },
@@ -567,7 +647,6 @@ export async function runTeamDepartment(options: RunTeamDepartmentOptions): Prom
     const name = error instanceof Error ? error.name : "TeamDepartmentRunError";
     throw new TeamDepartmentRunError(message, metrics, name);
   } finally {
-    clearTimeout(timeoutId);
     combined.cleanup();
     await memoryIndex?.release();
   }

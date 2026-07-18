@@ -51,6 +51,21 @@ export { importProjectDocuments } from "./memory/document-import.js";
 export type { ImportedProjectDocument, ProjectDocumentInput, RejectedProjectDocument } from "./memory/document-import.js";
 export { buildWorkspaceMemoryGraph, getWorkspaceMemoryGraph } from "./memory/graph-view.js";
 export type { MemoryGraphEdge, MemoryGraphGroup, MemoryGraphNode, WorkspaceMemoryGraph } from "./memory/graph-view.js";
+export { buildMemoryAtlas, getWorkspaceMemoryAtlas, memoryAtlasToGraphV1 } from "./memory/atlas-view.js";
+export type { BuildMemoryAtlasInput, GetWorkspaceMemoryAtlasInput, OptionalMemoryAtlasSource } from "./memory/atlas-view.js";
+export type {
+  MemoryAtlasEdge,
+  MemoryAtlasNode,
+  MemoryAtlasNodeKind,
+  MemoryAtlasSnapshot,
+  MemoryAtlasSourceCapability,
+  MemoryAtlasSourceDescriptor,
+  MemoryAtlasSourceHealth,
+  MemoryAtlasSourcePayload,
+  MemoryAtlasSkillMetadata,
+  MemoryAtlasStats,
+  MemoryAtlasTreeNode,
+} from "./memory/atlas-types.js";
 export { writeHandoff, readHandoff, reseedFromHandoff, HandoffSchema } from "./memory/handoff.js";
 export type { HandoffArtifact } from "./memory/handoff.js";
 export {

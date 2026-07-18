@@ -123,6 +123,26 @@ export type TeamTaskRunner = (
 
 export type TeamTaskStatus = "succeeded" | "failed" | "blocked" | "aborted";
 
+export type TeamRunState =
+  | "queued"
+  | "running"
+  | "recovering"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "interrupted";
+
+export interface TeamRunCheckpointManifest {
+  readonly version: 1;
+  readonly runId: string;
+  readonly state: TeamRunState;
+  readonly recoverable: boolean;
+  readonly reason?: string;
+  readonly startedTaskIds: readonly string[];
+  readonly completedTaskIds: readonly string[];
+  readonly failedTaskIds: readonly string[];
+}
+
 export interface TeamTaskSucceededResult {
   readonly task: TeamTaskSpec;
   readonly status: "succeeded";

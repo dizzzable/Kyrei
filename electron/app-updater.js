@@ -26,6 +26,25 @@
  * }} AppUpdateStatus
  */
 
+function comparableVersion(value) {
+  const match = String(value ?? "").trim().replace(/^v/i, "")
+    .match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+  if (!match) return null;
+  return [Number(match[1] ?? 0), Number(match[2] ?? 0), Number(match[3] ?? 0)];
+}
+
+/** electron-updater should filter older releases, but stale GitHub metadata or
+ * a custom feed must never turn a downgrade into an update affordance. */
+export function isNewerAppVersion(candidate, current) {
+  const next = comparableVersion(candidate);
+  const installed = comparableVersion(current);
+  if (!next || !installed) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (next[index] !== installed[index]) return next[index] > installed[index];
+  }
+  return false;
+}
+
 /**
  * @param {{
  *   app: { getVersion: () => string, isPackaged: boolean },
@@ -114,6 +133,16 @@ export function createAppUpdater({
 
   wire("update-available", (info) => {
     const latestVersion = String(info?.version ?? "").replace(/^v/i, "") || undefined;
+    if (!latestVersion || !isNewerAppVersion(latestVersion, status.currentVersion)) {
+      setStatus({
+        phase: "not-available",
+        latestVersion: latestVersion ?? status.currentVersion,
+        releaseName: undefined,
+        error: undefined,
+        percent: undefined,
+      });
+      return;
+    }
     setStatus({
       phase: "available",
       latestVersion,
@@ -145,6 +174,15 @@ export function createAppUpdater({
 
   wire("update-downloaded", (info) => {
     const latestVersion = String(info?.version ?? status.latestVersion ?? "").replace(/^v/i, "") || status.latestVersion;
+    if (!latestVersion || !isNewerAppVersion(latestVersion, status.currentVersion)) {
+      setStatus({
+        phase: "not-available",
+        latestVersion: latestVersion ?? status.currentVersion,
+        error: undefined,
+        percent: undefined,
+      });
+      return;
+    }
     setStatus({
       phase: "downloaded",
       latestVersion,
@@ -178,7 +216,10 @@ export function createAppUpdater({
         const version = result?.updateInfo?.version
           ? String(result.updateInfo.version).replace(/^v/i, "")
           : status.currentVersion;
-        setStatus({ phase: "not-available", latestVersion: version });
+        setStatus({
+          phase: isNewerAppVersion(version, status.currentVersion) ? "available" : "not-available",
+          latestVersion: version,
+        });
       }
       return getStatus();
     } catch (error) {

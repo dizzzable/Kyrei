@@ -446,12 +446,14 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
   const skillTools = buildSkillTools(opts.skills ?? [], {
     maxOutputChars: cfg.maxToolOutput,
     onUsed: opts.onSkillUsed,
+    ...(opts.readSkill ? { readSkill: opts.readSkill } : {}),
     ...(opts.readSkillDocument ? { readDocument: opts.readSkillDocument } : {}),
   });
   // Delegates receive a separately constructed reader without the parent's
   // usage callback. Loading instructions must remain a read-only child action.
   const childSkillTools = buildSkillTools(opts.skills ?? [], {
     maxOutputChars: cfg.maxToolOutput,
+    ...(opts.readSkill ? { readSkill: opts.readSkill } : {}),
     ...(opts.readSkillDocument ? { readDocument: opts.readSkillDocument } : {}),
   });
   const baseToolSet: ToolSet = {
@@ -560,6 +562,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         sensitiveValues,
         emit: opts.emit,
         onSkillUsed: opts.onSkillUsed,
+        ...(opts.readSkill ? { readSkill: opts.readSkill } : {}),
         ...(opts.readSkillDocument ? { readSkillDocument: opts.readSkillDocument } : {}),
         providerAttemptLifecycle: opts.providerAttemptLifecycle,
         ...(memoryIndex?.memoryStore ? { memoryStore: memoryIndex.memoryStore } : {}),
@@ -816,6 +819,8 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         maxSteps: cfg.delegation.maxSteps,
         maxRetries: cfg.apiMaxRetries,
         timeoutMs: cfg.delegation.timeoutMs,
+        idleTimeoutMs: cfg.delegation.idleTimeoutMs,
+        maxRuntimeMs: cfg.delegation.maxRuntimeMs,
         cost: workerEntry?.cost ?? entry.cost,
         providerOptions: explicitWorkerProviderOptions ?? providerOptions,
         workspace: workspaceReady ? opts.workspace : undefined,
@@ -1349,6 +1354,10 @@ function mergeRecoveryParts(current: MessagePart[], incoming: readonly MessagePa
       previous
       && (part.type === "text" || part.type === "reasoning")
       && previous.type === part.type
+      && (part.type === "text"
+        || (previous.type === "reasoning"
+          && previous.id === part.id
+          && previous.attempt === part.attempt))
     ) {
       previous.text += part.text;
     } else {

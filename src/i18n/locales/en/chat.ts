@@ -149,6 +149,7 @@ export const enChat = {
   "chat.code.copied": "Copied",
   "chat.thinking.label": "Thinking",
   "chat.thinking.elapsed": "{seconds}s",
+  "chat.jumpToLatest": "Jump to latest",
   "chat.slash.new.description": "Start a new chat",
   "chat.slash.help.description": "Show slash commands",
   "chat.slash.model.description": "Switch the model for this session",

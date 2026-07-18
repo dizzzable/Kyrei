@@ -1,34 +1,17 @@
-import {
-  BrainCircuit,
-  FileJson2,
-  FileText,
-  Focus,
-  LoaderCircle,
-  Minus,
-  Plus,
-  RefreshCw,
-  Search,
-  Upload,
-  X,
-} from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type DragEvent,
-} from "react";
-import { createPortal } from "react-dom";
+import { BrainCircuit, FileJson2, FolderUp, LoaderCircle, RefreshCw, Search, Upload, X } from "lucide-react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 
-import { Button } from "@/components/ui";
+import { Button, Dialog, DialogContent, DialogTitle } from "@/components/ui";
 import { useI18n } from "@/i18n";
-import { gateway } from "@/lib/gateway";
+import { gateway, GatewayRequestError } from "@/lib/gateway";
 import { bufferToBase64, importConversationFile } from "@/lib/session-import-api";
-import type { MemoryGraphGroup, MemoryGraphNode, WorkspaceMemoryGraph } from "@/lib/types";
+import type { MemoryAtlasNodeKind, MemoryAtlasSnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { layoutMemoryGraph } from "./memory-graph-layout";
+import { loadMemoryAtlasPreferences, saveMemoryAtlasPreferences } from "@/store/memory-atlas";
+import { MemoryAtlasCanvas } from "./MemoryAtlasCanvas";
+import { MemoryAtlasInspector } from "./MemoryAtlasInspector";
+import { MemoryAtlasTree } from "./MemoryAtlasTree";
+import type { AtlasViewport, Point } from "./memory-atlas-viewport";
 
 interface MemoryGraphPanelProps {
   open: boolean;
@@ -39,35 +22,55 @@ interface MemoryGraphPanelProps {
 const DOCUMENT_ACCEPT = ".md,.mdx,.markdown,.txt,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv";
 const SESSION_ACCEPT = ".json,.jsonl,.md,.txt,application/json,text/markdown,text/plain";
 const MAX_DOCUMENT_TOTAL = 12 * 1024 * 1024;
-const GROUPS: MemoryGraphGroup[] = ["code", "document", "decision", "plan", "handoff", "session", "memory"];
+const GROUPS: MemoryAtlasNodeKind[] = ["code", "document", "decision", "plan", "handoff", "session", "memory", "skill", "evolution"];
 
 export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPanelProps) {
   const { t, date, number } = useI18n();
   const titleId = useId();
-  const panelRef = useRef<HTMLDivElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
   const documentInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const sessionInputRef = useRef<HTMLInputElement>(null);
-  const [graph, setGraph] = useState<WorkspaceMemoryGraph | null>(null);
+  const [atlas, setAtlas] = useState<MemoryAtlasSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<"documents" | "session" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [workspaceMissing, setWorkspaceMissing] = useState(false);
   const [query, setQuery] = useState("");
-  const [activeGroup, setActiveGroup] = useState<MemoryGraphGroup | "all">("all");
+  const [activeGroup, setActiveGroup] = useState<MemoryAtlasNodeKind | "all">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
+  const [viewport, setViewport] = useState<AtlasViewport>({ scale: 1, x: 0, y: 0 });
+  const [pinned, setPinned] = useState<Record<string, Point>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [paneWidths, setPaneWidths] = useState({ left: 240, right: 300 });
   const [dragging, setDragging] = useState(false);
+  const loadedWorkspace = useRef("");
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const next = await gateway.getMemoryGraph();
-      setGraph(next);
+      const next = await gateway.getMemoryAtlas();
+      setWorkspaceMissing(false);
+      setAtlas(next);
       setSelectedId((current) => current && next.nodes.some((node) => node.id === current) ? current : null);
+      if (loadedWorkspace.current !== next.workspace) {
+        const preference = loadMemoryAtlasPreferences(next.workspace);
+        loadedWorkspace.current = next.workspace;
+        setViewport(preference.viewport);
+        setPaneWidths(preference.paneWidths);
+        setPinned(Object.fromEntries(Object.entries(preference.pinned).filter(([id]) => next.nodes.some((node) => node.id === id))));
+        setExpanded(new Set(preference.expandedTreeIds.length
+          ? preference.expandedTreeIds
+          : next.tree.filter((node) => node.kind === "source").map((node) => node.id)));
+      }
     } catch (reason) {
-      setError(errorText(reason, t("shell.memory.loadFailed")));
+      if (reason instanceof GatewayRequestError && reason.serverCode === "workspace_not_configured") {
+        setWorkspaceMissing(true);
+        setAtlas(null);
+      } else {
+        setError(errorText(reason, t("shell.memory.loadFailed")));
+      }
     } finally {
       setLoading(false);
     }
@@ -80,30 +83,57 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
   }, [open, refresh]);
 
   useEffect(() => {
-    if (!open || typeof document === "undefined") return;
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const shell = document.querySelector<HTMLElement>(".app-shell");
-    const hadInert = shell?.hasAttribute("inert") ?? false;
-    const previousAriaHidden = shell?.getAttribute("aria-hidden");
-    shell?.setAttribute("inert", "");
-    shell?.setAttribute("aria-hidden", "true");
-    const focusTimer = window.setTimeout(() => closeRef.current?.focus(), 0);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+    folderInputRef.current?.setAttribute("directory", "");
+  }, []);
+
+  useEffect(() => {
+    if (!loadedWorkspace.current) return;
+    const timer = window.setTimeout(() => saveMemoryAtlasPreferences(loadedWorkspace.current, {
+      viewport,
+      expandedTreeIds: [...expanded],
+      pinned,
+      paneWidths,
+    }), 180);
+    return () => window.clearTimeout(timer);
+  }, [expanded, paneWidths, pinned, viewport]);
+
+  useEffect(() => {
+    if (!selectedId || !atlas?.tree.length) return;
+    const byId = new Map(atlas.tree.map((node) => [node.id, node]));
+    let current = atlas.tree.find((node) => node.nodeId === selectedId);
+    if (!current) return;
+    const ancestors: string[] = [];
+    while (current.parentId) {
+      ancestors.push(current.parentId);
+      const parent = byId.get(current.parentId);
+      if (!parent || parent.id === current.id) break;
+      current = parent;
+    }
+    if (ancestors.length) setExpanded((value) => new Set([...value, ...ancestors]));
+  }, [atlas?.tree, selectedId]);
+
+  const beginPaneResize = useCallback((side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const start = paneWidths[side];
+    const move = (next: PointerEvent) => {
+      const delta = side === "left" ? next.clientX - startX : startX - next.clientX;
+      const min = side === "left" ? 180 : 240;
+      const max = side === "left" ? 420 : 520;
+      setPaneWidths((current) => ({ ...current, [side]: Math.min(max, Math.max(min, start + delta)) }));
     };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      window.clearTimeout(focusTimer);
-      document.removeEventListener("keydown", onKeyDown, true);
-      if (!hadInert) shell?.removeAttribute("inert");
-      if (previousAriaHidden == null) shell?.removeAttribute("aria-hidden");
-      else shell?.setAttribute("aria-hidden", previousAriaHidden);
-      previouslyFocused?.focus();
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
     };
-  }, [onClose, open]);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  }, [paneWidths]);
 
   const importDocuments = useCallback(async (files: readonly File[]) => {
     if (!files.length || busy) return;
@@ -115,6 +145,9 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
       if (total > MAX_DOCUMENT_TOTAL) throw new Error("document_payload_too_large");
       const encoded = await Promise.all(files.slice(0, 24).map(async (file) => ({
         fileName: file.name,
+        ...((file as File & { webkitRelativePath?: string }).webkitRelativePath
+          ? { relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath }
+          : {}),
         contentBase64: bufferToBase64(await file.arrayBuffer()),
       })));
       const result = await gateway.importProjectDocuments(encoded);
@@ -125,6 +158,7 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
     } finally {
       setBusy(null);
       if (documentInputRef.current) documentInputRef.current.value = "";
+      if (folderInputRef.current) folderInputRef.current.value = "";
     }
   }, [busy, number, refresh, t]);
 
@@ -136,10 +170,7 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
     try {
       const result = await importConversationFile(file);
       window.dispatchEvent(new CustomEvent("kyrei:sessions-refresh"));
-      setNotice(t("shell.memory.sessionImported", {
-        count: number(result.report.messageCount),
-        adapter: result.report.adapterId,
-      }));
+      setNotice(t("shell.memory.sessionImported", { count: number(result.report.messageCount), adapter: result.report.adapterId }));
       await refresh();
       if (result.sessionId && onOpenSession) onOpenSession(result.sessionId);
     } catch (reason) {
@@ -151,24 +182,17 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
   }, [busy, number, onOpenSession, refresh, t]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleNodes = useMemo(() => {
-    if (!graph) return [];
-    return graph.nodes.filter((node) => {
-      if (node.group === "project") return true;
-      if (activeGroup !== "all" && node.group !== activeGroup) return false;
-      if (!normalizedQuery) return true;
-      return `${node.title} ${node.path ?? ""} ${node.subtitle ?? ""} ${node.preview ?? ""}`
-        .toLocaleLowerCase()
-        .includes(normalizedQuery);
-    });
-  }, [activeGroup, graph, normalizedQuery]);
+  const visibleNodes = useMemo(() => (atlas?.nodes ?? []).filter((node) => {
+    if (node.kind === "project") return true;
+    if (activeGroup !== "all" && node.kind !== activeGroup) return false;
+    if (!normalizedQuery) return true;
+    return `${node.title} ${node.path ?? ""} ${node.subtitle ?? ""} ${node.preview ?? ""}`.toLocaleLowerCase().includes(normalizedQuery);
+  }), [activeGroup, atlas?.nodes, normalizedQuery]);
   const visibleIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
-  const layout = useMemo(() => layoutMemoryGraph(
-    visibleNodes,
-    (graph?.edges ?? []).filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)),
-  ), [graph?.edges, visibleIds, visibleNodes]);
-  const positions = useMemo(() => new Map(layout.nodes.map((node) => [node.id, node])), [layout.nodes]);
-  const selected = graph?.nodes.find((node) => node.id === selectedId) ?? null;
+  const visibleEdges = useMemo(() => (atlas?.edges ?? []).filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)), [atlas?.edges, visibleIds]);
+  const matchedIds = useMemo(() => new Set(normalizedQuery ? visibleNodes.filter((node) => node.kind !== "project").map((node) => node.id) : []), [normalizedQuery, visibleNodes]);
+  const selected = atlas?.nodes.find((node) => node.id === selectedId) ?? null;
+  const sourceWarnings = atlas?.sources.filter((source) => source.health !== "ready") ?? [];
 
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -176,172 +200,63 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
     void importDocuments([...event.dataTransfer.files]);
   };
 
-  if (!open || typeof document === "undefined") return null;
-
-  return createPortal(
-    <div className="fixed inset-x-0 top-[var(--app-titlebar-h)] bottom-[var(--app-statusbar-h)] z-[115] grid min-h-0 place-items-center bg-bg p-3 sm:p-5">
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent
+        showClose={false}
         aria-labelledby={titleId}
-        className="flex h-full min-h-0 w-full max-w-[92rem] flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-nous"
+        className="flex h-[calc(100dvh-var(--app-titlebar-h)-var(--app-statusbar-h)-1.5rem)] max-h-none w-[calc(100vw-1.5rem)] max-w-[96rem] flex-col overflow-hidden rounded-xl border border-border bg-surface p-0"
       >
         <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border px-4 py-3 sm:px-5">
-          <div className="relative grid size-9 shrink-0 place-items-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
-            <BrainCircuit className="size-4.5" aria-hidden />
-            <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-success ring-2 ring-surface" aria-hidden />
-          </div>
-          <div className="min-w-48 flex-1">
-            <h2 id={titleId} className="text-[14px] font-semibold text-foreground">{t("shell.memory.title")}</h2>
-            <p className="mt-0.5 truncate text-[10px] text-muted">{graph?.workspace ?? t("shell.memory.subtitle")}</p>
-          </div>
-          <label className="relative order-last w-full sm:order-none sm:w-64">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" aria-hidden />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="h-8 w-full rounded-md border border-border bg-bg pl-8 pr-8 text-[11px] text-foreground outline-none placeholder:text-faint focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
-              placeholder={t("shell.memory.search")}
-              aria-label={t("shell.memory.search")}
-            />
-            {query && <button type="button" onClick={() => setQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-foreground" aria-label={t("common.clear")}><X className="size-3" /></button>}
-          </label>
+          <div className="relative grid size-9 shrink-0 place-items-center rounded-lg border border-primary/20 bg-primary/10 text-primary"><BrainCircuit className="size-4.5" /><span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-success ring-2 ring-surface" /></div>
+          <div className="min-w-48 flex-1"><DialogTitle id={titleId}>{t("shell.memory.title")}</DialogTitle><p className="mt-0.5 truncate text-[10px] text-muted">{atlas?.workspace ?? t("shell.memory.subtitle")}</p></div>
+          <label className="relative order-last w-full sm:order-none sm:w-64"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" /><input value={query} onChange={(event) => setQuery(event.target.value)} className="h-8 w-full rounded-md border border-border bg-bg pl-8 pr-8 text-[11px] text-foreground outline-none placeholder:text-faint focus:border-primary/60 focus:ring-2 focus:ring-primary/15" placeholder={t("shell.memory.search")} aria-label={t("shell.memory.search")} />{query && <button type="button" onClick={() => setQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-foreground" aria-label={t("common.clear")}><X className="size-3" /></button>}</label>
           <input ref={sessionInputRef} type="file" accept={SESSION_ACCEPT} className="hidden" onChange={(event) => void importSession(event.target.files?.[0])} />
           <input ref={documentInputRef} type="file" accept={DOCUMENT_ACCEPT} multiple className="hidden" onChange={(event) => void importDocuments([...(event.target.files ?? [])])} />
-          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => sessionInputRef.current?.click()}>
-            {busy === "session" ? <LoaderCircle className="size-3.5 animate-spin" /> : <FileJson2 className="size-3.5" />}
-            {t("shell.memory.importSession")}
-          </Button>
-          <Button size="sm" disabled={busy !== null} onClick={() => documentInputRef.current?.click()}>
-            {busy === "documents" ? <LoaderCircle className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
-            {t("shell.memory.addDocuments")}
-          </Button>
-          <button ref={closeRef} type="button" onClick={onClose} className="grid size-7 place-items-center rounded-md text-muted hover:bg-(--ui-row-hover) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/45" aria-label={t("shell.memory.close")}>
-            <X className="size-4" aria-hidden />
-          </button>
+          <input ref={folderInputRef} type="file" accept={DOCUMENT_ACCEPT} multiple className="hidden" onChange={(event) => void importDocuments([...(event.target.files ?? [])])} />
+          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => sessionInputRef.current?.click()}>{busy === "session" ? <LoaderCircle className="size-3.5 animate-spin" /> : <FileJson2 className="size-3.5" />}{t("shell.memory.importSession")}</Button>
+          <Button size="sm" disabled={busy !== null || workspaceMissing} onClick={() => documentInputRef.current?.click()}>{busy === "documents" ? <LoaderCircle className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}{t("shell.memory.addDocuments")}</Button>
+          <Button size="sm" variant="outline" disabled={busy !== null || workspaceMissing} onClick={() => folderInputRef.current?.click()}><FolderUp className="size-3.5" />{t("shell.memory.addFolder")}</Button>
+          <button type="button" onClick={onClose} className="grid size-7 place-items-center rounded-md text-muted hover:bg-(--ui-row-hover) hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/45" aria-label={t("shell.memory.close")}><X className="size-4" /></button>
         </header>
 
-        {(error || notice) && <div role={error ? "alert" : "status"} className={cn(
-          "mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-md border px-3 py-2 text-[10.5px] sm:mx-5",
-          error ? "border-danger/30 bg-danger/8 text-danger" : "border-success/30 bg-success/8 text-secondary",
-        )}>{error ?? notice}<button type="button" className="ml-auto text-faint hover:text-foreground" onClick={() => { setError(null); setNotice(null); }}><X className="size-3" /></button></div>}
+        {(error || notice || workspaceMissing || sourceWarnings.length > 0) && <div role={error ? "alert" : "status"} className={cn("mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-md border px-3 py-2 text-[10.5px] sm:mx-5", error ? "border-danger/30 bg-danger/8 text-danger" : workspaceMissing || sourceWarnings.length ? "border-warning/30 bg-warning/8 text-secondary" : "border-success/30 bg-success/8 text-secondary")}>{error ?? notice ?? (workspaceMissing ? t("shell.memory.workspaceRequired") : t("shell.memory.degradedSources", { count: number(sourceWarnings.length) }))}{!workspaceMissing && <button type="button" className="ml-auto text-faint hover:text-foreground" onClick={() => { setError(null); setNotice(null); }}><X className="size-3" /></button>}</div>}
 
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-soft px-4 py-2 sm:px-5">
-            <FilterChip active={activeGroup === "all"} onClick={() => setActiveGroup("all")} label={t("shell.memory.group.all")} count={graph?.nodes.length ?? 0} />
-            {GROUPS.map((group) => <FilterChip key={group} active={activeGroup === group} onClick={() => setActiveGroup(group)} label={groupLabel(group, t)} count={graph?.nodes.filter((node) => node.group === group).length ?? 0} />)}
-            <span className="ml-auto hidden font-mono text-[9px] text-faint md:inline">{graph ? t("shell.memory.generated", { value: date(Date.parse(graph.generatedAt), { timeStyle: "short" }) }) : ""}</span>
-            <Button size="icon-xs" variant="ghost" onClick={() => void refresh()} disabled={loading} aria-label={t("shell.memory.refresh")} title={t("shell.memory.refresh")}><RefreshCw className={cn("size-3.5", loading && "animate-spin")} /></Button>
+            <FilterChip active={activeGroup === "all"} onClick={() => setActiveGroup("all")} label={t("shell.memory.group.all")} count={atlas?.nodes.length ?? 0} />
+            {GROUPS.map((group) => <FilterChip key={group} active={activeGroup === group} onClick={() => setActiveGroup(group)} label={group === "skill" ? t("shell.memory.group.skill") : group === "evolution" ? t("shell.memory.group.evolution") : groupLabel(group, t)} count={atlas?.nodes.filter((node) => node.kind === group).length ?? 0} />)}
+            <span className="ml-auto hidden font-mono text-[9px] text-faint md:inline">{atlas ? t("shell.memory.generated", { value: date(Date.parse(atlas.generatedAt), { timeStyle: "short" }) }) : ""}</span>
+            <Button size="icon-xs" variant="ghost" onClick={() => void refresh()} disabled={loading} aria-label={t("shell.memory.refresh")}><RefreshCw className={cn("size-3.5", loading && "animate-spin")} /></Button>
           </div>
 
-          <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_18rem]">
-            <div
-              className={cn("relative min-h-[24rem] overflow-hidden bg-bg/40", dragging && "ring-2 ring-inset ring-primary/60")}
-              onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
-              onDragOver={(event) => event.preventDefault()}
-              onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }}
-              onDrop={onDrop}
-            >
-              <div className="pointer-events-none absolute inset-0 opacity-35" style={{ backgroundImage: "radial-gradient(circle at 1px 1px, var(--color-border) 1px, transparent 0)", backgroundSize: "22px 22px" }} />
-              {loading && !graph ? <div className="absolute inset-0 z-10 grid place-items-center"><LoaderCircle className="size-5 animate-spin text-muted" /></div> : (
-                <svg className="relative size-full min-h-[24rem]" viewBox={`0 0 ${layout.width} ${layout.height}`} role="img" aria-label={t("shell.memory.graphLabel")}>
-                  <g transform={`translate(${layout.width * (1 - zoom) / 2} ${layout.height * (1 - zoom) / 2}) scale(${zoom})`}>
-                    {layout.edges.map((edge, index) => {
-                      const source = positions.get(edge.source);
-                      const target = positions.get(edge.target);
-                      if (!source || !target) return null;
-                      return <line key={`${edge.source}-${edge.target}-${index}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} stroke={edge.type === "references" ? "var(--color-primary)" : "var(--color-border)"} strokeOpacity={edge.type === "references" ? 0.38 : 0.28} strokeWidth={edge.type === "references" ? 1.2 : 0.8} />;
-                    })}
-                    {layout.nodes.map((node) => <GraphNode key={node.id} node={node} selected={node.id === selectedId} matched={Boolean(normalizedQuery && node.id !== "project:root")} onSelect={() => setSelectedId(node.id)} />)}
-                  </g>
-                </svg>
-              )}
+          <div
+            className="memory-atlas-grid min-h-0 flex-1"
+            style={{ "--memory-atlas-left": `${paneWidths.left}px`, "--memory-atlas-right": `${paneWidths.right}px` } as CSSProperties}
+          >
+            <aside className="memory-atlas-tree min-h-0 border-r border-border bg-surface"><MemoryAtlasTree nodes={atlas?.tree ?? []} expanded={expanded} selectedNodeId={selectedId} onExpandedChange={setExpanded} onSelectNode={setSelectedId} /></aside>
+            <div className="memory-atlas-resizer" role="separator" aria-orientation="vertical" aria-label={t("shell.memory.resizeTree")} onPointerDown={(event) => beginPaneResize("left", event)} />
+            <div className={cn("relative min-h-[24rem] overflow-hidden", dragging && "ring-2 ring-inset ring-primary/60")} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={onDrop}>
+              {loading && !atlas ? <div className="absolute inset-0 z-10 grid place-items-center"><LoaderCircle className="size-5 animate-spin text-muted" /></div> : <MemoryAtlasCanvas nodes={visibleNodes} edges={visibleEdges} selectedId={selectedId} matchedIds={matchedIds} viewport={viewport} pinned={pinned} onSelect={setSelectedId} onViewportChange={setViewport} onPinnedChange={setPinned} />}
               {dragging && <div className="pointer-events-none absolute inset-4 z-20 grid place-items-center rounded-xl border border-dashed border-primary/70 bg-bg/90"><div className="text-center"><Upload className="mx-auto size-6 text-primary" /><p className="mt-2 text-[12px] font-medium text-foreground">{t("shell.memory.dropDocuments")}</p><p className="mt-1 text-[10px] text-muted">{t("shell.memory.documentFormats")}</p></div></div>}
-              <div className="absolute bottom-3 left-3 flex items-center gap-1 rounded-lg border border-border bg-surface/90 p-1 shadow-sm backdrop-blur">
-                <Button size="icon-xs" variant="ghost" onClick={() => setZoom((value) => Math.max(0.7, value - 0.15))} aria-label={t("shell.memory.zoomOut")}><Minus className="size-3.5" /></Button>
-                <span className="w-10 text-center font-mono text-[9px] text-muted">{Math.round(zoom * 100)}%</span>
-                <Button size="icon-xs" variant="ghost" onClick={() => setZoom((value) => Math.min(1.8, value + 0.15))} aria-label={t("shell.memory.zoomIn")}><Plus className="size-3.5" /></Button>
-                <Button size="icon-xs" variant="ghost" onClick={() => setZoom(1)} aria-label={t("shell.memory.fit")}><Focus className="size-3.5" /></Button>
-              </div>
-              {!loading && visibleNodes.length <= 1 && <div className="pointer-events-none absolute inset-0 grid place-items-center"><div className="max-w-sm text-center"><BrainCircuit className="mx-auto size-6 text-muted" /><p className="mt-2 text-[12px] font-medium text-secondary">{t("shell.memory.empty")}</p><p className="mt-1 text-[10px] leading-4 text-muted">{t("shell.memory.emptyHint")}</p></div></div>}
+              {!loading && visibleNodes.length <= 1 && <div className="pointer-events-none absolute inset-0 grid place-items-center"><div className="max-w-sm text-center"><BrainCircuit className="mx-auto size-6 text-muted" /><p className="mt-2 text-[12px] font-medium text-secondary">{t(workspaceMissing ? "shell.memory.workspaceRequiredTitle" : "shell.memory.empty")}</p><p className="mt-1 text-[10px] leading-4 text-muted">{t(workspaceMissing ? "shell.memory.workspaceRequiredHint" : "shell.memory.emptyHint")}</p></div></div>}
             </div>
-
-            <aside className="min-h-0 overflow-y-auto border-t border-border bg-surface lg:border-l lg:border-t-0">
-              <Inspector selected={selected} graph={graph} t={t} formatNumber={number} />
-            </aside>
+            <div className="memory-atlas-resizer" role="separator" aria-orientation="vertical" aria-label={t("shell.memory.resizeInspector")} onPointerDown={(event) => beginPaneResize("right", event)} />
+            <aside className="memory-atlas-inspector min-h-0 overflow-y-auto border-t border-border bg-surface"><MemoryAtlasInspector selected={selected} atlas={atlas} /></aside>
           </div>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function GraphNode({ node, selected, matched, onSelect }: { node: ReturnType<typeof layoutMemoryGraph>["nodes"][number]; selected: boolean; matched: boolean; onSelect: () => void }) {
-  const fill = groupColor(node.group);
-  return <g role="button" tabIndex={0} aria-label={node.title} onClick={onSelect} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(); }} className="cursor-pointer outline-none">
-    {(selected || matched) && <circle cx={node.x} cy={node.y} r={node.radius + (selected ? 7 : 4)} fill="none" stroke={selected ? "var(--color-foreground)" : "var(--color-primary)"} strokeOpacity={selected ? 0.8 : 0.45} strokeWidth={selected ? 1.6 : 1} />}
-    <circle cx={node.x} cy={node.y} r={node.radius} fill={fill} fillOpacity={selected ? 1 : 0.82} stroke="var(--color-bg)" strokeWidth={1.5} />
-    {(node.group === "project" || selected) && <text x={node.x + node.radius + 6} y={node.y + 3} fill="var(--color-secondary)" fontSize={9} fontFamily="ui-monospace, monospace">{node.title.slice(0, 28)}</text>}
-    <title>{node.path ?? node.title}</title>
-  </g>;
-}
-
 function FilterChip({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {
-  return <button type="button" onClick={onClick} aria-pressed={active} className={cn("flex h-6 items-center gap-1.5 rounded-md border px-2 text-[9.5px] transition-colors", active ? "border-primary/35 bg-primary/10 text-foreground" : "border-border-soft text-muted hover:bg-(--ui-row-hover) hover:text-secondary")}>
-    {label}<span className="font-mono text-[8px] opacity-65">{count}</span>
-  </button>;
+  return <button type="button" onClick={onClick} aria-pressed={active} className={cn("flex h-6 items-center gap-1.5 rounded-md border px-2 text-[9.5px] transition-colors", active ? "border-primary/35 bg-primary/10 text-foreground" : "border-border-soft text-muted hover:bg-(--ui-row-hover) hover:text-secondary")}>{label}<span className="font-mono text-[8px] opacity-65">{count}</span></button>;
 }
 
-type I18nApi = ReturnType<typeof useI18n>;
+type GroupLabelTranslator = ReturnType<typeof useI18n>["t"];
 
-interface InspectorProps {
-  selected: MemoryGraphNode | null;
-  graph: WorkspaceMemoryGraph | null;
-  t: I18nApi["t"];
-  formatNumber: I18nApi["number"];
-}
-
-function Inspector({ selected, graph, t, formatNumber }: InspectorProps) {
-  if (selected) return <div className="p-4">
-    <div className="flex items-start gap-3">
-      <span className="mt-0.5 size-2.5 shrink-0 rounded-full" style={{ background: groupColor(selected.group) }} />
-      <div className="min-w-0"><div className="text-[9px] font-medium uppercase tracking-[0.13em] text-muted">{groupLabel(selected.group, t)}</div><h3 className="mt-1 break-words text-[13px] font-semibold text-foreground">{selected.title}</h3></div>
-    </div>
-    {selected.path && <div className="mt-4 break-all rounded-md border border-border-soft bg-bg/50 px-2.5 py-2 font-mono text-[9px] leading-4 text-secondary">{selected.path}</div>}
-    {selected.subtitle && <p className="mt-3 text-[10px] leading-4 text-muted">{selected.subtitle}</p>}
-    {selected.preview && <div className="mt-4 border-t border-border-soft pt-4"><h4 className="text-[9px] font-medium uppercase tracking-[0.12em] text-muted">{t("shell.memory.preview")}</h4><p className="mt-2 whitespace-pre-wrap text-[10.5px] leading-5 text-secondary">{selected.preview}</p></div>}
-  </div>;
-  return <div className="p-4">
-    <div className="flex items-center gap-2"><BrainCircuit className="size-4 text-primary" /><h3 className="text-[12px] font-semibold text-foreground">{t("shell.memory.overview")}</h3></div>
-    <p className="mt-2 text-[10px] leading-4 text-muted">{t("shell.memory.overviewHint")}</p>
-    <div className="mt-5 grid grid-cols-2 gap-2">
-      <Stat label={t("shell.memory.stat.code")} value={graph?.stats.code ?? 0} formatNumber={formatNumber} />
-      <Stat label={t("shell.memory.stat.documents")} value={graph?.stats.documents ?? 0} formatNumber={formatNumber} />
-      <Stat label={t("shell.memory.stat.decisions")} value={graph?.stats.decisions ?? 0} formatNumber={formatNumber} />
-      <Stat label={t("shell.memory.stat.sessions")} value={graph?.stats.sessions ?? 0} formatNumber={formatNumber} />
-    </div>
-    <div className="mt-5 border-t border-border-soft pt-4"><h4 className="text-[9px] font-medium uppercase tracking-[0.12em] text-muted">{t("shell.memory.howItWorks")}</h4><ol className="mt-3 space-y-3 text-[10px] leading-4 text-secondary"><li className="flex gap-2"><FileJson2 className="mt-0.5 size-3.5 shrink-0 text-primary" />{t("shell.memory.howSessions")}</li><li className="flex gap-2"><FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />{t("shell.memory.howDocuments")}</li><li className="flex gap-2"><BrainCircuit className="mt-0.5 size-3.5 shrink-0 text-primary" />{t("shell.memory.howRecall")}</li></ol></div>
-  </div>;
-}
-
-function Stat({ label, value, formatNumber }: { label: string; value: number; formatNumber: I18nApi["number"] }) {
-  return <div className="rounded-lg border border-border-soft bg-bg/35 p-2.5"><div className="font-mono text-[15px] font-semibold text-foreground">{formatNumber(value)}</div><div className="mt-0.5 text-[8.5px] uppercase tracking-wide text-muted">{label}</div></div>;
-}
-
-function groupColor(group: MemoryGraphGroup): string {
-  if (group === "project") return "var(--color-foreground)";
-  if (group === "code") return "var(--color-muted)";
-  if (group === "document") return "var(--color-primary)";
-  if (group === "decision") return "var(--color-success)";
-  if (group === "plan") return "var(--color-warning)";
-  if (group === "handoff") return "var(--color-danger)";
-  if (group === "session") return "var(--color-secondary)";
-  return "var(--color-faint)";
-}
-
-function groupLabel(group: MemoryGraphGroup, t: ReturnType<typeof useI18n>["t"]): string {
+function groupLabel(group: Exclude<MemoryAtlasNodeKind, "skill" | "evolution">, t: GroupLabelTranslator): string {
   if (group === "project") return t("shell.memory.group.project");
   if (group === "code") return t("shell.memory.group.code");
   if (group === "document") return t("shell.memory.group.document");

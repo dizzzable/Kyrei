@@ -56,15 +56,71 @@ describe("TeamRunStore", () => {
     const dataDir = await root();
     const store = new TeamRunStore({ dataDir });
     await store.append("unfinished", { type: "team.start", payload: { profileId: "team" } });
+    await store.append("unfinished", { type: "subagent.start", payload: { task_id: "task-a" } });
+    await store.append("unfinished", { type: "subagent.complete", payload: { task_id: "task-a" } });
+    await store.append("unfinished", { type: "subagent.start", payload: { task_id: "task-b" } });
     await writeFile(store.pathFor("unfinished"), `${await readFile(store.pathFor("unfinished"), "utf8")}{broken`, "utf8");
 
     const recovered = await store.recoverInterrupted();
     expect(recovered).toEqual(["unfinished"]);
-    expect((await store.read("unfinished")).at(-1)).toMatchObject({
+    const ledger = await store.read("unfinished");
+    expect(ledger.at(-2)).toMatchObject({
+      type: "team.checkpoint",
+      payload: {
+        checkpoint_manifest: {
+          version: 1,
+          runId: "unfinished",
+          state: "recovering",
+          recoverable: true,
+          reason: "gateway_restart",
+          startedTaskIds: ["task-a", "task-b"],
+          completedTaskIds: ["task-a"],
+          failedTaskIds: [],
+        },
+      },
+    });
+    expect(ledger.at(-1)).toMatchObject({
       type: "team.interrupted",
-      payload: { reason: "gateway_restart" },
+      payload: {
+        reason: "gateway_restart",
+        next_status: "recovering",
+        checkpoint_manifest: expect.objectContaining({
+          version: 1,
+          state: "recovering",
+          startedTaskIds: ["task-a", "task-b"],
+          completedTaskIds: ["task-a"],
+        }),
+      },
     });
 
     expect(await store.recoverInterrupted()).toEqual([]);
+  });
+
+  it("can append and read a standalone checkpoint manifest", async () => {
+    const store = new TeamRunStore({ dataDir: await root() });
+    await store.appendCheckpoint("checkpointed", {
+      state: "partial",
+      recoverable: true,
+      reason: "provider_timeout",
+      startedTaskIds: ["facts"],
+      completedTaskIds: [],
+      failedTaskIds: ["facts"],
+    });
+
+    expect(await store.latest("checkpointed")).toMatchObject({
+      type: "team.checkpoint",
+      payload: {
+        checkpoint_manifest: {
+          version: 1,
+          runId: "checkpointed",
+          state: "partial",
+          recoverable: true,
+          reason: "provider_timeout",
+          startedTaskIds: ["facts"],
+          completedTaskIds: [],
+          failedTaskIds: ["facts"],
+        },
+      },
+    });
   });
 });

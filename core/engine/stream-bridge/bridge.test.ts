@@ -54,6 +54,40 @@ async function* parts(list: unknown[]): AsyncIterable<unknown> {
 }
 
 describe("stream-bridge (synthetic parts)", () => {
+  it("preserves reasoning segment lifecycle with stable ids", async () => {
+    const events: KyreiEvent[] = [];
+    const result = await bridgeStream(
+      parts([
+        { type: "reasoning-start", id: "r1" },
+        { type: "reasoning-delta", id: "r1", text: "checking evidence" },
+        { type: "reasoning-end", id: "r1" },
+        { type: "text-delta", text: "done" },
+        { type: "finish", finishReason: "stop" },
+      ]),
+      (event) => events.push(event),
+      ctx(),
+    );
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "reasoning.start",
+      payload: expect.objectContaining({ id: "r1", source: "provider" }),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "reasoning.delta",
+      payload: expect.objectContaining({ id: "r1", text: "checking evidence" }),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "reasoning.complete",
+      payload: expect.objectContaining({ id: "r1", state: "complete" }),
+    }));
+    expect(result.parts).toContainEqual(expect.objectContaining({
+      type: "reasoning",
+      id: "r1",
+      text: "checking evidence",
+      state: "complete",
+    }));
+  });
+
   it("emits and persists a user approval request as an awaiting-approval turn", async () => {
     const events: KyreiEvent[] = [];
     const result = await bridgeStream(

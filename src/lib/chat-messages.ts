@@ -1,4 +1,4 @@
-import type { ApprovalPart, MessagePart, ToolPart } from "@/lib/types";
+import type { ApprovalPart, MessagePart, ReasoningPart, ToolPart } from "@/lib/types";
 
 const LEGACY_HEAL_HANDOFF_MARKER = "KYREI_FAILURE_HANDOFF";
 
@@ -21,36 +21,112 @@ export function redactLegacyHealHandoff(text: string): string {
  * Immutable — always return a new array (adapted from Hermes' chat-messages).
  */
 
-/**
- * Coalesce a streaming delta into the most recent same-type part within the
- * current segment. A segment is bounded by any non-streaming part (a tool
- * call); the opposite streaming channel (text <-> reasoning) is transparent,
- * so a reasoning burst between two content deltas can't shred one sentence
- * into text / reasoning / text. Tool calls open a fresh segment, preserving
- * narration order across steps.
- */
-function appendStream(parts: MessagePart[], type: "text" | "reasoning", delta: string): MessagePart[] {
+function appendTextPart(parts: MessagePart[], delta: string): MessagePart[] {
+  if (!delta) return parts;
   const next = [...parts];
-  for (let i = next.length - 1; i >= 0; i--) {
-    const part = next[i];
-    if (part.type === type) {
-      next[i] = { ...part, text: part.text + delta };
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    const part = next[index];
+    if (part.type === "text") {
+      next[index] = { ...part, text: part.text + delta };
       return next;
     }
-    // A tool part closes the segment; keep scanning across the transparent
-    // streaming channel only.
-    if (part.type !== "text" && part.type !== "reasoning") break;
+    if (part.type !== "reasoning" || part.id) break;
   }
-  next.push(type === "text" ? { type: "text", text: delta } : { type: "reasoning", text: delta });
-  return next;
+  return [...parts, { type: "text", text: delta }];
+}
+
+function nextReasoningState(
+  current: ReasoningPart | undefined,
+  update: Partial<ReasoningPart> & Pick<ReasoningPart, "id">,
+): ReasoningPart {
+  return {
+    type: "reasoning",
+    text: current?.text ?? "",
+    source: current?.source ?? "provider",
+    state: current?.state ?? "streaming",
+    ...current,
+    ...update,
+  };
+}
+
+function reasoningIndex(parts: MessagePart[], id: string | undefined): number {
+  if (!id) return -1;
+  return parts.findIndex((part) => part.type === "reasoning" && part.id === id);
 }
 
 export function appendText(parts: MessagePart[], delta: string): MessagePart[] {
-  return appendStream(parts, "text", delta);
+  return appendTextPart(parts, delta);
 }
 
-export function appendReasoning(parts: MessagePart[], delta: string): MessagePart[] {
-  return appendStream(parts, "reasoning", delta);
+export function startReasoning(
+  parts: MessagePart[],
+  info: Pick<ReasoningPart, "id"> & Partial<ReasoningPart>,
+): MessagePart[] {
+  const idx = reasoningIndex(parts, info.id);
+  if (idx < 0) return parts;
+  const next = [...parts];
+  next[idx] = nextReasoningState(next[idx] as ReasoningPart, {
+    ...info,
+    state: "streaming",
+  });
+  return next;
+}
+
+export function appendReasoning(
+  parts: MessagePart[],
+  delta: string,
+  info: Partial<ReasoningPart> & { id?: string; sequence?: number } = {},
+): MessagePart[] {
+  if (!delta) return parts;
+  const idx = reasoningIndex(parts, info.id);
+  if (idx >= 0) {
+    const current = parts[idx] as ReasoningPart;
+    if (typeof info.sequence === "number" && typeof current.sequence === "number" && info.sequence <= current.sequence) {
+      return parts;
+    }
+    const last = parts.at(-1);
+    if (last?.type !== "reasoning" || last.id !== current.id) return parts;
+    const next = [...parts];
+    next[idx] = nextReasoningState(current, {
+      ...info,
+      id: current.id,
+      text: current.text + delta,
+      state: "streaming",
+    });
+    return next;
+  }
+  const last = parts.at(-1);
+  if (last?.type === "reasoning" && !last.id && !info.id) {
+    return [...parts.slice(0, -1), { ...last, text: last.text + delta, state: "streaming" }];
+  }
+  return [
+    ...parts,
+    nextReasoningState(undefined, {
+      ...info,
+      id: info.id,
+      text: delta,
+      state: "streaming",
+    }),
+  ];
+}
+
+export function completeReasoning(
+  parts: MessagePart[],
+  info: Pick<ReasoningPart, "id"> & Partial<ReasoningPart>,
+): MessagePart[] {
+  const idx = reasoningIndex(parts, info.id);
+  if (idx < 0) return parts;
+  const current = parts[idx] as ReasoningPart;
+  if (typeof info.sequence === "number" && typeof current.sequence === "number" && info.sequence <= current.sequence) {
+    return parts;
+  }
+  const next = [...parts];
+  next[idx] = nextReasoningState(current, {
+    ...info,
+    state: info.state ?? "complete",
+  });
+  if (!next[idx].text.trim()) return next.filter((_, partIndex) => partIndex !== idx);
+  return next;
 }
 
 export function approvalRequest(

@@ -17,6 +17,8 @@ export interface ProviderDraft {
   name: string;
   protocol: ProviderProtocol;
   baseURL: string;
+  /** Exact-origin opt-in for a public HTTP endpoint; never a global TLS bypass. */
+  allowInsecureHttp: boolean;
   /** Never persisted; scopes the reserved-network exception to one discovery request. */
   allowBenchmarkNetwork: boolean;
   requiresApiKey: boolean;
@@ -87,6 +89,7 @@ export function updateProviderDraftEndpoint(
     ...draft,
     ...patch,
     allowBenchmarkNetwork: false,
+    ...(endpointChanged ? { allowInsecureHttp: false } : {}),
     ...(endpointChanged
       ? {
           hasStoredCredentials: false,
@@ -133,6 +136,7 @@ export function createDraftFromProfile(profile: ProviderProfile, useAsDefault: b
     name: profile.name,
     protocol: profile.protocol,
     baseURL: profile.baseURL,
+    allowInsecureHttp: profile.allowInsecureHttp === true,
     allowBenchmarkNetwork: false,
     requiresApiKey: profile.requiresApiKey,
     hasStoredCredentials: Boolean(profile.hasStoredCredentials || profile.hasKey),
@@ -162,6 +166,7 @@ export function createDraftFromTemplate(template: ProviderTemplate, useAsDefault
     name: custom ? "" : template.name,
     protocol: template.protocol ?? "openai-chat",
     baseURL: template.baseURL ?? "",
+    allowInsecureHttp: false,
     allowBenchmarkNetwork: false,
     requiresApiKey: template.requiresApiKey !== false,
     hasStoredCredentials: false,
@@ -263,6 +268,7 @@ export function draftDiscoveryInput(draft: ProviderDraft): ProviderDiscoveryInpu
     protocol: draft.protocol,
     baseURL: draft.baseURL.trim(),
     requiresApiKey: draft.requiresApiKey,
+    ...(draft.allowInsecureHttp ? { allowInsecureHttp: true } : {}),
     ...(draft.allowBenchmarkNetwork ? { allowBenchmarkNetwork: true } : {}),
     models: providerDraftModels(draft),
   };
@@ -275,6 +281,7 @@ export function draftProviderInput(draft: ProviderDraft): Partial<ProviderProfil
     protocol: draft.protocol,
     baseURL: draft.baseURL.trim(),
     requiresApiKey: draft.requiresApiKey,
+    allowInsecureHttp: draft.allowInsecureHttp,
     enabled: true,
     models: providerDraftModels(draft),
   };

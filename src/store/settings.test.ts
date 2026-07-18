@@ -34,6 +34,7 @@ describe("settings store", () => {
 
     expect(getUiSettings()).toMatchObject({
       density: "compact",
+      chatBackground: "follow-theme",
       toolView: "compact",
       showReasoning: true,
       notify: true,
@@ -44,10 +45,12 @@ describe("settings store", () => {
     const { getUiSettings, setUiSetting } = await import("@/store/settings");
 
     setUiSetting("showReasoning", false);
+    setUiSetting("chatBackground", "peonies");
     setUiSetting("voiceLang", "ru-RU");
 
     expect(getUiSettings().showReasoning).toBe(false);
     expect(JSON.parse(localStorage.getItem("kyrei.ui-settings.v1") ?? "{}")).toMatchObject({
+      chatBackground: "peonies",
       showReasoning: false,
       voiceLang: "ru-RU",
     });

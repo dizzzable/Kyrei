@@ -179,29 +179,77 @@ describe("buildTeamDelegateTool", () => {
     });
   });
 
-  it("emits interrupted rather than complete when a role ignores cancellation", async () => {
-    const researcher = role("researcher");
-    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-    const tools = buildTeamDelegateTool({
-      spec: spec([researcher], { timeoutMs: 5 }),
-      emit: (event) => events.push(event as never),
-      executors: [{
-        role: researcher,
-        run: async (context) => {
-          await new Promise((resolve) => setTimeout(resolve, 15));
-          return artifact(context.task.id);
-        },
-      }],
-    });
-    const team = tools.team_delegate as unknown as {
-      execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
-    };
+  it("fails only the timed-out role instead of aborting the whole run", async () => {
+    vi.useFakeTimers();
+    try {
+      const researcher = role("researcher");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const tools = buildTeamDelegateTool({
+        spec: spec([researcher], { timeoutMs: 1_000 }),
+        emit: (event) => events.push(event as never),
+        executors: [{
+          role: researcher,
+          run: async (context) => {
+            await new Promise((resolve) => setTimeout(resolve, 1_500));
+            return artifact(context.task.id);
+          },
+        }],
+      });
+      const team = tools.team_delegate as unknown as {
+        execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+      };
 
-    const output = JSON.parse(await team.execute({ tasks: [{ id: "slow", goal: "Slow" }] }, { toolCallId: "slow" }));
-    expect(output.tasks[0]).toMatchObject({ id: "slow", status: "aborted" });
-    expect(events.some((event) => event.type === "subagent.complete")).toBe(false);
-    expect(events.find((event) => event.type === "subagent.failed")?.payload.status).toBe("interrupted");
-    expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "interrupted" } });
+      const pending = team.execute({ tasks: [{ id: "slow", goal: "Slow" }] }, { toolCallId: "slow" });
+      await vi.advanceTimersByTimeAsync(1_600);
+      const output = JSON.parse(await pending);
+      expect(output.tasks[0]).toMatchObject({ id: "slow", status: "failed", error: "Team task timed out after 1000ms" });
+      expect(events.some((event) => event.type === "subagent.complete")).toBe(false);
+      expect(events.find((event) => event.type === "subagent.failed")?.payload.status).toBe("failed");
+      expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "failed" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets an independent task finish after another task times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const researcher = role("researcher");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const tools = buildTeamDelegateTool({
+        spec: spec([researcher], { timeoutMs: 1_000, maxParallel: 1 }),
+        emit: (event) => events.push(event as never),
+        executors: [{
+          role: researcher,
+          run: async (context) => {
+            if (context.task.id === "slow") {
+              await new Promise((resolve) => setTimeout(resolve, 1_500));
+              return artifact(context.task.id);
+            }
+            return artifact(context.task.id);
+          },
+        }],
+      });
+      const team = tools.team_delegate as unknown as {
+        execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+      };
+
+      const pending = team.execute({ tasks: [
+        { id: "slow", goal: "Slow" },
+        { id: "fast", goal: "Fast" },
+      ] }, { toolCallId: "mixed" });
+      await vi.advanceTimersByTimeAsync(1_600);
+      const output = JSON.parse(await pending);
+
+      expect(output.tasks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "slow", status: "failed" }),
+        expect.objectContaining({ id: "fast", status: "succeeded" }),
+      ]));
+      expect(events.filter((event) => event.type === "subagent.complete").map((event) => event.payload.task_id)).toContain("fast");
+      expect(events.at(-1)).toMatchObject({ type: "team.complete", payload: { status: "failed", completed_tasks: 1, failed_tasks: 1 } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shares the parallel limit across simultaneous team tool calls", async () => {
