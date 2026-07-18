@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
