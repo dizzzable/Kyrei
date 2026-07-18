@@ -2374,6 +2374,101 @@ export async function startGateway({
   let sessionMirrorStores = null;
   let sessionMirrorInitPromise = null;
   let sessionMirrorUnavailableUntil = 0;
+  let sessionMirrorWriteTail = Promise.resolve();
+  let sessionMirrorSyncPromise = null;
+  let sessionMirrorSyncStartPromise = null;
+  let sessionMirrorSyncWriteTail = Promise.resolve();
+  let gatewayClosing = false;
+  const sessionMirrorSyncStatePath = join(dataDir, "session-mirror-sync.json");
+  const emptySessionMirrorSyncState = () => ({
+    version: 1,
+    state: "idle",
+    entries: [],
+    nextIndex: 0,
+    startedAt: null,
+    updatedAt: null,
+    completedAt: null,
+    error: null,
+  });
+  const normalizeSessionMirrorSyncState = (value) => {
+    const source = isPlainRecord(value) ? value : {};
+    const entries = Array.isArray(source.entries)
+      ? source.entries
+        .filter((entry) => isPlainRecord(entry) && typeof entry.id === "string" && entry.id.trim())
+        .map((entry) => ({
+          id: entry.id.trim().slice(0, 128),
+          messages: Math.max(0, Math.min(1_000_000, Number(entry.messages) || 0)),
+        }))
+      : [];
+    const state = ["idle", "running", "completed", "failed"].includes(source.state)
+      ? source.state
+      : "idle";
+    const nextIndex = Math.min(
+      entries.length,
+      Math.max(0, Math.floor(Number(source.nextIndex) || 0)),
+    );
+    return {
+      version: 1,
+      state,
+      entries,
+      nextIndex,
+      startedAt: typeof source.startedAt === "string" ? source.startedAt : null,
+      updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : null,
+      completedAt: typeof source.completedAt === "string" ? source.completedAt : null,
+      error: typeof source.error === "string" ? source.error.slice(0, 500) : null,
+    };
+  };
+  let sessionMirrorSyncState = emptySessionMirrorSyncState();
+  const sessionMirrorSyncStateReady = (async () => {
+    try {
+      const raw = await readFile(sessionMirrorSyncStatePath, "utf8");
+      sessionMirrorSyncState = normalizeSessionMirrorSyncState(JSON.parse(raw));
+    } catch {
+      sessionMirrorSyncState = emptySessionMirrorSyncState();
+    }
+  })();
+  const sessionMirrorSyncProgress = () => {
+    const entries = sessionMirrorSyncState.entries;
+    const completedSessions = Math.min(sessionMirrorSyncState.nextIndex, entries.length);
+    const completedMessages = entries
+      .slice(0, completedSessions)
+      .reduce((total, entry) => total + entry.messages, 0);
+    return {
+      state: sessionMirrorSyncState.state,
+      totalSessions: entries.length,
+      completedSessions,
+      totalMessages: entries.reduce((total, entry) => total + entry.messages, 0),
+      completedMessages,
+      ...(sessionMirrorSyncState.startedAt ? { startedAt: sessionMirrorSyncState.startedAt } : {}),
+      ...(sessionMirrorSyncState.updatedAt ? { updatedAt: sessionMirrorSyncState.updatedAt } : {}),
+      ...(sessionMirrorSyncState.completedAt ? { completedAt: sessionMirrorSyncState.completedAt } : {}),
+      ...(sessionMirrorSyncState.error ? { error: sessionMirrorSyncState.error } : {}),
+      resumable: sessionMirrorSyncState.state === "running" || (
+        sessionMirrorSyncState.state === "failed" && completedSessions < entries.length
+      ),
+    };
+  };
+  const persistSessionMirrorSyncState = () => {
+    const snapshot = JSON.stringify(sessionMirrorSyncState, null, 2);
+    const write = async () => {
+      await mkdir(dirname(sessionMirrorSyncStatePath), { recursive: true });
+      const temp = `${sessionMirrorSyncStatePath}.${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
+      try {
+        await writeFile(temp, snapshot, "utf8");
+        await rename(temp, sessionMirrorSyncStatePath);
+      } finally {
+        await rm(temp, { force: true }).catch(() => undefined);
+      }
+    };
+    const operation = sessionMirrorSyncWriteTail.then(write, write);
+    sessionMirrorSyncWriteTail = operation.catch(() => undefined);
+    return operation;
+  };
+  const withSessionMirrorWriteLock = (operation) => {
+    const queued = sessionMirrorWriteTail.then(operation, operation);
+    sessionMirrorWriteTail = queued.catch(() => undefined);
+    return queued;
+  };
   const sessionMirrorConfig = () => {
     const engine = isPlainRecord(config.engine) ? config.engine : {};
     const memory = isPlainRecord(engine.memory) ? engine.memory : {};
@@ -2417,77 +2512,204 @@ export async function startGateway({
     })();
     return sessionMirrorInitPromise;
   };
+  const mirrorSessionDescriptor = (session) => ({
+    id: session.id,
+    title: session.title,
+    workspace: typeof config.workspace === "string" ? config.workspace : undefined,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    status: session.status,
+    providerId: session.providerId,
+    modelId: session.modelId,
+    providerAccountId: session.providerAccountId,
+    archived: session.archived === true,
+    ...(session.archived === true && typeof session.archivedAt === "string"
+      ? { archivedAt: session.archivedAt }
+      : {}),
+    ...(typeof session.parentSessionId === "string" && session.parentSessionId
+      ? { parentSessionId: session.parentSessionId }
+      : {}),
+    ...(typeof session.rootSessionId === "string" && session.rootSessionId
+      ? { rootSessionId: session.rootSessionId }
+      : {}),
+    ...(typeof session.forkedFromMessageId === "string" && session.forkedFromMessageId
+      ? { forkedFromMessageId: session.forkedFromMessageId }
+      : {}),
+    ...(typeof session.forkedAt === "string" && session.forkedAt
+      ? { forkedAt: session.forkedAt }
+      : {}),
+    ...(session.lineageKind === "branch" ? { lineageKind: "branch" } : {}),
+  });
+  const mirrorSessionMessages = (sessionId) => store.getMessages(sessionId).map((message) => ({
+    id: message.id,
+    role: message.role,
+    text:
+      typeof message.text === "string" && message.text.trim()
+        ? message.text
+        : typeof message.content === "string" && message.content.trim()
+          ? message.content
+          : Array.isArray(message.parts)
+            ? textFromTurnParts(message.parts)
+            : "",
+    at: message.at,
+    parts: message.parts,
+    pending: message.pending === true,
+    turnStatus: message.turnStatus,
+    approvalModelParams: message.approvalModelParams,
+  }));
   /**
    * Dual-write one session JSON → engine mirror.
    * @returns {{ ok: boolean, error?: string, skipped?: boolean }}
    */
   const mirrorGatewaySession = async (sessionId) => {
-    try {
-      const mirror = await ensureSessionMirror();
-      if (!mirror) {
+    return withSessionMirrorWriteLock(async () => {
+      try {
+        const mirror = await ensureSessionMirror();
+        if (!mirror) {
         // infrastructure: SQLite/engine never opened — cannot dual-write (not a write failure).
-        return sessionMirrorEnabled()
-          ? { ok: false, error: "mirror_unavailable", infrastructure: true }
-          : { ok: true, skipped: true };
+          return sessionMirrorEnabled()
+            ? { ok: false, error: "mirror_unavailable", infrastructure: true }
+            : { ok: true, skipped: true };
+        }
+        const session = store.getSession(sessionId);
+        if (!session) return { ok: false, error: "session_not_found" };
+        await mirror.syncSession(mirrorSessionDescriptor(session), mirrorSessionMessages(sessionId));
+        return { ok: true };
+      } catch (error) {
+        const message = error?.message ?? "mirror_write_failed";
+        console.warn("[kyrei session-mirror] write failed:", message);
+        return { ok: false, error: message };
       }
-      const session = store.getSession(sessionId);
-      if (!session) return { ok: false, error: "session_not_found" };
-      const messages = store.getMessages(sessionId);
-      await mirror.syncSession(
-        {
-          id: sessionId,
-          title: session.title,
-          workspace: typeof config.workspace === "string" ? config.workspace : undefined,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-          status: session.status,
-          providerId: session.providerId,
-          modelId: session.modelId,
-          providerAccountId: session.providerAccountId,
-          archived: session.archived === true,
-          ...(session.archived === true && typeof session.archivedAt === "string"
-            ? { archivedAt: session.archivedAt }
-            : {}),
-          ...(typeof session.parentSessionId === "string" && session.parentSessionId
-            ? { parentSessionId: session.parentSessionId }
-            : {}),
-          ...(typeof session.rootSessionId === "string" && session.rootSessionId
-            ? { rootSessionId: session.rootSessionId }
-            : {}),
-          ...(typeof session.forkedFromMessageId === "string" && session.forkedFromMessageId
-            ? { forkedFromMessageId: session.forkedFromMessageId }
-            : {}),
-          ...(typeof session.forkedAt === "string" && session.forkedAt
-            ? { forkedAt: session.forkedAt }
-            : {}),
-          ...(session.lineageKind === "branch" ? { lineageKind: "branch" } : {}),
-        },
-        messages.map((message) => ({
-          id: message.id,
-          role: message.role,
-          text:
-            typeof message.text === "string" && message.text.trim()
-              ? message.text
-              : typeof message.content === "string" && message.content.trim()
-                ? message.content
-                : Array.isArray(message.parts)
-                  ? textFromTurnParts(message.parts)
-                  : "",
-          at: message.at,
-          parts: message.parts,
-          pending: message.pending === true,
-          turnStatus: message.turnStatus,
-          approvalModelParams: message.approvalModelParams,
-        })),
-      );
-      return { ok: true };
+    });
+  };
+  const removeGatewaySessionFromMirror = async (sessionId) => withSessionMirrorWriteLock(async () => {
+    const mirror = await ensureSessionMirror();
+    if (!mirror || typeof mirror.removeSession !== "function") return false;
+    await mirror.removeSession(sessionId);
+    return true;
+  });
+  const runSessionMirrorSync = async () => {
+    try {
+      for (let index = sessionMirrorSyncState.nextIndex; index < sessionMirrorSyncState.entries.length; index += 1) {
+        // Do not race gateway shutdown with an open SQLite handle. Keep the
+        // durable cursor at the last completed session so startup resumes it.
+        if (gatewayClosing) {
+          await persistSessionMirrorSyncState();
+          return;
+        }
+        const entry = sessionMirrorSyncState.entries[index];
+        const session = entry ? store.getSession(entry.id) : null;
+        if (session) {
+          const result = await mirrorGatewaySession(session.id);
+          // A session can be permanently deleted while the queued job waits
+          // for the mirror write lock. It is no longer part of JSON SoT, so
+          // treating that one entry as completed is correct and idempotent.
+          if (!result.ok && result.error !== "session_not_found") {
+            throw new Error(result.error ?? "mirror_sync_failed");
+          }
+        }
+        sessionMirrorSyncState = {
+          ...sessionMirrorSyncState,
+          nextIndex: index + 1,
+          updatedAt: new Date().toISOString(),
+          error: null,
+        };
+        // Persist after each replace-on-sync. If the app exits between rows,
+        // re-running the last row is safe; skipping an unfinished row is not.
+        await persistSessionMirrorSyncState();
+        // Give status/search requests and interactive dual-writes a chance to
+        // run between sessions instead of monopolizing the event loop.
+        await new Promise((resolveYield) => setImmediate(resolveYield));
+      }
+      if (!gatewayClosing) {
+        const finishedAt = new Date().toISOString();
+        sessionMirrorSyncState = {
+          ...sessionMirrorSyncState,
+          state: "completed",
+          nextIndex: sessionMirrorSyncState.entries.length,
+          updatedAt: finishedAt,
+          completedAt: finishedAt,
+          error: null,
+        };
+        await persistSessionMirrorSyncState();
+      }
     } catch (error) {
-      const message = error?.message ?? "mirror_write_failed";
-      console.warn("[kyrei session-mirror] write failed:", message);
-      return { ok: false, error: message };
+      // Preserve the completed cursor: a later click can retry only the
+      // remaining sessions, and malformed/secret-bearing diagnostics never
+      // escape into Settings or the state file.
+      const message = redactSensitiveText(
+        error?.message ?? "mirror_sync_failed",
+        runtimeSensitiveValues(),
+      ).slice(0, 500);
+      sessionMirrorSyncState = {
+        ...sessionMirrorSyncState,
+        state: gatewayClosing ? "running" : "failed",
+        updatedAt: new Date().toISOString(),
+        error: gatewayClosing ? null : message,
+      };
+      await persistSessionMirrorSyncState().catch(() => undefined);
+      if (!gatewayClosing) console.warn("[kyrei session-mirror] background sync paused:", message);
+    } finally {
+      sessionMirrorSyncPromise = null;
     }
   };
-
+  const ensureSessionMirrorSyncRunning = () => {
+    if (sessionMirrorSyncPromise || sessionMirrorSyncState.state !== "running") {
+      return sessionMirrorSyncPromise;
+    }
+    sessionMirrorSyncPromise = runSessionMirrorSync();
+    return sessionMirrorSyncPromise;
+  };
+  const startOrResumeSessionMirrorSync = async () => {
+    await sessionMirrorSyncStateReady;
+    if (sessionMirrorSyncStartPromise) return sessionMirrorSyncStartPromise;
+    if (sessionMirrorSyncState.state === "running") {
+      ensureSessionMirrorSyncRunning();
+      return { accepted: true, alreadyRunning: true, resumed: false, ...sessionMirrorSyncProgress() };
+    }
+    sessionMirrorSyncStartPromise = (async () => {
+      const canResume = sessionMirrorSyncState.state === "failed"
+        && sessionMirrorSyncState.nextIndex < sessionMirrorSyncState.entries.length;
+      if (canResume) {
+        sessionMirrorSyncState = {
+          ...sessionMirrorSyncState,
+          state: "running",
+          updatedAt: new Date().toISOString(),
+          completedAt: null,
+          error: null,
+        };
+      } else {
+        const entries = (Array.isArray(store.sessions) ? [...store.sessions] : [])
+          .filter((session) => typeof session?.id === "string" && session.id)
+          .map((session) => ({ id: session.id, messages: store.getMessages(session.id).length }))
+          .sort((left, right) => left.id.localeCompare(right.id));
+        const startedAt = new Date().toISOString();
+        sessionMirrorSyncState = {
+          version: 1,
+          state: "running",
+          entries,
+          nextIndex: 0,
+          startedAt,
+          updatedAt: startedAt,
+          completedAt: null,
+          error: null,
+        };
+      }
+      await persistSessionMirrorSyncState();
+      ensureSessionMirrorSyncRunning();
+      return {
+        accepted: true,
+        alreadyRunning: false,
+        resumed: canResume,
+        ...sessionMirrorSyncProgress(),
+      };
+    })();
+    try {
+      return await sessionMirrorSyncStartPromise;
+    } finally {
+      sessionMirrorSyncStartPromise = null;
+    }
+  };
   /**
    * A4c write-through: when enginePrimary, require engine dual-commit after JSON mutation.
    * When not primary, fail-open dual-write (best effort).
@@ -2866,7 +3088,6 @@ export async function startGateway({
   /** Session-scoped protected-path allow-once (after tool approval). Survives rest of session only. */
   const sessionProtectedAllowOnce = new Map(); // sessionId -> string[]
   const shutdownController = new AbortController();
-  let gatewayClosing = false;
   const activeHttpRequests = new Set();
 
   const noteProtectedPathAllowOnce = (sessionId, approval) => {
@@ -2943,6 +3164,13 @@ export async function startGateway({
     if (!engine) engine = await engineLoader();
     return engine;
   };
+  // A crash or app update may stop an active job between sessions. The state
+  // file deliberately stays "running" in that case, so a later gateway boot
+  // resumes the exact immutable session plan without repeating completed work.
+  // Schedule this only after the lazy engine accessor exists.
+  void sessionMirrorSyncStateReady.then(() => {
+    if (sessionMirrorSyncState.state === "running" && !gatewayClosing) ensureSessionMirrorSyncRunning();
+  });
 
   /**
    * Read the optional local GBrain runtime without enabling its tools. This is
@@ -7182,6 +7410,7 @@ export async function startGateway({
 
       // Dual-write chat mirror: JSON remains SoT; engine store is FTS/read path.
       if (path === "/api/memory/session-mirror" && req.method === "GET") {
+        await sessionMirrorSyncStateReady;
         const cfg = sessionMirrorConfig();
         if (!cfg.enabled) {
           return sendJson(res, 200, {
@@ -7191,6 +7420,7 @@ export async function startGateway({
             state: "disabled",
             sessionCount: 0,
             message: "session_mirror_disabled",
+            sync: sessionMirrorSyncProgress(),
           });
         }
         try {
@@ -7203,11 +7433,11 @@ export async function startGateway({
               state: "error",
               sessionCount: 0,
               message: "mirror_unavailable",
+              sync: sessionMirrorSyncProgress(),
             });
           }
           const sessions = await mirror.listSessions({
             ...(typeof config.workspace === "string" ? { workspace: config.workspace } : {}),
-            limit: 500,
           });
           return sendJson(res, 200, {
             enabled: true,
@@ -7219,6 +7449,7 @@ export async function startGateway({
             note: cfg.enginePrimary
               ? "A4b: public GET prefers engine when caught up; JSON remains write path for approvals/rewind."
               : "JSON remains write path; mirror is dual-write FTS. Enable enginePrimary for public GET preference.",
+            sync: sessionMirrorSyncProgress(),
           });
         } catch (error) {
           return sendJson(res, 200, {
@@ -7228,6 +7459,7 @@ export async function startGateway({
             state: "error",
             sessionCount: 0,
             message: error?.message ?? "mirror_error",
+            sync: sessionMirrorSyncProgress(),
           });
         }
       }
@@ -7266,52 +7498,17 @@ export async function startGateway({
           return sendJson(res, 403, { code: "session_mirror_disabled", error: "session_mirror_disabled" });
         }
         try {
-          const mirror = await ensureSessionMirror();
-          if (!mirror) return sendJson(res, 503, { code: "mirror_unavailable", error: "mirror_unavailable" });
-          // This is an explicit full sync. Do not claim completion after an
-          // arbitrary prefix: every JSON source-of-truth session must reach
-          // the mirror before the request succeeds.
-          const sessions = Array.isArray(store.sessions) ? store.sessions : [];
-          let messages = 0;
-          for (const session of sessions) {
-            const list = store.getMessages(session.id);
-            await mirror.syncSession(
-              {
-                id: session.id,
-                title: session.title,
-                workspace: typeof config.workspace === "string" ? config.workspace : undefined,
-                createdAt: session.createdAt,
-                updatedAt: session.updatedAt,
-                status: session.status,
-                providerId: session.providerId,
-                modelId: session.modelId,
-                providerAccountId: session.providerAccountId,
-              },
-              list.map((message) => ({
-                id: message.id,
-                role: message.role,
-                text:
-                  typeof message.text === "string" && message.text.trim()
-                    ? message.text
-                    : typeof message.content === "string"
-                      ? message.content
-                      : Array.isArray(message.parts)
-                        ? textFromTurnParts(message.parts)
-                        : "",
-                at: message.at,
-                parts: message.parts,
-                pending: message.pending === true,
-                turnStatus: message.turnStatus,
-                approvalModelParams: message.approvalModelParams,
-              })),
-            );
-            messages += list.length;
-          }
-          return sendJson(res, 200, {
+          const result = await startOrResumeSessionMirrorSync();
+          return sendJson(res, 202, {
             ok: true,
-            sessions: sessions.length,
-            messages,
-            note: "Completed full resync from JSON chat SoT into engine SessionStore mirror.",
+            ...result,
+            sessions: result.totalSessions,
+            messages: result.totalMessages,
+            note: result.alreadyRunning
+              ? "Session mirror synchronization is already running."
+              : result.resumed
+                ? "Resumed session mirror synchronization from the last durable checkpoint."
+                : "Started background session mirror synchronization from JSON chat SoT.",
           });
         } catch (error) {
           return sendJson(res, 500, { code: "mirror_sync_failed", error: error?.message ?? "mirror_sync_failed" });
@@ -7412,6 +7609,86 @@ export async function startGateway({
             blockers: ["parity_error", ...baseBlockers],
             message: error?.message ?? "parity_error",
             note: "JSON chat store is UI write path.",
+          });
+        }
+      }
+
+      // Transparent, local-only baseline for Settings. This is intentionally
+      // not presented as a turn transcript: project recall, a selected Skill,
+      // and a Team role are assembled only when a concrete chat turn starts.
+      if (path === "/api/prompt/effective" && req.method === "GET") {
+        try {
+          const mod = await getEngine();
+          if (typeof mod?.buildSystemPromptParts !== "function" || !mod?.TOOL_DESCRIPTIONS) {
+            return sendJson(res, 503, { code: "prompt_inspector_unavailable", error: "prompt_inspector_unavailable" });
+          }
+          const engineConfig = isPlainRecord(config.engine) ? config.engine : {};
+          const memory = isPlainRecord(engineConfig.memory) ? engineConfig.memory : {};
+          const mcp = isPlainRecord(engineConfig.mcp) ? engineConfig.mcp : {};
+          const delegation = isPlainRecord(engineConfig.delegation) ? engineConfig.delegation : {};
+          const index = isPlainRecord(memory.index) ? memory.index : {};
+          const gbrain = isPlainRecord(memory.gbrain) ? memory.gbrain : {};
+          const workspace = typeof config.workspace === "string" && config.workspace.trim()
+            ? config.workspace.trim()
+            : undefined;
+          const profiles = Array.isArray(engineConfig.promptProfiles) ? engineConfig.promptProfiles : [];
+          const activePromptProfileId = typeof engineConfig.activePromptProfileId === "string"
+            ? engineConfig.activePromptProfileId
+            : "";
+          const promptProfile = profiles.find((profile) => profile?.id === activePromptProfileId);
+          const skillRuntime = await skillsStore.runtimeSkills().catch(() => ({ skills: [] }));
+          const skills = Array.isArray(skillRuntime?.skills) ? skillRuntime.skills : [];
+          const parts = mod.buildSystemPromptParts({
+            workspace,
+            hasTools: true,
+            availableToolNames: Object.keys(mod.TOOL_DESCRIPTIONS),
+            personality: typeof mod.resolvePersonalityText === "function"
+              ? mod.resolvePersonalityText({
+                  personality: typeof engineConfig.personality === "string" ? engineConfig.personality : "",
+                  personalityPresetId: typeof engineConfig.personalityPresetId === "string"
+                    ? engineConfig.personalityPresetId
+                    : "none",
+                })
+              : typeof engineConfig.personality === "string"
+                ? engineConfig.personality
+                : "",
+            codingMode: typeof engineConfig.codingMode === "string" ? engineConfig.codingMode : "auto",
+            timezone: typeof engineConfig.timezone === "string" ? engineConfig.timezone : undefined,
+            promptProfile: typeof promptProfile?.systemPrompt === "string" ? promptProfile.systemPrompt : undefined,
+            hasBrainTools: gbrain.mode === "read" || gbrain.mode === "read-write",
+            hasBrainWriteTools: gbrain.mode === "read-write",
+            hasDecisionTools: Boolean(workspace && memory.ltm?.enabled),
+            hasPlanningTools: engineConfig.planning?.enabled !== false,
+            hasOpenVikingTools: memory.openviking?.enabled === true,
+            hasMemorySearch: Boolean(workspace && index.enabled !== false),
+            hasMemoryWriteTools: Boolean(workspace && index.enabled !== false),
+            hasMcpTools: mcp.enabled !== false && Array.isArray(mcp.servers) && mcp.servers.length > 0,
+            hasDelegation: delegation.enabled !== false,
+            skills: skills.map(({ id, name, description }) => ({ id, name, description })),
+          });
+          const stable = redactSensitiveText(parts?.stable ?? "", runtimeSensitiveValues());
+          const volatile = redactSensitiveText(parts?.volatile ?? "", runtimeSensitiveValues());
+          return sendJson(res, 200, {
+            kind: "baseline",
+            version: typeof mod.PROMPT_VERSION === "string" ? mod.PROMPT_VERSION : "unknown",
+            codingMode: typeof engineConfig.codingMode === "string" ? engineConfig.codingMode : "auto",
+            workspaceSet: Boolean(workspace),
+            availableTools: Object.keys(mod.TOOL_DESCRIPTIONS).sort(),
+            stable,
+            ...(volatile ? { volatile } : {}),
+            chars: stable.length + volatile.length,
+            omissions: [
+              "project_context_and_recall",
+              "current_session_messages",
+              "per_turn_skill_selection",
+              "team_role_assignment",
+              "runtime_tool_health",
+            ],
+          });
+        } catch (error) {
+          return sendJson(res, 500, {
+            code: "prompt_inspector_failed",
+            error: redactSensitiveText(error?.message ?? "prompt_inspector_failed", runtimeSensitiveValues()),
           });
         }
       }
@@ -8991,10 +9268,7 @@ export async function startGateway({
           if (!commit.ok && sessionMirrorEnginePrimary()) {
             // Roll back JSON + mirror so enginePrimary list does not ghost the fork.
             try {
-              const mirror = await ensureSessionMirror();
-              if (mirror && typeof mirror.removeSession === "function") {
-                await mirror.removeSession(result.session.id);
-              }
+              await removeGatewaySessionFromMirror(result.session.id);
             } catch {
               /* best-effort */
             }
@@ -9515,30 +9789,19 @@ export async function startGateway({
           // never leave JSON deleted with a live engine row. If mirror never
           // opens (infrastructure), remove JSON only (fail-open, no split-brain).
           if (sessionMirrorEnginePrimary()) {
-            let mirror = null;
             try {
-              mirror = await ensureSessionMirror();
-            } catch {
-              mirror = null;
-            }
-            if (mirror && typeof mirror.removeSession === "function") {
-              try {
-                await mirror.removeSession(id);
-              } catch (error) {
-                return sendJson(res, 503, {
-                  code: "engine_mirror_write_failed",
-                  error: error?.message ?? "engine_mirror_write_failed",
-                });
-              }
+              await removeGatewaySessionFromMirror(id);
+            } catch (error) {
+              return sendJson(res, 503, {
+                code: "engine_mirror_write_failed",
+                error: error?.message ?? "engine_mirror_write_failed",
+              });
             }
             store.removeSession(id);
           } else {
             store.removeSession(id);
             try {
-              const mirror = await ensureSessionMirror();
-              if (mirror && typeof mirror.removeSession === "function") {
-                await mirror.removeSession(id);
-              }
+              await removeGatewaySessionFromMirror(id);
             } catch {
               /* fail-open dual-write when not primary */
             }
@@ -9914,6 +10177,12 @@ export async function startGateway({
       // finish while the stores are still open or observe the shutdown signal;
       // otherwise a late PATCH/approval could mutate state after store.close.
       await waitForHttpRequests();
+      // A background mirror resync persists its cursor after every completed
+      // session. Let the in-flight row finish before closing SQLite so the
+      // next launch resumes cleanly instead of recording a false failure.
+      await Promise.resolve(sessionMirrorSyncPromise).catch(() => undefined);
+      await sessionMirrorSyncWriteTail;
+      await sessionMirrorWriteTail;
       await cronScheduler.stop();
       await configMutationTail;
       await persistence.drain();

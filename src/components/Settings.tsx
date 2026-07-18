@@ -25,6 +25,7 @@ import type {
   LocalPostgresRuntimeStatus,
   MemoryIndexRuntimeStatus,
   McpRuntimeStatus,
+  EffectivePromptPreview,
   SessionMirrorRuntimeStatus,
   SessionMirrorParityResult,
   MessagingRuntimeStatus,
@@ -145,6 +146,9 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const [sessionMirrorParity, setSessionMirrorParity] = useState<SessionMirrorParityResult | null>(null);
   const [sessionMirrorBusy, setSessionMirrorBusy] = useState(false);
   const [sessionMirrorNote, setSessionMirrorNote] = useState<string | null>(null);
+  const [effectivePromptPreview, setEffectivePromptPreview] = useState<EffectivePromptPreview | null>(null);
+  const [effectivePromptBusy, setEffectivePromptBusy] = useState(false);
+  const [effectivePromptFailed, setEffectivePromptFailed] = useState(false);
   const [ltmConsolidateBusy, setLtmConsolidateBusy] = useState(false);
   const [ltmConsolidateNote, setLtmConsolidateNote] = useState<string | null>(null);
   const [messagingStatus, setMessagingStatus] = useState<MessagingRuntimeStatus | null>(null);
@@ -411,9 +415,12 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
   }, [flushEngineSave, t]);
 
-  const checkSessionMirror = useCallback(async () => {
-    if (!await flushEngineSave()) return;
-    setSessionMirrorBusy(true);
+  const checkSessionMirror = useCallback(async ({ persist = true, silent = false }: {
+    persist?: boolean;
+    silent?: boolean;
+  } = {}) => {
+    if (persist && !await flushEngineSave()) return;
+    if (!silent) setSessionMirrorBusy(true);
     try {
       const [status, parity] = await Promise.all([
         gateway.getSessionMirrorStatus(),
@@ -432,7 +439,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       });
       setSessionMirrorParity(null);
     } finally {
-      setSessionMirrorBusy(false);
+      if (!silent) setSessionMirrorBusy(false);
     }
   }, [flushEngineSave, getEngineField]);
 
@@ -443,18 +450,35 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     try {
       const result = await gateway.syncSessionMirror();
       setSessionMirrorNote(
-        t("settings.projectMemory.sessionMirror.syncOk", {
-          sessions: result.sessions,
-          messages: result.messages,
-        }),
+        result.alreadyRunning
+          ? t("settings.projectMemory.sessionMirror.syncAlreadyRunning")
+          : result.resumed
+            ? t("settings.projectMemory.sessionMirror.syncResumed")
+            : t("settings.projectMemory.sessionMirror.syncStarted", {
+                sessions: result.sessions,
+                messages: result.messages,
+              }),
       );
-      setSessionMirrorStatus(await gateway.getSessionMirrorStatus());
+      await checkSessionMirror({ persist: false, silent: true });
     } catch {
       setSessionMirrorNote(t("settings.projectMemory.sessionMirror.syncFailed"));
     } finally {
       setSessionMirrorBusy(false);
     }
-  }, [flushEngineSave, t]);
+  }, [checkSessionMirror, flushEngineSave, t]);
+
+  const inspectEffectivePrompt = useCallback(async () => {
+    if (!await flushEngineSave()) return;
+    setEffectivePromptBusy(true);
+    setEffectivePromptFailed(false);
+    try {
+      setEffectivePromptPreview(await gateway.getEffectivePromptPreview());
+    } catch {
+      setEffectivePromptFailed(true);
+    } finally {
+      setEffectivePromptBusy(false);
+    }
+  }, [flushEngineSave]);
 
   const consolidateLtm = useCallback(async () => {
     if (!await flushEngineSave()) return;
@@ -516,6 +540,14 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       void checkMessaging();
     }
   }, [checkGBrain, checkMemoryIndex, checkSessionMirror, checkMcp, checkLocalPostgres, checkMessaging, visibleSection]);
+
+  useEffect(() => {
+    if (visibleSection !== "memory" || sessionMirrorStatus?.sync?.state !== "running") return;
+    const timer = window.setInterval(() => {
+      void checkSessionMirror({ persist: false, silent: true });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [checkSessionMirror, sessionMirrorStatus?.sync?.state, visibleSection]);
 
   const initializeGBrain = useCallback(async () => {
     // Persist a just-edited command before invoking it; otherwise a delayed
@@ -964,6 +996,59 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           }
                         }}
                       />
+                      <Field label={t("settings.promptInspector.label")} hint={t("settings.promptInspector.hint")} stacked>
+                        <div className="space-y-2 rounded-lg border border-border-soft bg-elevated/45 p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-[12px] text-muted">
+                              {effectivePromptPreview
+                                ? t("settings.promptInspector.summary", {
+                                    version: effectivePromptPreview.version,
+                                    chars: effectivePromptPreview.chars,
+                                    tools: effectivePromptPreview.availableTools.length,
+                                  })
+                                : t("settings.promptInspector.empty")}
+                            </p>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void inspectEffectivePrompt()}
+                              disabled={effectivePromptBusy}
+                            >
+                              {effectivePromptBusy
+                                ? t("settings.promptInspector.loading")
+                                : effectivePromptPreview
+                                  ? t("settings.promptInspector.refresh")
+                                  : t("settings.promptInspector.open")}
+                            </Button>
+                          </div>
+                          {effectivePromptFailed && (
+                            <p className="text-[12px] text-danger">{t("settings.promptInspector.failed")}</p>
+                          )}
+                          {effectivePromptPreview && (
+                            <>
+                              <p className="text-[12px] text-muted">{t("settings.promptInspector.omissions")}</p>
+                              <details className="rounded-md border border-border-soft bg-bg/60">
+                                <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-foreground">
+                                  {t("settings.promptInspector.stable")}
+                                </summary>
+                                <pre className="max-h-80 overflow-auto whitespace-pre-wrap border-t border-border-soft px-3 py-2 text-[11px] leading-4 text-secondary">
+                                  {effectivePromptPreview.stable}
+                                </pre>
+                              </details>
+                              {effectivePromptPreview.volatile && (
+                                <details className="rounded-md border border-border-soft bg-bg/60">
+                                  <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-foreground">
+                                    {t("settings.promptInspector.volatile")}
+                                  </summary>
+                                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap border-t border-border-soft px-3 py-2 text-[11px] leading-4 text-secondary">
+                                    {effectivePromptPreview.volatile}
+                                  </pre>
+                                </details>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </Field>
                       <Field label={t("settings.personality.label")} hint={t("settings.personality.hint")} stacked>
                         <div className="space-y-2">
                           <div className="flex flex-wrap gap-1.5">
@@ -1687,6 +1772,30 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                                   {sessionMirrorNote && (
                                     <p className="mt-1 text-[12px] text-muted">{sessionMirrorNote}</p>
                                   )}
+                                  {sessionMirrorStatus?.sync?.state === "running" && (
+                                    <p className="mt-1 text-[12px] text-muted">
+                                      {t("settings.projectMemory.sessionMirror.progress", {
+                                        completed: sessionMirrorStatus.sync.completedSessions,
+                                        total: sessionMirrorStatus.sync.totalSessions,
+                                        messages: sessionMirrorStatus.sync.completedMessages,
+                                      })}
+                                    </p>
+                                  )}
+                                  {sessionMirrorStatus?.sync?.state === "completed" && (
+                                    <p className="mt-1 text-[12px] text-muted">
+                                      {t("settings.projectMemory.sessionMirror.syncCompleted", {
+                                        sessions: sessionMirrorStatus.sync.totalSessions,
+                                        messages: sessionMirrorStatus.sync.totalMessages,
+                                      })}
+                                    </p>
+                                  )}
+                                  {sessionMirrorStatus?.sync?.state === "failed" && (
+                                    <p className="mt-1 text-[12px] text-warning">
+                                      {t("settings.projectMemory.sessionMirror.syncPaused", {
+                                        error: sessionMirrorStatus.sync.error || "mirror_sync_failed",
+                                      })}
+                                    </p>
+                                  )}
                                   {sessionMirrorParity && (
                                     <p className="mt-1 text-[12px] text-muted">
                                       {t("settings.projectMemory.sessionMirror.parity", {
@@ -1716,10 +1825,16 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                                       ? t("settings.projectMemory.sessionMirror.status.checking")
                                       : t("settings.projectMemory.check")}
                                   </Button>
-                                  <Button size="sm" onClick={() => void syncSessionMirror()} disabled={sessionMirrorBusy}>
+                                  <Button
+                                    size="sm"
+                                    onClick={() => void syncSessionMirror()}
+                                    disabled={sessionMirrorBusy || sessionMirrorStatus?.sync?.state === "running"}
+                                  >
                                     {sessionMirrorBusy
                                       ? t("settings.projectMemory.sessionMirror.syncing")
-                                      : t("settings.projectMemory.sessionMirror.sync")}
+                                      : sessionMirrorStatus?.sync?.state === "failed" && sessionMirrorStatus.sync.resumable
+                                        ? t("settings.projectMemory.sessionMirror.syncResume")
+                                        : t("settings.projectMemory.sessionMirror.sync")}
                                   </Button>
                                 </div>
                               </div>

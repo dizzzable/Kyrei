@@ -998,6 +998,20 @@ export interface LtmConsolidateResult {
   stdout?: string;
 }
 
+/** Persisted, resumable background synchronization from JSON chat SoT. */
+export interface SessionMirrorSyncProgress {
+  state: "idle" | "running" | "completed" | "failed";
+  totalSessions: number;
+  completedSessions: number;
+  totalMessages: number;
+  completedMessages: number;
+  startedAt?: string;
+  updatedAt?: string;
+  completedAt?: string;
+  error?: string;
+  resumable: boolean;
+}
+
 /** Dual-write chat mirror status (JSON remains write path for approvals). */
 export interface SessionMirrorRuntimeStatus {
   enabled: boolean;
@@ -1008,6 +1022,7 @@ export interface SessionMirrorRuntimeStatus {
   path?: string;
   note?: string;
   message?: string;
+  sync?: SessionMirrorSyncProgress;
 }
 
 export interface SessionMirrorSearchHit {
@@ -1027,7 +1042,30 @@ export interface SessionMirrorSyncResult {
   ok: boolean;
   sessions: number;
   messages: number;
+  accepted?: boolean;
+  alreadyRunning?: boolean;
+  resumed?: boolean;
+  totalSessions?: number;
+  completedSessions?: number;
+  totalMessages?: number;
+  completedMessages?: number;
+  state?: SessionMirrorSyncProgress["state"];
+  resumable?: boolean;
   note?: string;
+}
+
+/** Local inspection of the deterministic prompt baseline before a chat turn. */
+export interface EffectivePromptPreview {
+  kind: "baseline";
+  version: string;
+  codingMode: string;
+  workspaceSet: boolean;
+  availableTools: string[];
+  stable: string;
+  volatile?: string;
+  chars: number;
+  /** Dynamic inputs intentionally excluded until a concrete turn begins. */
+  omissions: string[];
 }
 
 /** Progressive cutover readiness (JSON remains write SoT for approvals/rewind). */
