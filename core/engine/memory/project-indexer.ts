@@ -8,7 +8,7 @@
 
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import type { MemoryDoc, MemoryStore, VectorStore } from "../data/ports.js";
 import { createLtmBridge } from "./ltm-bridge.js";
 import { createPlanStore } from "../orchestration/plan.js";
@@ -150,6 +150,37 @@ export async function reindexProjectMemory(
       );
       sources.push("notes");
     }
+  }
+
+  // User-imported project documentation. Files remain the durable source of
+  // truth; this projection only makes them searchable and visible in graph UI.
+  {
+    const dir = join(workspace, ".kyrei", "memory", "imports");
+    const supported = new Set([".md", ".mdx", ".markdown", ".txt", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".csv", ".tsv"]);
+    let names: string[] = [];
+    try {
+      names = (await readdir(dir)).filter((name) => supported.has(extname(name).toLowerCase())).sort().slice(0, 300);
+    } catch {
+      names = [];
+    }
+    let count = 0;
+    for (const name of names) {
+      const body = await readIf(join(dir, name));
+      if (!body?.trim()) continue;
+      await upsert(doc({
+        id: `proj:imported:${name}`,
+        scope: "project",
+        kind: "memory",
+        path: `.kyrei/memory/imports/${name}`,
+        workspace,
+        title: name.replace(/-[a-f0-9]{10}(?=\.[^.]+$)/i, ""),
+        body: body.slice(0, 100_000),
+        sourceRef: "tier-a:imported-doc",
+        frontmatter: { imported: true },
+      }));
+      count += 1;
+    }
+    if (count) sources.push("imported_document");
   }
 
   // Light code-graph projection (entry candidates only — untrusted navigation hints).

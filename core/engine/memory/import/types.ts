@@ -14,6 +14,7 @@ export type ImportSourceId =
   | "cursor"
   | "kiro"
   | "hermes"
+  | "codex"
   | "aider"
   | "generic"
   | "unknown";

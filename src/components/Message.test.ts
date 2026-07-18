@@ -45,6 +45,26 @@ describe("Message reasoning visibility", () => {
     expect(html).toContain("final answer");
   });
 
+  it("hides internal assistant markers while preserving the visible answer", () => {
+    const internalMessage: ChatMessage = {
+      id: "assistant-internal-lines",
+      role: "assistant",
+      parts: [{
+        type: "text",
+        text: "Effective phase: build — implement now.\n\nVisible answer.\n[goal-verify] goal not confirmed",
+      }],
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(I18nProvider, null,
+        createElement(TooltipProvider, null, createElement(Message, { message: internalMessage }))),
+    );
+
+    expect(html).toContain("Visible answer.");
+    expect(html).not.toContain("Effective phase:");
+    expect(html).not.toContain("[goal-verify]");
+  });
+
   it("renders the exact approval scope and actions from the typed EN/RU catalogs", () => {
     const approvalMessage: ChatMessage = {
       id: "approval-message",

@@ -86,15 +86,15 @@ describe("settings localized rendering", () => {
     expect(await renderSettings("ru", "appearance")).toContain("Тёмная");
   });
 
-  it("explains the local GBrain setup before any agent memory is enabled", async () => {
+  it("explains the built-in local memory before any agent access is enabled", async () => {
     const english = await renderSettings("en", "memory");
     const russian = await renderSettings("ru", "memory");
 
-    expect(english).toContain("Local GBrain setup");
-    expect(english).toContain("Checking local GBrain…");
+    expect(english).toContain("Local personal memory");
+    expect(english).toContain("Checking local memory…");
     expect(english).toContain("Check status");
-    expect(russian).toContain("Локальная настройка GBrain");
-    expect(russian).toContain("Проверяю локальный GBrain…");
+    expect(russian).toContain("Локальная личная память");
+    expect(russian).toContain("Проверяю локальную память…");
     expect(russian).toContain("Проверить статус");
   });
 

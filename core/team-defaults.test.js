@@ -14,7 +14,20 @@ describe("team-defaults OOB seed", () => {
     expect(team?.roles.map((r) => r.id)).toEqual(["researcher", "critic", "architect"]);
     expect(team?.roles.every((r) => r.capabilities.includes("memory.read"))).toBe(true);
     expect(team?.roles.every((r) => r.model?.modelId === "gpt")).toBe(true);
+    expect(team?.roles.every((r) => r.instructions === "")).toBe(true);
+    expect(team?.roles.every((r) => (
+      BUILTIN_PROMPT_PROFILES.some((profile) => profile.id === r.promptProfileId)
+    ))).toBe(true);
     expect(buildBuiltinCodingTeamProfile(null)).toBeNull();
+  });
+
+  it("ships structured stock role contracts when the user has not supplied one", () => {
+    expect(BUILTIN_PROMPT_PROFILES.length).toBeGreaterThanOrEqual(4);
+    for (const profile of BUILTIN_PROMPT_PROFILES) {
+      expect(profile.systemPrompt).toContain("MISSION:");
+      expect(profile.systemPrompt).toContain("BOUNDARY:");
+      expect(profile.systemPrompt).toContain("HANDOFF:");
+    }
   });
 
   it("fills missing prompt profiles without overwriting user edits", () => {

@@ -541,28 +541,6 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
     }
   }, [flash, flushEngineSave, onSaved]);
 
-  const installGBrain = useCallback(async () => {
-    if (!await flushEngineSave()) return;
-    setGbrainBusy(true);
-    setGbrainCheckFailed(false);
-    try {
-      const result = await gateway.installGBrain();
-      setGbrainStatus(result.status);
-      const nextEngine = { ...(result.config.engine ?? {}) };
-      pendingEngineSave.current = null;
-      engineRef.current = nextEngine;
-      setEngine(nextEngine);
-      setEngineText(JSON.stringify(nextEngine, null, 2));
-      setSaveFailed(false);
-      onSaved(result.config);
-      flash();
-    } catch {
-      setGbrainCheckFailed(true);
-    } finally {
-      setGbrainBusy(false);
-    }
-  }, [flash, flushEngineSave, onSaved]);
-
   const importTheme = (file: File) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -669,14 +647,14 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
       : gbrainStatus.state === "ready"
         ? t(gbrainStatus.doctorStatus === "warnings" ? "settings.gbrain.status.readyWarnings" : "settings.gbrain.status.ready")
         : gbrainStatus.state === "not_initialized"
-          ? t("settings.gbrain.status.notInitialized")
+          ? t(gbrainStatus.provider === "builtin" ? "settings.gbrain.status.builtinNotInitialized" : "settings.gbrain.status.notInitialized")
           : gbrainStatus.state === "unavailable"
             ? t("settings.gbrain.status.unavailable")
             : t("settings.gbrain.status.error");
   const gbrainStatusHint = gbrainStatus?.state === "ready" && gbrainStatus.mode === "off"
     ? t("settings.gbrain.status.accessDisabled")
     : gbrainStatus?.state === "not_initialized"
-      ? t("settings.gbrain.status.initializeHint")
+      ? t(gbrainStatus.provider === "builtin" ? "settings.gbrain.status.builtinInitializeHint" : "settings.gbrain.status.initializeHint")
       : gbrainStatus?.state === "unavailable"
         ? t("settings.gbrain.status.unavailableHint")
         : undefined;
@@ -1824,22 +1802,29 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                                   {gbrainBusy ? t("settings.gbrain.initializing") : t("settings.gbrain.initialize")}
                                 </Button>
                               )}
-                              {gbrainStatus?.state === "unavailable" && gbrainStatus.reason === "command_unavailable" && (
-                                <Button size="sm" onClick={() => void installGBrain()} disabled={gbrainBusy}>
-                                  {gbrainBusy ? t("settings.gbrain.installing") : t("settings.gbrain.install")}
-                                </Button>
-                              )}
                             </div>
                           </div>
                         </div>
                       </Field>
-                      <TextField
-                        label={t("settings.gbrain.command.label")}
-                        hint={t("settings.gbrain.command.hint")}
-                        value={String(getEngineField("memory.gbrain.command", "gbrain"))}
-                        placeholder="gbrain"
-                        onChange={(value) => setEngineField("memory.gbrain.command", value)}
+                      <EnumField
+                        label={t("settings.gbrain.provider.label")}
+                        hint={t("settings.gbrain.provider.hint")}
+                        value={String(getEngineField("memory.gbrain.provider", "builtin")) as "builtin" | "external-cli"}
+                        options={[
+                          { value: "builtin", label: t("settings.gbrain.provider.builtin") },
+                          { value: "external-cli", label: t("settings.gbrain.provider.external") },
+                        ]}
+                        onChange={(value) => setEngineField("memory.gbrain.provider", value)}
                       />
+                      {String(getEngineField("memory.gbrain.provider", "builtin")) === "external-cli" && (
+                        <TextField
+                          label={t("settings.gbrain.command.label")}
+                          hint={t("settings.gbrain.command.hint")}
+                          value={String(getEngineField("memory.gbrain.command", "gbrain"))}
+                          placeholder="gbrain"
+                          onChange={(value) => setEngineField("memory.gbrain.command", value)}
+                        />
+                      )}
                       <EnumField
                         label={t("settings.gbrain.mode.label")}
                         hint={t("settings.gbrain.mode.hint")}

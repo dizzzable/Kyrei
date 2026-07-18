@@ -128,8 +128,12 @@ const ContextBudgetSchema = z.object({
 });
 
 const GBrainConfigSchema = z.object({
+  provider: z.enum(["builtin", "external-cli"]).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.provider),
   mode: z.enum(["off", "read", "read-write"]).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.mode),
-  command: z.string().trim().min(1).max(1_024).default(DEFAULT_ENGINE_CONFIG.memory.gbrain.command),
+  command: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().trim().min(1).max(1_024).optional(),
+  ),
   source: z.preprocess(
     (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
     z.string().trim().regex(/^[A-Za-z0-9._-]{1,128}$/).optional(),
@@ -417,6 +421,28 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
   const compression = isRecord(v["compression"]) ? v["compression"] : null;
   const toolLoop = isRecord(v["tool_loop_guardrails"]) ? v["tool_loop_guardrails"] : null;
   const display = isRecord(v["display"]) ? v["display"] : null;
+
+  // Before Kyrei Memory became built in, this field always represented an
+  // external `gbrain` executable. Preserve a custom command as an explicit
+  // compatibility adapter, but turn the old implicit default into the new
+  // offline provider. This migration never touches any third-party data.
+  if (isRecord(v["memory"]) && isRecord(v["memory"]["gbrain"])) {
+    const memory = { ...(v["memory"] as Record<string, unknown>) };
+    const gbrain = { ...(memory["gbrain"] as Record<string, unknown>) };
+    if (gbrain["provider"] == null) {
+      const command = typeof gbrain["command"] === "string" ? gbrain["command"].trim() : "";
+      if (command && command !== "gbrain") {
+        gbrain["provider"] = "external-cli";
+        warnings.push("migrated custom GBrain command to memory.gbrain.provider=external-cli");
+      } else {
+        gbrain["provider"] = "builtin";
+        delete gbrain["command"];
+        warnings.push("migrated default GBrain setup to built-in Kyrei Memory");
+      }
+      memory["gbrain"] = gbrain;
+      v["memory"] = memory;
+    }
+  }
 
   // v0.1: flat `autonomy: "auto" | "turbo" | "off"` → permissions.terminal
   if (typeof v["autonomy"] === "string" && v["permissions"] == null) {

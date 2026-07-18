@@ -46,6 +46,11 @@ export {
 } from "./memory/cite-or-refuse.js";
 export type { GroundedSnippet, SufficiencyResult, CitationCheck, CiteOrRefuseConfig } from "./memory/cite-or-refuse.js";
 export { assembleSystemContext } from "./memory/layers.js";
+export { buildAutomaticRecallContext } from "./memory/auto-recall.js";
+export { importProjectDocuments } from "./memory/document-import.js";
+export type { ImportedProjectDocument, ProjectDocumentInput, RejectedProjectDocument } from "./memory/document-import.js";
+export { buildWorkspaceMemoryGraph, getWorkspaceMemoryGraph } from "./memory/graph-view.js";
+export type { MemoryGraphEdge, MemoryGraphGroup, MemoryGraphNode, WorkspaceMemoryGraph } from "./memory/graph-view.js";
 export { writeHandoff, readHandoff, reseedFromHandoff, HandoffSchema } from "./memory/handoff.js";
 export type { HandoffArtifact } from "./memory/handoff.js";
 export {
@@ -251,8 +256,14 @@ export {
 export type { ProjectEdge, ProjectImpact, ProjectIndex, ProjectNode } from "./intel/project-index.js";
 export { createOpenVikingClient } from "./memory/openviking.js";
 export type { OpenVikingClient, OpenVikingOptions } from "./memory/openviking.js";
-export { createGBrainClient, formatGBrainResult, runGBrainProcess } from "./memory/gbrain.js";
-export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode } from "./memory/gbrain.js";
+export {
+  createGBrainClient,
+  formatGBrainResult,
+  initializeBuiltinGBrainStore,
+  inspectBuiltinGBrainStore,
+  runGBrainProcess,
+} from "./memory/gbrain.js";
+export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode, GBrainProvider } from "./memory/gbrain.js";
 export { buildGBrainTools } from "./tools/gbrain.js";
 export { buildPlanningTools } from "./tools/planning.js";
 export { buildOpenVikingTools } from "./tools/openviking.js";

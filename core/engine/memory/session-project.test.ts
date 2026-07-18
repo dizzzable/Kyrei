@@ -109,6 +109,23 @@ describe("session projection", () => {
     }
   });
 
+  it("projects a complete explicit rebuild snapshot instead of silently capping it", async () => {
+    const stores = createStores(join(ws, ".kyrei", "index"));
+    try {
+      const sessions = Array.from({ length: 101 }, (_, index) => ({
+        id: `s-${index + 1}`,
+        messages: [{ id: "m", role: "user", text: `session-token-${index + 1}` }],
+      }));
+      const result = await projectSessionsIntoMemory(sessions, { workspace: ws, memory: stores.memory });
+      expect(result.sessions).toBe(101);
+      await expect(stores.memory.search("session-token-101")).resolves.toEqual([
+        expect.objectContaining({ sourceRef: "session:s-101" }),
+      ]);
+    } finally {
+      await stores.close();
+    }
+  });
+
   it("flattens parts including tool breadcrumbs", () => {
     expect(
       flattenMessageParts([

@@ -1316,22 +1316,37 @@ export class SkillsStore {
     };
   }
 
-  async runtimeSkills({ ids, maxSkills = 32, maxChars = 64_000 } = {}) {
+  async runtimeSkills({ ids, maxSkills = 32, maxChars = 64_000, strictRequested = false } = {}) {
     await this.#settled();
     const skillLimit = Math.max(0, Math.min(HARD_MAX_RUNTIME_SKILLS, Number.isFinite(maxSkills) ? Math.floor(maxSkills) : 32));
     const charLimit = Math.max(0, Math.min(HARD_MAX_RUNTIME_CHARS, Number.isFinite(maxChars) ? Math.floor(maxChars) : 64_000));
-    const requested = Array.isArray(ids) ? new Set(ids.filter((id) => typeof id === "string" && PUBLIC_ID_RE.test(id))) : null;
-    const discovered = (await this.#discover()).filter((skill) => skill.enabled && (!requested || requested.has(skill.id)));
-
-    // A workspace skill intentionally shadows an equally named global/custom
-    // skill for runtime injection, while list() still exposes every source.
-    const uniqueByName = new Map();
-    for (const skill of discovered) {
-      const key = skill.name.toLowerCase();
-      if (!uniqueByName.has(key)) uniqueByName.set(key, skill);
+    const requestedIds = Array.isArray(ids)
+      ? [...new Set(ids.filter((id) => typeof id === "string" && PUBLIC_ID_RE.test(id)))]
+      : null;
+    if (strictRequested && requestedIds && requestedIds.length > skillLimit) {
+      fail("runtime_skills_skill_limit", "Runtime Skills exceed the configured skill limit");
     }
-    const candidates = [...uniqueByName.values()].sort((left, right) =>
-      right.usage - left.usage || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+    const requested = requestedIds ? new Set(requestedIds) : null;
+    const discovered = (await this.#discover()).filter((skill) => skill.enabled && (!requested || requested.has(skill.id)));
+    const candidates = [];
+    if (strictRequested && requestedIds) {
+      const byId = new Map(discovered.map((skill) => [skill.id, skill]));
+      for (const id of requestedIds) {
+        const skill = byId.get(id);
+        if (!skill) fail("runtime_skills_incomplete", "Requested Skills are unavailable at runtime");
+        candidates.push(skill);
+      }
+    } else {
+      // A workspace skill intentionally shadows an equally named global/custom
+      // skill for runtime injection, while list() still exposes every source.
+      const uniqueByName = new Map();
+      for (const skill of discovered) {
+        const key = skill.name.toLowerCase();
+        if (!uniqueByName.has(key)) uniqueByName.set(key, skill);
+      }
+      candidates.push(...[...uniqueByName.values()].sort((left, right) =>
+        right.usage - left.usage || left.name.localeCompare(right.name) || left.id.localeCompare(right.id)));
+    }
 
     const included = [];
     const chunks = [];
@@ -1340,7 +1355,12 @@ export class SkillsStore {
       if (included.length >= skillLimit) break;
       const chunk = `<<skill:${skill.name} id=${skill.id} provenance=${skill.provenance}>>\n${skill.content.trim()}\n<</skill>>`;
       const separator = chunks.length ? "\n\n" : "";
-      if (chars + separator.length + chunk.length > charLimit) continue;
+      if (chars + separator.length + chunk.length > charLimit) {
+        if (strictRequested) {
+          fail("runtime_skills_char_limit", "Requested Skills exceed the configured runtime budget");
+        }
+        continue;
+      }
       chunks.push(chunk);
       chars += separator.length + chunk.length;
       included.push({

@@ -29,6 +29,9 @@ vi.mock("ai", () => ({
   streamText: streamTextMock,
   generateText: generateTextMock,
   isStepCount: isStepCountMock,
+  modelMessageSchema: {
+    safeParse: (value: unknown) => ({ success: true, data: value }),
+  },
   tool: (definition: unknown) => definition,
 }));
 
@@ -70,6 +73,7 @@ vi.mock("../provider/keys.js", () => ({
 
 vi.mock("../provider/open-stream.js", () => ({
   openStream: openStreamMock,
+  streamAttemptsFromError: () => [],
 }));
 
 vi.mock("../tools/index.js", () => ({

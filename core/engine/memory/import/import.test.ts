@@ -46,6 +46,9 @@ describe("session import pipeline", () => {
 
   it("detects each Phase B fixture", () => {
     expect(detectImportFormat(fixture("kyrei-export.min.json")).adapterId).toBe("kyrei-export");
+    expect(detectImportFormat(fixture("hermes-export.sample.json")).adapterId).toBe("hermes-json");
+    expect(detectImportFormat(fixture("codex-cli.sample.jsonl")).adapterId).toBe("codex-cli-jsonl");
+    expect(detectImportFormat(fixture("generic-agent.sample.json")).adapterId).toBe("agent-json");
     expect(detectImportFormat(fixture("opencode-export.min.json")).adapterId).toBe("opencode-json");
     expect(detectImportFormat(fixture("claude-code.sample.jsonl")).adapterId).toBe("claude-code-jsonl");
     const md = detectImportFormat(fixture("claude-code.export.md"));
@@ -56,6 +59,9 @@ describe("session import pipeline", () => {
   it("parses all adapters into non-empty transcripts", () => {
     const cases: Array<[string, string]> = [
       ["kyrei-export", "kyrei-export.min.json"],
+      ["hermes-json", "hermes-export.sample.json"],
+      ["codex-cli-jsonl", "codex-cli.sample.jsonl"],
+      ["agent-json", "generic-agent.sample.json"],
       ["opencode-json", "opencode-export.min.json"],
       ["claude-code-jsonl", "claude-code.sample.jsonl"],
       ["claude-code-md", "claude-code.export.md"],
@@ -121,11 +127,26 @@ describe("session import pipeline", () => {
 
   it("lists registered adapters", () => {
     expect(IMPORT_ADAPTERS.map((a) => a.id)).toEqual([
+      "hermes-json",
       "kyrei-export",
+      "codex-cli-jsonl",
       "opencode-json",
       "claude-code-jsonl",
+      "agent-json",
       "claude-code-md",
       "generic-md",
     ]);
+  });
+
+  it("drops foreign system/developer policy while preserving useful conversation text", () => {
+    const hermes = getAdapterById("hermes-json")!.parse(fixture("hermes-export.sample.json"));
+    expect(hermes.source).toBe("hermes");
+    expect(hermes.messages.some((message) => message.role === "system")).toBe(false);
+    expect(hermes.messages.some((message) => message.text.includes("idempotency"))).toBe(true);
+
+    const codex = getAdapterById("codex-cli-jsonl")!.parse(fixture("codex-cli.sample.jsonl"));
+    expect(codex.source).toBe("codex");
+    expect(codex.messages.some((message) => message.text.includes("private developer policy"))).toBe(false);
+    expect(codex.messages.some((message) => message.text.includes("retry budget"))).toBe(true);
   });
 });

@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import { Check, Copy, GitFork, RotateCcw } from "lucide-react";
 import type { ChatMessage } from "@/lib/types";
 import { messageText } from "@/lib/chat-messages";
+import { sanitizeAssistantDisplayText } from "@/lib/assistant-display";
 import { IconButton } from "@/components/ui";
 import { useUiSettings } from "@/store/settings";
 import { Markdown } from "./Markdown";
@@ -80,19 +81,25 @@ export const Message = memo(function Message({
     );
   }
 
-  const hasText = message.parts.some((p) => p.type === "text" && p.text.trim());
+  const visibleText = message.parts
+    .filter((part): part is Extract<ChatMessage["parts"][number], { type: "text" }> => part.type === "text")
+    .map((part) => sanitizeAssistantDisplayText(part.text))
+    .join("");
+  const hasText = visibleText.trim().length > 0;
 
   // Assistant: no avatar bubble — plain prose in a single 12px left gutter
   // (Hermes --message-text-indent), footer actions right-aligned on hover.
   return (
-    <div className="assistant-message group min-w-0 pl-4">
+    <div className="assistant-message group min-w-0">
       {message.parts.map((part, i) => {
         if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
         if (part.type === "approval") return <ApprovalCard key={part.approvalId || i} part={part} onDecision={onApprovalDecision} />;
         if (part.type === "reasoning" && showReasoning)
           return <ThinkingDisclosure key={i} text={part.text} pending={message.pending} />;
         if (part.type === "reasoning") return null;
-        return <Markdown key={i} text={part.text} />;
+        const text = sanitizeAssistantDisplayText(part.text);
+        if (!text.trim()) return null;
+        return <Markdown key={i} text={text} />;
       })}
       {message.fileReview && (
         <FileReviewCard
@@ -117,7 +124,7 @@ export const Message = memo(function Message({
       {message.pending && <span className="caret" />}
       {!message.pending && hasText && (
         <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <CopyAction getText={() => messageText(message.parts)} />
+          <CopyAction getText={() => sanitizeAssistantDisplayText(messageText(message.parts))} />
         </div>
       )}
     </div>

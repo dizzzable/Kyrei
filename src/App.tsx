@@ -6,6 +6,7 @@ import { ChangesPanel } from "@/components/chat/ChangesPanel";
 import { CronPanel } from "@/components/cron/CronPanel";
 import { PipelineMissionPanel } from "@/components/pipeline/PipelineMissionPanel";
 import { Message } from "@/components/Message";
+import { MemoryGraphPanel } from "@/components/memory/MemoryGraphPanel";
 import { ResizeHandle } from "@/components/ResizeHandle";
 import { Settings, type SectionId } from "@/components/Settings";
 import { StatusBar } from "@/components/StatusBar";
@@ -58,6 +59,7 @@ export function App() {
   const [cronOpen, setCronOpen] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [missionOpen, setMissionOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId>("model");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -1064,6 +1066,7 @@ export function App() {
   const openSettings = useCallback((section: SectionId = "model") => {
     setCronOpen(false);
     setMissionOpen(false);
+    setMemoryOpen(false);
     setPaletteOpen(false);
     setSettingsSection(section);
     setSettingsOpen(true);
@@ -1072,6 +1075,7 @@ export function App() {
   const openCron = useCallback(() => {
     setSettingsOpen(false);
     setMissionOpen(false);
+    setMemoryOpen(false);
     setPaletteOpen(false);
     setCronOpen(true);
   }, []);
@@ -1079,8 +1083,17 @@ export function App() {
   const openMissions = useCallback(() => {
     setSettingsOpen(false);
     setCronOpen(false);
+    setMemoryOpen(false);
     setPaletteOpen(false);
     setMissionOpen(true);
+  }, []);
+
+  const openMemory = useCallback(() => {
+    setSettingsOpen(false);
+    setCronOpen(false);
+    setMissionOpen(false);
+    setPaletteOpen(false);
+    setMemoryOpen(true);
   }, []);
 
   const cycleSession = useCallback((direction: 1 | -1) => {
@@ -1126,7 +1139,7 @@ export function App() {
       "keybinds.openPanel": () => openSettings("keybinds"),
     };
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || cronOpen || missionOpen || changesOpen) return;
+      if (settingsOpen || cronOpen || missionOpen || changesOpen || memoryOpen) return;
       const combo = comboFromEvent(event);
       if (!combo) return;
       const action = actionForCombo(combo);
@@ -1137,7 +1150,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [newSession, cycleSession, toggleMode, openSettings, currentId, toggleActivity, toggleDeveloper, settingsOpen, cronOpen, missionOpen, changesOpen]);
+  }, [newSession, cycleSession, toggleMode, openSettings, currentId, toggleActivity, toggleDeveloper, settingsOpen, cronOpen, missionOpen, changesOpen, memoryOpen]);
 
   const currentTitle = sessionTitle(sessions.find((session) => session.id === currentId) ?? { id: "" }, t("shell.session.untitled"));
   const turbo = terminalPermission(config) === "turbo";
@@ -1196,6 +1209,10 @@ export function App() {
           }
           if (id === "messaging") {
             openSettings("notifications");
+            return;
+          }
+          if (id === "memory") {
+            openMemory();
             return;
           }
           openSettings(settingsSectionForActivity(id as "capabilities" | "memory" | "providers"));
@@ -1347,8 +1364,13 @@ export function App() {
         pipelines={config?.pipelines}
         sessionId={currentId || undefined}
       />
+      <MemoryGraphPanel
+        open={memoryOpen}
+        onClose={() => setMemoryOpen(false)}
+        onOpenSession={setCurrentId}
+      />
       <CommandPalette
-        open={paletteOpen && !settingsOpen && !cronOpen && !missionOpen && !changesOpen}
+        open={paletteOpen && !settingsOpen && !cronOpen && !missionOpen && !changesOpen && !memoryOpen}
         onClose={() => setPaletteOpen(false)}
         sessions={sessions}
         onNew={newSession}

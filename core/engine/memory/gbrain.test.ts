@@ -1,12 +1,17 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   createGBrainClient,
   formatGBrainResult,
   gbrainProcessTreeTermination,
+  initializeBuiltinGBrainStore,
+  inspectBuiltinGBrainStore,
   type GBrainRunner,
 } from "./gbrain.js";
 
-const defaults = { timeoutMs: 180_000, maxOutputBytes: 200_000 } as const;
+const defaults = { provider: "external-cli" as const, timeoutMs: 180_000, maxOutputBytes: 200_000 } as const;
 
 describe("GBrain optional adapter", () => {
   it("uses the stable local call contract and source scope", async () => {
@@ -80,5 +85,32 @@ describe("GBrain optional adapter", () => {
     expect(result.length).toBeLessThanOrEqual(700);
     expect(result).toContain("truncated GBrain output");
     expect(result).not.toContain("x".repeat(1_000));
+  });
+
+  it("provisions built-in Kyrei Memory locally without a CLI and persists redacted entries", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "kyrei-memory-"));
+    try {
+      expect(inspectBuiltinGBrainStore(dataDir).initialized).toBe(false);
+      await initializeBuiltinGBrainStore(dataDir);
+      expect(inspectBuiltinGBrainStore(dataDir).initialized).toBe(true);
+      const client = createGBrainClient({
+        provider: "builtin",
+        mode: "read-write",
+        dataDir,
+        source: "personal",
+        timeoutMs: 30_000,
+        maxOutputBytes: 200_000,
+        sensitiveValues: ["secret-token"],
+      });
+      await expect(client.capture("remember secret-token feature", { slug: "notes/feature", type: "note" }))
+        .resolves.toMatchObject({ status: "ok", slug: "notes/feature" });
+      await expect(client.getPage("notes/feature")).resolves.toMatchObject({ body: "remember [REDACTED] feature" });
+      await expect(client.search("feature")).resolves.toEqual([
+        expect.objectContaining({ slug: "notes/feature", body: "remember [REDACTED] feature" }),
+      ]);
+      await expect(client.think("summarise")).rejects.toThrow("does not provide external synthesis");
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });

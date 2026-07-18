@@ -2,6 +2,7 @@
  * MCP server manager: lazy stdio clients, bounded list/call, fail-open close.
  */
 
+import { McpHttpClient } from "./http-client.js";
 import { McpStdioClient } from "./stdio-client.js";
 import type { McpCallResult, McpConfig, McpServerConfig, McpToolInfo } from "./types.js";
 import { DEFAULT_MCP_CONFIG } from "./types.js";
@@ -10,7 +11,13 @@ import { redact } from "../security/secrets.js";
 export interface McpManagerOptions {
   config: McpConfig;
   sensitiveValues?: readonly string[];
-  createClient?: (server: McpServerConfig, timeoutMs: number) => McpStdioClient;
+  createClient?: (server: McpServerConfig, timeoutMs: number) => McpClient;
+}
+
+export interface McpClient {
+  listTools(): Promise<Array<{ name: string; description?: string; inputSchema?: unknown }>>;
+  callTool(name: string, args?: Record<string, unknown>): Promise<unknown>;
+  close(): Promise<void>;
 }
 
 function sanitizeServerId(id: string): string {
@@ -25,26 +32,48 @@ export function normalizeMcpConfig(raw: Partial<McpConfig> | undefined): McpConf
   for (const s of serversIn.slice(0, raw?.maxServers ?? base.maxServers)) {
     if (!s || typeof s !== "object") continue;
     const id = sanitizeServerId(String(s.id ?? ""));
-    const command = typeof s.command === "string" ? s.command.trim() : "";
-    if (!id || !command || seen.has(id)) continue;
+    if (!id || seen.has(id)) continue;
     if (s.enabled === false) continue;
     seen.add(id);
-    servers.push({
-      id,
-      command,
-      ...(Array.isArray(s.args) ? { args: s.args.map(String).slice(0, 32) } : {}),
-      ...(s.env && typeof s.env === "object" && !Array.isArray(s.env)
+    const requestedTransport = typeof s.transport === "string" ? s.transport.trim().toLowerCase() : "stdio";
+    if (requestedTransport === "streamable-http") {
+      const url = typeof s.url === "string" ? s.url.trim() : "";
+      let validUrl = false;
+      try {
+        const parsed = new URL(url);
+        validUrl = parsed.protocol === "http:" || parsed.protocol === "https:";
+      } catch { /* retained below as a diagnostic */ }
+      servers.push(validUrl
         ? {
-            env: Object.fromEntries(
-              Object.entries(s.env)
-                .filter(([k, v]) => typeof k === "string" && typeof v === "string")
-                .slice(0, 64),
-            ),
+            id,
+            transport: "streamable-http",
+            url,
+            ...(s.headers && typeof s.headers === "object" && !Array.isArray(s.headers)
+              ? { headers: Object.fromEntries(Object.entries(s.headers).filter(([k, v]) => typeof k === "string" && typeof v === "string").slice(0, 32)) }
+              : {}),
+            enabled: true,
           }
-        : {}),
-      ...(typeof s.cwd === "string" && s.cwd.trim() ? { cwd: s.cwd.trim() } : {}),
-      enabled: true,
-    });
+        : { id, transport: "unsupported", configuredTransport: requestedTransport, reason: "mcp_url_invalid", enabled: true });
+      continue;
+    }
+    const command = typeof s.command === "string" ? s.command.trim() : "";
+    if (requestedTransport !== "stdio") {
+      servers.push({ id, transport: "unsupported", configuredTransport: requestedTransport || "unknown", reason: "transport_unsupported", enabled: true });
+      continue;
+    }
+    servers.push(command
+      ? {
+          id,
+          transport: "stdio",
+          command,
+          ...(Array.isArray(s.args) ? { args: s.args.map(String).slice(0, 32) } : {}),
+          ...(s.env && typeof s.env === "object" && !Array.isArray(s.env)
+            ? { env: Object.fromEntries(Object.entries(s.env).filter(([k, v]) => typeof k === "string" && typeof v === "string").slice(0, 64)) }
+            : {}),
+          ...(typeof s.cwd === "string" && s.cwd.trim() ? { cwd: s.cwd.trim() } : {}),
+          enabled: true,
+        }
+      : { id, transport: "unsupported", configuredTransport: "stdio", reason: "mcp_command_required", enabled: true });
   }
   return {
     enabled: raw?.enabled === true,
@@ -58,12 +87,16 @@ export function normalizeMcpConfig(raw: Partial<McpConfig> | undefined): McpConf
 
 export function createMcpManager(options: McpManagerOptions) {
   const config = normalizeMcpConfig(options.config);
-  const clients = new Map<string, McpStdioClient>();
+  const clients = new Map<string, McpClient>();
   const create =
     options.createClient
-    ?? ((server: McpServerConfig, timeoutMs: number) => new McpStdioClient({ server, timeoutMs }));
+    ?? ((server: McpServerConfig, timeoutMs: number): McpClient => {
+      if (server.transport === "streamable-http") return new McpHttpClient({ server, timeoutMs });
+      if (server.transport === "stdio" || !server.transport) return new McpStdioClient({ server, timeoutMs });
+      throw new Error(`${server.reason ?? "transport_unsupported"}:${server.configuredTransport ?? "unknown"}`);
+    });
 
-  function getClient(serverId: string): McpStdioClient {
+  function getClient(serverId: string): McpClient {
     const id = sanitizeServerId(serverId);
     const existing = clients.get(id);
     if (existing) return existing;
@@ -105,6 +138,7 @@ export function createMcpManager(options: McpManagerOptions) {
   async function inspectServers(): Promise<Array<{
     id: string;
     command: string;
+    transport: "stdio" | "streamable-http" | "unsupported";
     ok: boolean;
     toolCount: number;
     error?: string;
@@ -114,11 +148,12 @@ export function createMcpManager(options: McpManagerOptions) {
     for (const server of config.servers) {
       try {
         const tools = await getClient(server.id).listTools();
-        out.push({ id: server.id, command: server.command, ok: true, toolCount: tools.length });
+        out.push({ id: server.id, command: server.command ?? server.url ?? "", transport: server.transport ?? "stdio", ok: true, toolCount: tools.length });
       } catch (error) {
         out.push({
           id: server.id,
-          command: server.command,
+          command: server.command ?? server.url ?? "",
+          transport: server.transport ?? "stdio",
           ok: false,
           toolCount: 0,
           error: (error as Error).message,

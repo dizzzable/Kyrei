@@ -10,6 +10,8 @@ import type {
   McpRuntimeStatus,
   MemoryIndexReindexResult,
   MemoryIndexRuntimeStatus,
+  ProjectDocumentImportResult,
+  WorkspaceMemoryGraph,
   LtmConsolidateResult,
   LtmDecisionsListResult,
   LtmDecisionFetchResult,
@@ -273,6 +275,12 @@ export const gateway = {
   installGBrain: () => json<GBrainInitializationResult>("/api/memory/gbrain/install", { method: "POST" }),
   getMemoryIndexStatus: () => json<MemoryIndexRuntimeStatus>("/api/memory/index"),
   reindexMemoryIndex: () => json<MemoryIndexReindexResult>("/api/memory/index/reindex", { method: "POST" }),
+  getMemoryGraph: () => json<WorkspaceMemoryGraph>("/api/memory/graph"),
+  importProjectDocuments: (files: Array<{ fileName: string; contentBase64: string }>) =>
+    json<ProjectDocumentImportResult>("/api/memory/documents/import", {
+      method: "POST",
+      body: JSON.stringify({ files }),
+    }),
   consolidateLtm: () => json<LtmConsolidateResult>("/api/memory/ltm/consolidate", { method: "POST" }),
   listLtmDecisions: (includeInvalidated = false) =>
     json<LtmDecisionsListResult>(

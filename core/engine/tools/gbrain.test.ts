@@ -11,7 +11,7 @@ const client: GBrainClient = {
   doctor: vi.fn(async () => ({ healthy: true })),
 };
 
-const disabledConfig = { mode: "off", command: "gbrain", timeoutMs: 180_000, maxOutputBytes: 200_000 } as const;
+const disabledConfig = { provider: "external-cli", mode: "off", command: "gbrain", timeoutMs: 180_000, maxOutputBytes: 200_000 } as const;
 const readConfig = { ...disabledConfig, mode: "read" } as const;
 const writeConfig = { ...disabledConfig, mode: "read-write" } as const;
 

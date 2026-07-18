@@ -32,6 +32,8 @@ describe("coding-mode", () => {
     expect(codingModePrompt("deepreep")).toContain("DEEPREEP");
     expect(codingModePrompt("auto")).toContain("AUTO");
     expect(codingModePrompt("auto")).toContain("Long-horizon");
+    expect(codingModePrompt("auto")).toContain("MODE_SWITCH:<plan|build|polish|deepreep>");
+    expect(codingModePrompt("auto")).toContain("hidden protocol metadata");
     expect(codingModePrompt("build")).not.toEqual(codingModePrompt("polish"));
   });
 

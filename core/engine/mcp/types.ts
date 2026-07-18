@@ -1,17 +1,26 @@
 /**
  * Minimal MCP (Model Context Protocol) client types.
- * Spec-aligned subset: tools/list + tools/call over stdio.
+ * Spec-aligned subset: tools/list + tools/call over stdio or Streamable HTTP.
  */
 
 export interface McpServerConfig {
   /** Stable id used in tool calls (e.g. "filesystem"). */
   id: string;
-  /** Executable to spawn (absolute path or PATH name). */
-  command: string;
+  /** stdio is the backwards-compatible default for existing config files. */
+  transport?: "stdio" | "streamable-http" | "unsupported";
+  /** Executable to spawn (absolute path or PATH name), stdio only. */
+  command?: string;
   args?: string[];
   /** Extra env vars (never inherit secrets from renderer). */
   env?: Record<string, string>;
   cwd?: string;
+  /** Streamable HTTP endpoint, HTTP transport only. */
+  url?: string;
+  /** Explicit headers for a user-managed HTTP server. Values are redacted from diagnostics. */
+  headers?: Record<string, string>;
+  /** Preserved invalid/custom transport so Settings can explain it instead of dropping it. */
+  configuredTransport?: string;
+  reason?: string;
   enabled?: boolean;
 }
 

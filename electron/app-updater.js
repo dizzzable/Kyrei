@@ -87,7 +87,9 @@ export function createAppUpdater({
   const getStatus = () => ({ ...status });
 
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // A downloaded build must not replace the current application merely because
+  // the user closed a window. Installation is only performed by `install()`.
+  autoUpdater.autoInstallOnAppQuit = false;
   // Always replace the complete packaged bundle. This keeps the embedded
   // engine/native modules and renderer dependency graph in lockstep after a
   // release instead of relying on an old installer blockmap.

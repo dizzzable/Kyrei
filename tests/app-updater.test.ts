@@ -54,7 +54,7 @@ describe("createAppUpdater", () => {
     });
 
     expect(autoUpdater.autoDownload).toBe(false);
-    expect(autoUpdater.autoInstallOnAppQuit).toBe(true);
+    expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
     expect(autoUpdater.disableDifferentialDownload).toBe(true);
 
     autoUpdater.checkForUpdates.mockImplementation(async () => {

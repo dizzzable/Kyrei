@@ -7,6 +7,8 @@
 export interface GoalVerdict {
   satisfied: boolean;
   gap?: string;
+  /** The judge could not produce a semantic verdict (provider/parser/runtime failure). */
+  unavailable?: boolean;
 }
 
 export type GoalJudge = (condition: string, transcript: string) => Promise<GoalVerdict>;

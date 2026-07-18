@@ -11,6 +11,8 @@ let initialized = false;
 let includeAdapter = true;
 let createGBrainClient: ReturnType<typeof vi.fn>;
 let runGBrainProcess: ReturnType<typeof vi.fn>;
+let inspectBuiltinGBrainStore: ReturnType<typeof vi.fn>;
+let initializeBuiltinGBrainStore: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "kyrei-gateway-gbrain-"));
@@ -25,11 +27,13 @@ beforeEach(async () => {
     initialized = true;
     return "initialized";
   });
+  inspectBuiltinGBrainStore = vi.fn(() => ({ initialized }));
+  initializeBuiltinGBrainStore = vi.fn(async () => { initialized = true; });
   server = await startGateway({
     dataDir,
     preferredPort: 0,
     engineLoader: vi.fn(async () => includeAdapter
-      ? { runKyreiChat: vi.fn(), createGBrainClient, runGBrainProcess }
+      ? { runKyreiChat: vi.fn(), createGBrainClient, runGBrainProcess, inspectBuiltinGBrainStore, initializeBuiltinGBrainStore }
       : { runKyreiChat: vi.fn() }),
   });
 });
@@ -65,92 +69,49 @@ describe("gateway GBrain onboarding", () => {
       doctorStatus: string;
     }>("/api/memory/gbrain");
 
-    expect(status).toEqual({ state: "not_initialized", mode: "off", doctorStatus: "warnings" });
+    expect(status).toEqual({ state: "not_initialized", provider: "builtin", mode: "off", doctorStatus: "warnings" });
     expect(runGBrainProcess).not.toHaveBeenCalled();
-    expect(createGBrainClient).toHaveBeenCalledWith(expect.objectContaining({
-      mode: "read",
-      command: "gbrain",
-    }));
+    expect(createGBrainClient).not.toHaveBeenCalled();
+    expect(inspectBuiltinGBrainStore).toHaveBeenCalledWith(join(dataDir, "memory"));
   });
 
   it("coalesces concurrent health probes and keeps the result stable briefly", async () => {
-    createGBrainClient.mockClear();
+    inspectBuiltinGBrainStore.mockClear();
     const statuses = await Promise.all([
       request<{ state: string }>("/api/memory/gbrain"),
       request<{ state: string }>("/api/memory/gbrain"),
       request<{ state: string }>("/api/memory/gbrain"),
     ]);
     expect(statuses.map((status) => status.state)).toEqual(["not_initialized", "not_initialized", "not_initialized"]);
-    expect(createGBrainClient).toHaveBeenCalledTimes(1);
+    expect(inspectBuiltinGBrainStore).toHaveBeenCalledTimes(1);
   });
 
   it("initializes only on the explicit endpoint and enables safe read access after a healthy check", async () => {
     const result = await request<{
-      status: { state: string; mode: string };
-      config: { engine: { memory: { gbrain: { mode: string; command: string } } } };
+      status: { state: string; provider: string; mode: string };
+      config: { engine: { memory: { gbrain: { provider: string; mode: string } } } };
     }>("/api/memory/gbrain/initialize", { method: "POST" });
 
-    expect(runGBrainProcess).toHaveBeenCalledWith(
-      "gbrain",
-      ["init", "--pglite", "--no-embedding"],
-      expect.objectContaining({ timeoutMs: 180_000, maxOutputBytes: 200_000 }),
-    );
+    expect(initializeBuiltinGBrainStore).toHaveBeenCalledWith(join(dataDir, "memory"));
+    expect(runGBrainProcess).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      status: { state: "ready", mode: "read" },
-      config: { engine: { memory: { gbrain: { mode: "read", command: "gbrain" } } } },
+      status: { state: "ready", provider: "builtin", mode: "read" },
+      config: { engine: { memory: { gbrain: { provider: "builtin", mode: "read" } } } },
     });
     expect(await request<{ engine: { memory: { gbrain: { mode: string } } } }>("/api/config"))
       .toMatchObject({ engine: { memory: { gbrain: { mode: "read" } } } });
   });
 
-  it("installs only after the explicit request, resolves Bun's global executable, and then initializes it", async () => {
-    let installed = false;
-    const globalBin = join(tmpdir(), "kyrei-gbrain-global-bin");
-    const installedCommand = join(globalBin, process.platform === "win32" ? "gbrain.exe" : "gbrain");
-    createGBrainClient.mockImplementation((options: { command?: string }) => {
-      if (!installed && options.command === "gbrain") throw new Error("spawn gbrain ENOENT");
-      return {
-        doctor: vi.fn(async () => initialized
-          ? { status: "warnings", checks: [{ message: "Local PGLite store is configured" }] }
-          : { status: "warnings", checks: [{ message: "No database configured; run gbrain init" }] }),
-      };
-    });
-    runGBrainProcess.mockImplementation(async (command: string, args: string[]) => {
-      if (command === "bun" && args[0] === "install") {
-        installed = true;
-        return "installed";
-      }
-      if (command === "bun" && args.join(" ") === "pm bin -g") return globalBin;
-      if (command === installedCommand && args[0] === "init") {
-        initialized = true;
-        return "initialized";
-      }
-      return "ok";
-    });
-
-    expect(await request<{ state: string; reason: string }>("/api/memory/gbrain"))
-      .toEqual({ state: "unavailable", mode: "off", reason: "command_unavailable", doctorStatus: "unknown" });
-
+  it("keeps the legacy install endpoint local and never runs Bun or GitHub setup", async () => {
     const result = await request<{
-      status: { state: string; mode: string };
-      config: { engine: { memory: { gbrain: { mode: string; command: string } } } };
+      status: { state: string; provider: string; mode: string };
+      config: { engine: { memory: { gbrain: { provider: string; mode: string } } } };
     }>("/api/memory/gbrain/install", { method: "POST" });
-
-    expect(runGBrainProcess).toHaveBeenCalledWith(
-      "bun",
-      ["--version"],
-      expect.objectContaining({ timeoutMs: 180_000, maxOutputBytes: 1_000_000 }),
-    );
-    expect(runGBrainProcess).toHaveBeenCalledWith("bun", ["install", "-g", "github:garrytan/gbrain"], expect.any(Object));
-    expect(runGBrainProcess).toHaveBeenCalledWith("bun", ["pm", "bin", "-g"], expect.any(Object));
-    expect(runGBrainProcess).toHaveBeenCalledWith(
-      installedCommand,
-      ["init", "--pglite", "--no-embedding"],
-      expect.objectContaining({ timeoutMs: 180_000 }),
-    );
+    expect(initializeBuiltinGBrainStore).toHaveBeenCalledTimes(1);
+    expect(runGBrainProcess).not.toHaveBeenCalled();
     expect(result).toMatchObject({
-      status: { state: "ready", mode: "read" },
-      config: { engine: { memory: { gbrain: { mode: "read", command: installedCommand } } } },
+      status: { state: "ready", provider: "builtin", mode: "read" },
+      config: { engine: { memory: { gbrain: { provider: "builtin", mode: "read" } } } },
     });
   });
 
@@ -164,19 +125,19 @@ describe("gateway GBrain onboarding", () => {
       dataDir,
       preferredPort: 0,
       engineLoader: vi.fn(async () => (includeAdapter
-        ? { runKyreiChat: vi.fn(), createGBrainClient, runGBrainProcess }
+        ? { runKyreiChat: vi.fn(), createGBrainClient, runGBrainProcess, inspectBuiltinGBrainStore, initializeBuiltinGBrainStore }
         : { runKyreiChat: vi.fn() })),
     });
     const status = await request<{ state: string; reason: string; doctorStatus: string }>("/api/memory/gbrain");
 
-    expect(status).toEqual({ state: "unavailable", mode: "off", reason: "adapter_unavailable", doctorStatus: "unknown" });
+    expect(status).toEqual({ state: "unavailable", provider: "builtin", mode: "off", reason: "adapter_unavailable", doctorStatus: "unknown" });
     expect(runGBrainProcess).not.toHaveBeenCalled();
   });
 
-  it("does not mistake a malformed health response for an initialized local store", async () => {
-    createGBrainClient.mockReturnValue({ doctor: vi.fn(async () => []) });
+  it("does not mark the store ready until the built-in probe confirms it", async () => {
+    inspectBuiltinGBrainStore.mockReturnValue({ initialized: false });
 
     expect(await request<{ state: string; doctorStatus: string }>("/api/memory/gbrain"))
-      .toEqual({ state: "error", mode: "off", doctorStatus: "unknown" });
+      .toEqual({ state: "not_initialized", provider: "builtin", mode: "off", doctorStatus: "warnings" });
   });
 });

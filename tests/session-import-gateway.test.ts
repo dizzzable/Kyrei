@@ -89,6 +89,17 @@ describe("POST /api/import/transcript", () => {
     const seeded = sessions.sessions.find((s) => s.id === (body.sessionId || body.report.sessionId));
     expect(seeded).toBeTruthy();
     expect(seeded?.source === "import" || String(seeded?.title ?? "").includes("import")).toBe(true);
+
+    await server.close();
+    server = await startGateway({
+      dataDir,
+      preferredPort: 0,
+      engineLoader: async () => import("../core/engine/.dist/index.mjs"),
+    });
+    const afterRestart = await fetch(`http://127.0.0.1:${server.port}/api/sessions`, {
+      headers: { "X-Kyrei-Gateway-Token": server.token },
+    }).then((result) => result.json()) as { sessions: Array<{ id: string }> };
+    expect(afterRestart.sessions.some((session) => session.id === (body.sessionId || body.report.sessionId))).toBe(true);
   });
 
   it("rejects oversized payload", async () => {

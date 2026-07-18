@@ -250,7 +250,9 @@ export function Sidebar({ sessions, currentId, workingId, onSelect, onArchive, o
     } catch (error) {
       setImportNote({
         kind: "error",
-        text: t("shell.session.importFailed"),
+        text: error instanceof Error && error.message
+          ? `${t("shell.session.importFailed")}: ${error.message}`
+          : t("shell.session.importFailed"),
       });
       console.warn(t("shell.session.importFailed"), error);
     } finally {

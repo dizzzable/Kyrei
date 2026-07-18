@@ -14,6 +14,9 @@ export interface GBrainToolOptions {
   client?: GBrainClient;
   signal?: AbortSignal;
   maxModelOutputChars?: number;
+  /** Gateway-owned local directory used only by built-in Kyrei Memory. */
+  dataDir?: string;
+  sensitiveValues?: readonly string[];
 }
 
 async function resultOf(operation: string, maxChars: number | undefined, run: () => Promise<unknown>): Promise<string> {
@@ -26,7 +29,15 @@ async function resultOf(operation: string, maxChars: number | undefined, run: ()
 
 export function buildGBrainTools(config: GBrainConfig, options: GBrainToolOptions = {}): ToolSet {
   if (config.mode === "off") return {};
-  const client = options.client ?? createGBrainClient({ ...config, ...(options.signal ? { signal: options.signal } : {}) });
+  // Built-in personal memory has no safe fallback directory. Refuse to expose
+  // tools instead of accidentally creating a store relative to the process.
+  if (config.provider === "builtin" && !options.client && !options.dataDir) return {};
+  const client = options.client ?? createGBrainClient({
+    ...config,
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.dataDir ? { dataDir: options.dataDir } : {}),
+    ...(options.sensitiveValues ? { sensitiveValues: options.sensitiveValues } : {}),
+  });
   const tools: ToolSet = {
     brain_search: tool({
       description: TOOL_DESCRIPTIONS.brain_search,
@@ -41,7 +52,15 @@ export function buildGBrainTools(config: GBrainConfig, options: GBrainToolOption
       inputSchema: z.object({ slug: z.string().min(1).max(500) }),
       execute: ({ slug }) => resultOf("page read", options.maxModelOutputChars, () => client.getPage(slug)),
     }),
-    brain_think: tool({
+    brain_status: tool({
+      description: TOOL_DESCRIPTIONS.brain_status,
+      inputSchema: z.object({}),
+      execute: () => resultOf("health check", options.maxModelOutputChars, () => client.doctor()),
+    }),
+  };
+
+  if (config.provider === "external-cli") {
+    tools["brain_think"] = tool({
       description: TOOL_DESCRIPTIONS.brain_think,
       inputSchema: z.object({
         question: z.string().min(1).max(8_000),
@@ -49,13 +68,8 @@ export function buildGBrainTools(config: GBrainConfig, options: GBrainToolOption
         rounds: z.number().int().min(1).max(3).optional(),
       }),
       execute: ({ question, anchor, rounds }) => resultOf("synthesis", options.maxModelOutputChars, () => client.think(question, { anchor, rounds })),
-    }),
-    brain_status: tool({
-      description: TOOL_DESCRIPTIONS.brain_status,
-      inputSchema: z.object({}),
-      execute: () => resultOf("health check", options.maxModelOutputChars, () => client.doctor()),
-    }),
-  };
+    });
+  }
 
   if (config.mode === "read-write") {
     tools["brain_capture"] = tool({

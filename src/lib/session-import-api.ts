@@ -4,11 +4,12 @@
 
 import { gateway } from "@/lib/gateway";
 
-const MAX_IMPORT_BYTES = 32 * 1024 * 1024;
+// Gateway JSON bodies are capped at 20 MiB; base64 expands by ~4/3.
+const MAX_IMPORT_BYTES = 12 * 1024 * 1024;
 
 export type SessionImportResult = Awaited<ReturnType<typeof gateway.importTranscript>>;
 
-function bufferToBase64(buffer: ArrayBuffer): string {
+export function bufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = "";
   const chunk = 0x8000;

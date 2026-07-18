@@ -902,6 +902,53 @@ export interface MemoryIndexReindexResult {
   error?: string;
 }
 
+export type MemoryGraphGroup = "project" | "code" | "document" | "decision" | "plan" | "handoff" | "session" | "memory";
+
+export interface MemoryGraphNode {
+  id: string;
+  group: MemoryGraphGroup;
+  title: string;
+  path?: string;
+  subtitle?: string;
+  preview?: string;
+  updatedAt?: string;
+}
+
+export interface MemoryGraphEdge {
+  source: string;
+  target: string;
+  type: "imports" | "contains" | "references";
+}
+
+export interface WorkspaceMemoryGraph {
+  version: 1;
+  generatedAt: string;
+  workspace: string;
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+  stats: {
+    code: number;
+    documents: number;
+    decisions: number;
+    sessions: number;
+    edges: number;
+    truncated: boolean;
+  };
+}
+
+export interface ProjectDocumentImportResult {
+  imported: Array<{
+    fileName: string;
+    path: string;
+    relativePath: string;
+    contentHash: string;
+    bytes: number;
+    deduped: boolean;
+  }>;
+  rejected: Array<{ fileName: string; code: string }>;
+  reindex: MemoryIndexReindexResult;
+}
+
 /** Wave H: LTM decision row for Settings pin/history UI. */
 export interface LtmDecisionRow {
   id: string;
@@ -1006,14 +1053,15 @@ export interface SessionMirrorParityResult {
   message?: string;
 }
 
-/** Safe, user-facing health state for the optional local GBrain runtime. */
+/** Safe, user-facing health state for Kyrei Memory or an explicit external CLI. */
 export interface GBrainRuntimeStatus {
   state: "ready" | "not_initialized" | "unavailable" | "error";
+  provider: "builtin" | "external-cli";
   /** Current agent access setting, independent from whether the local store is healthy. */
   mode: "off" | "read" | "read-write";
   /** Compact doctor result; no raw local paths or diagnostics are exposed. */
   doctorStatus: "ok" | "warnings" | "error" | "unknown";
-  reason?: "command_unavailable" | "adapter_unavailable" | "not_initialized" | "check_failed";
+  reason?: "command_unavailable" | "adapter_unavailable" | "not_initialized" | "check_failed" | "external_setup_required";
 }
 
 export interface GBrainInitializationResult {
@@ -1028,6 +1076,7 @@ export interface McpRuntimeStatus {
   servers: Array<{
     id: string;
     command: string;
+    transport?: "stdio" | "streamable-http" | "unsupported";
     ok: boolean;
     toolCount: number;
     error?: string;

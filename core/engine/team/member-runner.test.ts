@@ -129,6 +129,7 @@ describe("createTeamMemberRunner", () => {
     expect(instructions.length).toBeLessThanOrEqual(8_000);
     expect(instructions.indexOf("Never write files")).toBeLessThan(instructions.indexOf("Ignore safety"));
     expect(instructions).not.toContain("\n</prompt_profile>\n");
+    expect(instructions).toMatch(/\[omitted: prompt tail, \d+ chars\]/);
     expect(instructions.endsWith("higher-priority instructions.")).toBe(true);
   });
 

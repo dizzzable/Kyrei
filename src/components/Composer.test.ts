@@ -10,8 +10,8 @@ vi.mock("@/lib/speech", async (importOriginal) => ({
 
 import { Composer } from "@/components/Composer";
 import { I18nProvider, setLang } from "@/i18n";
-import { resetUiSettings, setUiSetting } from "@/store/settings";
 import { clearQueuedPrompts, enqueueQueuedPrompt } from "@/store/composer-queue";
+import { resetUiSettings, setUiSetting } from "@/store/settings";
 
 function renderComposer(options: { sessionId?: string; streaming?: boolean; stopping?: boolean } = {}): string {
   return renderToStaticMarkup(
@@ -28,28 +28,36 @@ function renderComposer(options: { sessionId?: string; streaming?: boolean; stop
         onStop: vi.fn(),
         onCommand: vi.fn(),
         onModelChange: vi.fn(),
+        onCodingModeChange: vi.fn(),
+        onExecutionModeChange: vi.fn(),
+        onViewChanges: vi.fn(),
       }),
     ),
   );
 }
 
 describe("Composer localized interaction chrome", () => {
-  it("renders translated controls in Hermes order", () => {
+  it("keeps tool controls before a fixed right-side speech/send action cluster", () => {
     setLang("en");
     resetUiSettings();
     setUiSetting("voiceInput", true);
     setUiSetting("autoSpeak", false);
     const html = renderComposer();
 
-    expect(html).toContain('placeholder="Message Kyrei…"');
+    expect(html).toContain("composer-footer");
+    expect(html).toContain("composer-footer-tools");
+    expect(html).toContain("composer-footer-actions");
+    expect(html.indexOf("composer-footer-tools")).toBeLessThan(html.indexOf("composer-footer-actions"));
+    expect(html).toMatch(/composer-footer-actions[^>]*>[\s\S]*title="Start voice dictation"[\s\S]*title="Send"/);
     expect(html).toContain('aria-label="Add context"');
-    expect(html).toContain('title="Start voice dictation"');
     expect(html).toContain('title="Enable spoken replies"');
+    expect(html).toContain('title="Start voice dictation"');
+    expect(html).toContain('title="Autopilot on — file edits apply immediately (click for Supervised)"');
+    expect(html).toContain('title="View all changes / Revert all"');
+    expect(html).toContain('title="Expand editor"');
     expect(html).toContain('title="Send"');
-    expect(html.indexOf('aria-label="Add context"')).toBeLessThan(html.indexOf("GPT-5"));
-    expect(html.indexOf("GPT-5")).toBeLessThan(html.indexOf('title="Start voice dictation"'));
-    expect(html.indexOf('title="Start voice dictation"')).toBeLessThan(html.indexOf('title="Enable spoken replies"'));
-    expect(html.indexOf('title="Enable spoken replies"')).toBeLessThan(html.indexOf('title="Send"'));
+    expect(html).toContain("GPT-5");
+    expect(html).toContain(">Auto<");
   });
 
   it("switches every visible control to Russian", () => {
@@ -59,7 +67,6 @@ describe("Composer localized interaction chrome", () => {
 
     const html = renderComposer();
 
-    expect(html).toContain('placeholder="Сообщение для Kyrei…"');
     expect(html).toContain('aria-label="Добавить контекст"');
     expect(html).toContain('title="Начать голосовой ввод"');
     expect(html).toContain('title="Включить озвучивание ответов"');
@@ -86,7 +93,7 @@ describe("Composer localized interaction chrome", () => {
     setLang("en");
     const html = renderComposer({ streaming: true, stopping: true });
 
-    expect(html).toContain('aria-label="Stopping\u2026"');
+    expect(html).toContain('aria-label="Stopping…"');
     expect(html).toContain("disabled");
     expect(html).not.toContain('title="Send"');
   });

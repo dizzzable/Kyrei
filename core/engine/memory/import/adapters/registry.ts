@@ -1,14 +1,20 @@
 import type { ImportAdapter } from "../types.js";
 import { claudeCodeJsonlAdapter } from "./claude-code-jsonl.js";
+import { codexCliJsonlAdapter } from "./codex-cli-jsonl.js";
+import { agentJsonAdapter } from "./agent-json.js";
+import { hermesJsonAdapter } from "./hermes-json.js";
 import { claudeCodeMdAdapter, genericMdAdapter } from "./markdown.js";
 import { kyreiExportAdapter } from "./kyrei-export.js";
 import { opencodeJsonAdapter } from "./opencode-json.js";
 
 /** Priority order: structured first, generic last. */
 export const IMPORT_ADAPTERS: readonly ImportAdapter[] = [
+  hermesJsonAdapter,
   kyreiExportAdapter,
+  codexCliJsonlAdapter,
   opencodeJsonAdapter,
   claudeCodeJsonlAdapter,
+  agentJsonAdapter,
   claudeCodeMdAdapter,
   genericMdAdapter,
 ];

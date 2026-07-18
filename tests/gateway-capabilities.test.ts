@@ -170,6 +170,103 @@ describe("gateway operational capabilities", () => {
     await expect(response.json()).resolves.toMatchObject({ code: "prompt_skills_invalid" });
   });
 
+  it("fails open for ambient skill runtime load errors", async () => {
+    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "runtimeSkills")
+      .mockRejectedValueOnce(new Error("skill runtime unavailable"));
+    try {
+      const config = await request<{ activeProviderId: string }>("/api/config");
+      await request(`/api/providers/${config.activeProviderId}/secret`, {
+        method: "PUT",
+        body: JSON.stringify({ apiKey: "ambient-skill-credential" }),
+      });
+      await request("/api/skills", {
+        method: "POST",
+        body: JSON.stringify({ name: "ambient", content: "Ambient workflow." }),
+      });
+      const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+
+      await request("/api/prompt", {
+        method: "POST",
+        body: JSON.stringify({ session: session.id, text: "Run without explicit skill selection" }),
+      });
+
+      await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+      const options = runKyreiChat.mock.calls[0]?.[0] as {
+        skills: Array<{ id: string }>;
+        requiredSkillIds?: string[];
+      };
+      expect(options.skills).toEqual([]);
+      expect(options.requiredSkillIds).toBeUndefined();
+    } finally {
+      runtimeSkills.mockRestore();
+    }
+  });
+
+  it("blocks model execution when an explicit selected Skill cannot be materialized at runtime", async () => {
+    const runtimeSkills = vi.spyOn(SkillsStore.prototype, "runtimeSkills")
+      .mockRejectedValueOnce(Object.assign(new Error("requested skill unavailable"), { code: "runtime_skills_incomplete" }));
+    try {
+      const config = await request<{ activeProviderId: string }>("/api/config");
+      await request(`/api/providers/${config.activeProviderId}/secret`, {
+        method: "PUT",
+        body: JSON.stringify({ apiKey: "strict-skill-credential" }),
+      });
+      const selected = await request<{ skill: { id: string } }>("/api/skills", {
+        method: "POST",
+        body: JSON.stringify({ name: "selected", content: "Strict workflow." }),
+      });
+      const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+
+      await request("/api/prompt", {
+        method: "POST",
+        body: JSON.stringify({ session: session.id, text: "Must use selected skill", skillIds: [selected.skill.id] }),
+      });
+
+      await vi.waitFor(() => expect(runtimeSkills).toHaveBeenCalledTimes(1));
+      expect(runKyreiChat).not.toHaveBeenCalled();
+    } finally {
+      runtimeSkills.mockRestore();
+    }
+  });
+
+  it("forwards both exact selected ids when same-name Skills collide", async () => {
+    const config = await request<{ activeProviderId: string }>("/api/config");
+    await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ workspace }),
+    });
+    await request(`/api/providers/${config.activeProviderId}/secret`, {
+      method: "PUT",
+      body: JSON.stringify({ apiKey: "duplicate-skill-credential" }),
+    });
+    const first = await request<{ skill: { id: string } }>("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({ name: "duplicate", content: "First workflow.", rootId: "workspace" }),
+    });
+    const second = await request<{ skill: { id: string } }>("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({ name: "duplicate", content: "Second workflow." }),
+    });
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({
+        session: session.id,
+        text: "Use both exact skills",
+        skillIds: [first.skill.id, second.skill.id],
+      }),
+    });
+
+    await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+    const options = runKyreiChat.mock.calls[0]?.[0] as {
+      skills: Array<{ id: string }>;
+      requiredSkillIds?: string[];
+    };
+    expect(options.skills.map((skill) => skill.id)).toEqual([first.skill.id, second.skill.id]);
+    expect(options.requiredSkillIds).toEqual([first.skill.id, second.skill.id]);
+  });
+
   it("exposes durable Cron CRUD, pause/resume, and run history", async () => {
     const created = await request<{ job: { id: string; name: string; schedule: string; enabled: boolean; nextRunAt: string } }>("/api/cron/jobs", {
       method: "POST",

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -477,5 +477,39 @@ author: !!js/function function(){}
     expect(byChars.text.length).toBeLessThanOrEqual(250);
     expect(byChars.skills.every((skill) => skill.enabled)).toBe(true);
     expect(byChars.truncated).toBe(true);
+  });
+
+  it("fails closed when explicitly requested skills exceed the runtime char budget", async () => {
+    const store = new SkillsStore({ dataDir, workspace });
+    await store.load();
+    const one = await store.create({ name: "one", content: "A".repeat(120) });
+    const two = await store.create({ name: "two", content: "B".repeat(120) });
+
+    await expect(store.runtimeSkills({
+      ids: [one.id, two.id],
+      maxSkills: 10,
+      maxChars: 250,
+      strictRequested: true,
+    })).rejects.toMatchObject({ code: "runtime_skills_char_limit" });
+  });
+
+  it("materializes exact requested ids even when names collide", async () => {
+    const store = new SkillsStore({ dataDir, workspace });
+    await store.load();
+    const first = await store.create({ name: "duplicate", content: "FIRST", rootId: "workspace" });
+    const second = await store.create({ name: "duplicate", content: "SECOND" });
+
+    const ambient = await store.runtimeSkills({ maxSkills: 10, maxChars: 10_000 });
+    expect(ambient.skills.filter((skill) => skill.name === "duplicate")).toHaveLength(1);
+
+    const exact = await store.runtimeSkills({
+      ids: [first.id, second.id],
+      maxSkills: 10,
+      maxChars: 10_000,
+      strictRequested: true,
+    });
+    expect(exact.skills.map((skill) => skill.id)).toEqual([first.id, second.id]);
+    expect(exact.skills[0]?.content).toContain("FIRST");
+    expect(exact.skills[1]?.content).toContain("SECOND");
   });
 });

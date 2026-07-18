@@ -1230,8 +1230,15 @@ function isPlainRecord(value) {
 function configuredGBrainRuntime(engineConfig) {
   const memory = isPlainRecord(engineConfig?.memory) ? engineConfig.memory : {};
   const raw = isPlainRecord(memory.gbrain) ? memory.gbrain : {};
+  // Keep legacy custom commands external even before the engine config is
+  // next saved/migrated. The old implicit `gbrain` default becomes built-in.
+  const legacyCommand = typeof raw.command === "string" ? raw.command.trim() : "";
+  const provider = raw.provider === "external-cli"
+    || (raw.provider == null && legacyCommand && legacyCommand !== "gbrain")
+    ? "external-cli"
+    : "builtin";
   const mode = raw.mode === "read" || raw.mode === "read-write" ? raw.mode : "off";
-  const command = typeof raw.command === "string" && raw.command.trim() && raw.command.trim().length <= 1_024
+  const command = provider === "external-cli" && typeof raw.command === "string" && raw.command.trim() && raw.command.trim().length <= 1_024
     ? raw.command.trim()
     : "gbrain";
   const source = typeof raw.source === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(raw.source.trim())
@@ -1243,7 +1250,7 @@ function configuredGBrainRuntime(engineConfig) {
   const maxOutputBytes = Number.isSafeInteger(raw.maxOutputBytes) && raw.maxOutputBytes >= 1_000 && raw.maxOutputBytes <= 5_000_000
     ? raw.maxOutputBytes
     : 200_000;
-  return { mode, command, ...(source ? { source } : {}), timeoutMs, maxOutputBytes };
+  return { provider, mode, ...(provider === "external-cli" ? { command } : {}), ...(source ? { source } : {}), timeoutMs, maxOutputBytes };
 }
 
 function gbrainDoctorState(doctor) {
@@ -1257,7 +1264,7 @@ function gbrainDoctorState(doctor) {
   // environment-specific paths. The UI only needs a truthful, compact state.
   let summary = "";
   try { summary = JSON.stringify(doctor).slice(0, 20_000); } catch { /* malformed result is handled below */ }
-  if (/\b(?:not initialized|no database configured|database (?:is )?(?:missing|not configured)|run\s+gbrain\s+init)\b/i.test(summary)) {
+  if (/\b(?:not initialized|no database configured|database (?:is )?(?:missing|not configured)|run\s+gbrain\s+init|Kyrei Memory local store is not initialized)\b/i.test(summary)) {
     return { state: "not_initialized", doctorStatus: status };
   }
   if (status === "error" || !summary) return { state: "error", doctorStatus: status };
@@ -1269,7 +1276,7 @@ function gbrainFailureState(error) {
   if (/\b(?:could not start|enoent|not found|spawn)\b/i.test(message)) {
     return { state: "unavailable", reason: "command_unavailable" };
   }
-  if (/\b(?:not initialized|no database|database (?:is )?(?:missing|not configured)|run\s+gbrain\s+init)\b/i.test(message)) {
+  if (/\b(?:not initialized|no database|database (?:is )?(?:missing|not configured)|run\s+gbrain\s+init|Kyrei Memory local store is not initialized)\b/i.test(message)) {
     return { state: "not_initialized", reason: "not_initialized" };
   }
   return { state: "error", reason: "check_failed" };
@@ -1374,6 +1381,29 @@ function validateEngineConfigBoundary(value) {
   // Lightweight memory.index boundary: keep invalid backends from reaching the engine.
   if (Object.hasOwn(value, "memory") && value.memory && typeof value.memory === "object" && !Array.isArray(value.memory)) {
     const memory = { ...value.memory };
+    if (Object.hasOwn(memory, "gbrain") && memory.gbrain && typeof memory.gbrain === "object" && !Array.isArray(memory.gbrain)) {
+      const gbrain = { ...memory.gbrain };
+      if (Object.hasOwn(gbrain, "provider") && !new Set(["builtin", "external-cli"]).has(gbrain.provider)) {
+        throw new TypeError("engine_memory_gbrain_provider_invalid");
+      }
+      if (Object.hasOwn(gbrain, "mode") && !new Set(["off", "read", "read-write"]).has(gbrain.mode)) {
+        throw new TypeError("engine_memory_gbrain_mode_invalid");
+      }
+      if (Object.hasOwn(gbrain, "command") && (
+        typeof gbrain.command !== "string"
+        || !gbrain.command.trim()
+        || gbrain.command.length > 1_024
+        || gbrain.command.includes("\0")
+      )) {
+        throw new TypeError("engine_memory_gbrain_command_invalid");
+      }
+      if (Object.hasOwn(gbrain, "source") && gbrain.source != null && (
+        typeof gbrain.source !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(gbrain.source.trim())
+      )) {
+        throw new TypeError("engine_memory_gbrain_source_invalid");
+      }
+      memory.gbrain = gbrain;
+    }
     if (Object.hasOwn(memory, "index") && memory.index && typeof memory.index === "object" && !Array.isArray(memory.index)) {
       const index = { ...memory.index };
       if (Object.hasOwn(index, "enabled") && typeof index.enabled !== "boolean") {
@@ -2687,9 +2717,9 @@ export async function startGateway({
     return ids;
   }
 
-  function runtimeSkillsForPrompt(skillIds) {
+  function runtimeSkillsForPrompt(skillIds, { strictRequested = false } = {}) {
     return skillIds?.length
-      ? skillsStore.runtimeSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS })
+      ? skillsStore.runtimeSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS, strictRequested })
       : skillsStore.runtimeSkills();
   }
 
@@ -2925,7 +2955,7 @@ export async function startGateway({
     const gbrain = typeof command === "string" && command.trim() && command.length <= 1_024
       ? { ...configured, command: command.trim() }
       : configured;
-    const key = `${gbrain.command}|${gbrain.timeoutMs}|${gbrain.maxOutputBytes}`;
+    const key = `${gbrain.provider}|${gbrain.command ?? ""}|${gbrain.timeoutMs}|${gbrain.maxOutputBytes}`;
     const now = Date.now();
     if (!force && gbrainHealthCache.key === key && gbrainHealthCache.value && now - gbrainHealthCache.at < 5_000) {
       return gbrainHealthCache.value;
@@ -2938,10 +2968,26 @@ export async function startGateway({
       try {
         mod = await getEngine();
       } catch {
-        return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+        return { state: "unavailable", provider: gbrain.provider, mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+      }
+      if (gbrain.provider === "builtin") {
+        if (typeof mod?.inspectBuiltinGBrainStore !== "function") {
+          return { state: "unavailable", provider: gbrain.provider, mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+        }
+        try {
+          const inspected = mod.inspectBuiltinGBrainStore(join(dataDir, "memory"));
+          return {
+            state: inspected.initialized ? "ready" : "not_initialized",
+            provider: gbrain.provider,
+            mode: gbrain.mode,
+            doctorStatus: inspected.initialized ? "ok" : "warnings",
+          };
+        } catch {
+          return { state: "error", provider: gbrain.provider, mode: gbrain.mode, reason: "check_failed", doctorStatus: "unknown" };
+        }
       }
       if (typeof mod?.createGBrainClient !== "function") {
-        return { state: "unavailable", mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
+        return { state: "unavailable", provider: gbrain.provider, mode: gbrain.mode, reason: "adapter_unavailable", doctorStatus: "unknown" };
       }
       try {
         // Source scoping is an agent-search preference. A health check must not
@@ -2953,9 +2999,9 @@ export async function startGateway({
           maxOutputBytes: gbrain.maxOutputBytes,
         });
         const doctor = await client.doctor();
-        return { ...gbrainDoctorState(doctor), mode: gbrain.mode };
+        return { ...gbrainDoctorState(doctor), provider: gbrain.provider, mode: gbrain.mode };
       } catch (error) {
-        return { ...gbrainFailureState(error), mode: gbrain.mode, doctorStatus: "unknown" };
+        return { ...gbrainFailureState(error), provider: gbrain.provider, mode: gbrain.mode, doctorStatus: "unknown" };
       }
     })();
     gbrainHealthCache.key = key;
@@ -3033,10 +3079,28 @@ export async function startGateway({
       const snapshot = await persistGBrainConfig({ mode: "read" });
       return { status: { ...before, mode: "read" }, config: snapshot };
     }
+    const gbrain = configuredGBrainRuntime(config.engine);
+    if (gbrain.provider === "builtin") {
+      let mod;
+      try {
+        mod = await getEngine();
+      } catch {
+        throw gbrainGatewayError("gbrain_adapter_unavailable");
+      }
+      if (typeof mod?.initializeBuiltinGBrainStore !== "function") throw gbrainGatewayError("gbrain_adapter_unavailable");
+      try {
+        await mod.initializeBuiltinGBrainStore(join(dataDir, "memory"));
+      } catch {
+        throw gbrainGatewayError("gbrain_initialization_failed");
+      }
+      const after = await inspectGBrain({ force: true });
+      if (after.state !== "ready") throw gbrainGatewayError("gbrain_initialization_unverified");
+      const snapshot = await persistGBrainConfig({ provider: "builtin", mode: "read" });
+      return { status: { ...after, mode: "read" }, config: snapshot };
+    }
     if (before.state === "unavailable") throw gbrainGatewayError("gbrain_command_unavailable");
     if (before.state !== "not_initialized") throw gbrainGatewayError("gbrain_initialization_unavailable");
 
-    const gbrain = configuredGBrainRuntime(config.engine);
     let mod;
     try {
       mod = await getEngine();
@@ -3069,56 +3133,13 @@ export async function startGateway({
    * app starts or merely checks status.
    */
   const installAndInitializeGBrain = async () => {
+    const gbrain = configuredGBrainRuntime(config.engine);
+    // Kept as a backwards-compatible endpoint for older clients. For the
+    // built-in provider it provisions locally; it never downloads software.
+    if (gbrain.provider === "builtin") return initializeGBrain();
     const before = await inspectGBrain({ force: true });
     if (before.state === "ready" || before.state === "not_initialized") return initializeGBrain();
-    if (before.state !== "unavailable" || before.reason !== "command_unavailable") {
-      throw gbrainGatewayError("gbrain_install_unverified");
-    }
-
-    const gbrain = configuredGBrainRuntime(config.engine);
-    let mod;
-    try {
-      mod = await getEngine();
-    } catch {
-      throw gbrainGatewayError("gbrain_adapter_unavailable");
-    }
-    if (typeof mod?.runGBrainProcess !== "function") throw gbrainGatewayError("gbrain_adapter_unavailable");
-    const options = {
-      signal: shutdownController.signal,
-      timeoutMs: Math.min(Math.max(gbrain.timeoutMs, 60_000), 600_000),
-      maxOutputBytes: Math.max(gbrain.maxOutputBytes, 1_000_000),
-    };
-    try {
-      await mod.runGBrainProcess("bun", ["--version"], options);
-    } catch {
-      throw gbrainGatewayError("gbrain_bun_unavailable");
-    }
-    try {
-      await mod.runGBrainProcess("bun", ["install", "-g", "github:garrytan/gbrain"], options);
-    } catch {
-      throw gbrainGatewayError("gbrain_install_failed");
-    }
-
-    // Bun's global bin directory is the durable way to reach the executable
-    // from an Electron process whose PATH was inherited before installation.
-    let globalBin;
-    try {
-      const output = await mod.runGBrainProcess("bun", ["pm", "bin", "-g"], options);
-      globalBin = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) ?? "";
-    } catch {
-      throw gbrainGatewayError("gbrain_global_bin_invalid");
-    }
-    if (!globalBin || globalBin.length > 1_024 || globalBin.includes("\0") || !isAbsolute(globalBin)) {
-      throw gbrainGatewayError("gbrain_global_bin_invalid");
-    }
-    const command = join(globalBin, process.platform === "win32" ? "gbrain.exe" : "gbrain");
-    await persistGBrainConfig({ command });
-
-    const installed = await inspectGBrain({ force: true });
-    if (installed.state !== "ready" && installed.state !== "not_initialized") {
-      throw gbrainGatewayError("gbrain_install_unverified");
-    }
-    return initializeGBrain();
+    throw gbrainGatewayError("gbrain_external_setup_required");
   };
 
   /** Built-in project memory index (FTS + lexical vectors). Never replaces file SoT. */
@@ -3246,8 +3267,8 @@ export async function startGateway({
   };
 
   /** Chat JSON store stays SoT; project a search-friendly corpus into the index. */
-  const collectSessionsForMemoryIndex = (maxSessions = 40) => {
-    const sessions = Array.isArray(store.sessions) ? store.sessions.slice(0, maxSessions) : [];
+  const collectSessionsForMemoryIndex = () => {
+    const sessions = Array.isArray(store.sessions) ? store.sessions : [];
     return sessions.map((session) => ({
       id: session.id,
       title: typeof session.title === "string" ? session.title : "",
@@ -3287,7 +3308,7 @@ export async function startGateway({
     } catch {
       return;
     }
-    if (typeof mod?.createStores !== "function" || typeof mod?.projectSessionsIntoMemory !== "function") return;
+    if (typeof mod?.openMemoryIndex !== "function" || typeof mod?.projectSessionsIntoMemory !== "function") return;
     const sessions = sessionIds
       .map((id) => {
         const session = store.getSession(id);
@@ -3306,9 +3327,11 @@ export async function startGateway({
       })
       .filter(Boolean);
     if (!sessions.length) return;
-    let stores;
+    let index;
     try {
-      stores = mod.createStores(join(workspace, ".kyrei", "index"));
+      index = await mod.openMemoryIndex(workspace, builtinMemoryIndexConfig());
+      const stores = index?.stores;
+      if (!stores) return;
       await mod.projectSessionsIntoMemory(sessions, {
         workspace,
         memory: stores.memory,
@@ -3320,7 +3343,7 @@ export async function startGateway({
       /* fail-open projection */
     } finally {
       try {
-        await stores?.close?.();
+        await index?.stores?.close?.();
       } catch {
         /* ignore */
       }
@@ -3373,7 +3396,7 @@ export async function startGateway({
       config: builtinMemoryIndexConfig(),
       ltmEnabled: memory.ltm?.enabled !== false,
       planningEnabled: planning.enabled !== false,
-      sessions: collectSessionsForMemoryIndex(40),
+      sessions: collectSessionsForMemoryIndex(),
       sensitiveValues: runtimeSensitiveValues(),
       ...(isPlainRecord(memory.vault) ? { vault: memory.vault } : {}),
       refreshProjectIndex,
@@ -4521,6 +4544,7 @@ export async function startGateway({
     return skillsStore.runtimeSkills({
       ids: teamProfileSkillIds(profile),
       maxSkills: MAX_TEAM_PROFILE_SKILLS,
+      strictRequested: true,
     });
   }
 
@@ -5576,10 +5600,24 @@ export async function startGateway({
 
     try {
       const activeTeamProfile = activeOrchestrationProfile(config);
-      const runtimeSkills = await (activeTeamProfile
-        ? runtimeSkillsForTeamProfile(activeTeamProfile)
-        : runtimeSkillsForPrompt(skillIds)
-      ).catch(() => ({ skills: [] }));
+      const explicitPromptSkills = Boolean(skillIds?.length && !activeTeamProfile);
+      let runtimeSkills;
+      if (activeTeamProfile) {
+        runtimeSkills = await runtimeSkillsForTeamProfile(activeTeamProfile);
+      } else if (explicitPromptSkills) {
+        try {
+          runtimeSkills = await runtimeSkillsForPrompt(skillIds, { strictRequested: true });
+        } catch (error) {
+          const code = error?.code === "runtime_skills_char_limit"
+            ? "prompt_skills_runtime_budget_exceeded"
+            : "prompt_skills_runtime_unavailable";
+          emitActiveTurnEvent(turn, { type: "error", payload: { code } });
+          await finalizeActiveTurn(turn, { status: "error" });
+          return { status: "error", sessionId, error: code };
+        }
+      } else {
+        runtimeSkills = await runtimeSkillsForPrompt(skillIds).catch(() => ({ skills: [] }));
+      }
       throwIfAborted(controller.signal);
       const workerProvider = workerRuntimeTarget(sessionId);
       // Capacity chain: all accounts for primary model, then same-family models
@@ -6819,6 +6857,59 @@ export async function startGateway({
         return sendJson(res, 200, await reindexBuiltinMemoryIndex({ refreshProjectIndex: true }));
       }
 
+      if (path === "/api/memory/graph" && req.method === "GET") {
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) return sendJson(res, 400, { code: "workspace_not_configured", error: "workspace_not_configured" });
+        try {
+          const mod = await getEngine();
+          if (typeof mod?.getWorkspaceMemoryGraph !== "function") {
+            return sendJson(res, 503, { code: "memory_graph_unavailable", error: "memory_graph_unavailable" });
+          }
+          return sendJson(res, 200, await mod.getWorkspaceMemoryGraph({
+            workspace,
+            config: builtinMemoryIndexConfig(),
+          }));
+        } catch (error) {
+          return sendJson(res, 500, {
+            code: "memory_graph_failed",
+            error: error?.message ?? "memory_graph_failed",
+          });
+        }
+      }
+
+      if (path === "/api/memory/documents/import" && req.method === "POST") {
+        assertGatewayAcceptingMutations();
+        const workspace = typeof config.workspace === "string" ? config.workspace.trim() : "";
+        if (!workspace) return sendJson(res, 400, { code: "workspace_not_configured", error: "workspace_not_configured" });
+        const body = await readBody(req);
+        const files = Array.isArray(body?.files) ? body.files.slice(0, 24) : [];
+        if (!files.length) return sendJson(res, 400, { code: "documents_required", error: "documents_required" });
+        const decoded = [];
+        for (const file of files) {
+          if (!file || typeof file !== "object") continue;
+          const fileName = typeof file.fileName === "string" ? file.fileName.slice(0, 260) : "";
+          const encoded = typeof file.contentBase64 === "string" ? file.contentBase64 : "";
+          if (!fileName || !encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) continue;
+          decoded.push({ fileName, bytes: new Uint8Array(Buffer.from(encoded, "base64")) });
+        }
+        if (!decoded.length) return sendJson(res, 400, { code: "documents_invalid", error: "documents_invalid" });
+        try {
+          const mod = await getEngine();
+          if (typeof mod?.importProjectDocuments !== "function") {
+            return sendJson(res, 503, { code: "document_import_unavailable", error: "document_import_unavailable" });
+          }
+          const result = await mod.importProjectDocuments({ workspace, files: decoded });
+          if (!result.imported.length) return sendJson(res, 422, result);
+          const reindex = await reindexBuiltinMemoryIndex({ refreshProjectIndex: true });
+          return sendJson(res, 200, { ...result, reindex });
+        } catch (error) {
+          return sendJson(res, 500, {
+            code: "document_import_failed",
+            error: error?.message ?? "document_import_failed",
+          });
+        }
+      }
+
       // Rebuild LTM runtime projection (files/ledger remain SoT).
       // Curate one session into notes / MEMORY / LTM / handoff catalogs.
       const curateMatch = path.match(/^\/api\/sessions\/([^/]+)\/curate-memory$/);
@@ -7177,7 +7268,10 @@ export async function startGateway({
         try {
           const mirror = await ensureSessionMirror();
           if (!mirror) return sendJson(res, 503, { code: "mirror_unavailable", error: "mirror_unavailable" });
-          const sessions = Array.isArray(store.sessions) ? store.sessions.slice(0, 80) : [];
+          // This is an explicit full sync. Do not claim completion after an
+          // arbitrary prefix: every JSON source-of-truth session must reach
+          // the mirror before the request succeeds.
+          const sessions = Array.isArray(store.sessions) ? store.sessions : [];
           let messages = 0;
           for (const session of sessions) {
             const list = store.getMessages(session.id);
@@ -7217,7 +7311,7 @@ export async function startGateway({
             ok: true,
             sessions: sessions.length,
             messages,
-            note: "Full resync from JSON chat SoT into engine SessionStore mirror.",
+            note: "Completed full resync from JSON chat SoT into engine SessionStore mirror.",
           });
         } catch (error) {
           return sendJson(res, 500, { code: "mirror_sync_failed", error: error?.message ?? "mirror_sync_failed" });
@@ -8811,6 +8905,11 @@ export async function startGateway({
                     title: session.title || title,
                     updatedAt: new Date().toISOString(),
                   });
+                  await store.flush();
+                  const committed = await commitSessionToEngine(session.id);
+                  if (!committed.ok && sessionMirrorEnginePrimary()) {
+                    throw new Error(committed.error ?? "engine_mirror_write_failed");
+                  }
                   return { sessionId: session.id };
                 }
                 : undefined,

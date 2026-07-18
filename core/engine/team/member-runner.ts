@@ -64,6 +64,21 @@ function compact(value: string, max: number): string {
   return value.replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function clipWithOmissionMarker(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  let omitted = Math.max(1, value.length - maxChars);
+  let marker = "";
+  let keepChars = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    marker = `\n\n[omitted: prompt tail, ${omitted} chars]`;
+    keepChars = Math.max(0, maxChars - marker.length);
+    omitted = value.length - keepChars;
+  }
+  marker = `\n\n[omitted: prompt tail, ${omitted} chars]`;
+  keepChars = Math.max(0, maxChars - marker.length);
+  return `${value.slice(0, keepChars)}${marker}`;
+}
+
 function list(value: unknown, maxItems = 40): string[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, maxItems).flatMap((item) => {
@@ -315,7 +330,7 @@ export function buildTeamMemberInstructions(options: Pick<
       : []),
   ].filter(Boolean).join("\n\n");
   const bodyLimit = Math.max(0, budget - immutableFooter.length - 2);
-  return `${body.slice(0, bodyLimit)}\n\n${immutableFooter}`;
+  return `${clipWithOmissionMarker(body, bodyLimit)}\n\n${immutableFooter}`;
 }
 
 function taskPrompt(context: TeamTaskExecutionContext, maxChars: number): string {

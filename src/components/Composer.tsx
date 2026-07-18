@@ -420,6 +420,43 @@ export function Composer({
     addSnippet(title, text);
   };
 
+  const sendControls = busy ? (
+    <div className="composer-send-cluster">
+      {(value.trim() || attachments.length > 0) && (
+        <button
+          onClick={submit}
+          className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px"
+          title={t("chat.composer.queue")}
+          aria-label={t("chat.composer.queue")}
+        >
+          <ArrowUp size={16} />
+        </button>
+      )}
+      <button
+        onClick={onStop}
+        disabled={stopping}
+        className="grid size-8 place-items-center rounded-[8px] bg-danger text-white transition-colors hover:brightness-110"
+        title={stopping ? t("chat.composer.stopping") : t("chat.composer.stop")}
+        aria-label={stopping ? t("chat.composer.stopping") : t("chat.composer.stop")}
+        aria-busy={stopping}
+      >
+        <Square size={13} fill="currentColor" />
+      </button>
+    </div>
+  ) : (
+    <div className="composer-send-cluster">
+      <button
+        onClick={submit}
+        disabled={!value.trim() && attachments.length === 0}
+        className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px disabled:translate-y-0 disabled:opacity-30"
+        title={t("chat.composer.send")}
+        aria-label={t("chat.composer.send")}
+      >
+        <ArrowUp size={16} />
+      </button>
+    </div>
+  );
+
   const pickSuggestion = (index: number) => {
     const c = suggestions[index];
     if (!c) return;
@@ -560,10 +597,7 @@ export function Composer({
           </div>
         )}
 
-        <div className={cn(
-          "composer-card rounded-[10px] border border-border-soft px-2.5 py-2 transition-all focus-within:border-(--ui-composer-focus)",
-          (expanded || value.includes("\n") || attachments.length > 0) && "is-stacked",
-        )}>
+        <div className="composer-card rounded-[10px] border border-border-soft px-2.5 py-2 transition-all focus-within:border-(--ui-composer-focus)">
           {attachments.length > 0 && (
             <ul className="mb-1.5 flex flex-wrap gap-1.5">
               {attachments.map((item) => (
@@ -610,239 +644,208 @@ export function Composer({
               expanded ? "min-h-[40vh] max-h-[55vh]" : "min-h-[24px] max-h-[220px]",
             )}
           />
-          <div className="composer-controls">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                   className="composer-tool grid size-7 place-items-center rounded-md text-muted transition-colors hover:text-foreground data-[state=open]:bg-(--ui-row-active) data-[state=open]:text-foreground"
-                  title={t("chat.composer.addContext")}
-                  aria-label={t("chat.composer.addContext")}
-                >
-                  <Plus size={16} />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" side="top" className="w-64">
-                <DropdownMenuLabel>{t("chat.composer.attach")}</DropdownMenuLabel>
-                <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker(); }}>
-                  <FileText size={15} /> {t("chat.composer.attachFiles")}
-                </DropdownMenuItem>
-                <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ dir: true }); }}>
-                  <Folder size={15} /> {t("chat.composer.attachFolder")}
-                </DropdownMenuItem>
-                <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ accept: "image/*", images: true }); }}>
-                  <ImageIcon size={15} /> {t("chat.composer.attachImages")}
-                </DropdownMenuItem>
-                <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); void pasteFromClipboard(); }}>
-                  <Clipboard size={15} /> {t("chat.composer.pasteClipboard")}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className={dropdownMenuRow}>
-                    <MessageSquareText size={15} /> {t("chat.snippets.menu")}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-60">
-                    {snippets.length === 0 ? (
-                      <div className="px-2 py-1.5 text-[12px] text-muted">{t("chat.snippets.empty")}</div>
-                    ) : (
-                      snippets.map((s) => (
-                        <DropdownMenuItem key={s.id} className={dropdownMenuRow} onSelect={() => insertText(s.text)}>
-                          <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                        </DropdownMenuItem>
-                      ))
-                    )}
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem className={cn(dropdownMenuRow, "text-muted")} disabled={!value.trim()} onSelect={(e) => { e.preventDefault(); saveSnippet(); }}>
-                      <Plus size={14} /> {t("chat.snippets.saveCurrent")}
-                    </DropdownMenuItem>
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-                <DropdownMenuSeparator />
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger className={dropdownMenuRow}>
-                    <Puzzle size={15} /> {t("chat.composer.skills.menu")}
-                    {selectedSkillIds.length > 0 && (
-                      <span className="ml-auto rounded bg-(--ui-row-active) px-1.5 py-0.5 text-[10px] tabular-nums text-secondary">
-                        {selectedSkillIds.length}
-                      </span>
-                    )}
-                  </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-72">
-                    {!skillsSelectable ? (
-                      <div className="px-2 py-1.5 text-[12px] leading-snug text-muted">
-                        {t("chat.composer.skills.teamManaged")}
-                      </div>
-                    ) : enabledSkills.length === 0 ? (
-                      <div className="px-2 py-1.5 text-[12px] leading-snug text-muted">
-                        {t("chat.composer.skills.empty")}
-                      </div>
-                    ) : (
-                      enabledSkills.map((skill) => {
-                        const selected = selectedSkillIds.includes(skill.id);
-                        return (
-                          <DropdownMenuItem
-                            key={skill.id}
-                            className={dropdownMenuRow}
-                            disabled={!selected && selectedSkillIds.length >= MAX_SELECTED_SKILLS}
-                            onSelect={(event) => { event.preventDefault(); toggleSkill(skill.id); }}
-                          >
-                            <Check size={14} className={cn("shrink-0", selected ? "opacity-100 text-primary" : "opacity-0")} />
-                            <span className="min-w-0 flex-1 truncate">{skill.name}</span>
-                            {skill.description && <span className="max-w-28 truncate text-[10px] text-muted">{skill.description}</span>}
-                          </DropdownMenuItem>
-                        );
-                      })
-                    )}
-                    {skillsSelectable && enabledSkills.length > 0 && (
-                      <>
-                        <DropdownMenuSeparator />
-                        <div className="px-2 py-1.5 text-[11px] leading-snug text-muted">
-                          {t("chat.composer.skills.hint")}
-                        </div>
-                      </>
-                    )}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-                {selectedSkillIds.length > 0 && (
-                  <DropdownMenuItem className={cn(dropdownMenuRow, "text-muted")} onSelect={() => setSelectedSkillIds([])}>
-                    <X size={14} /> {t("chat.composer.skills.clear")}
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuSeparator />
-                <div className="px-2 py-1 text-[11px] leading-snug text-muted">
-                  {t("chat.composer.contextHint")}
-                </div>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            {selectedSkillIds.length > 0 && (
-              <button
-                onClick={() => setSelectedSkillIds([])}
-                className="flex h-7 items-center gap-1 rounded-md bg-(--ui-row-active) px-1.5 text-[11px] text-secondary transition-colors hover:text-foreground"
-                title={t("chat.composer.skills.clear")}
-                aria-label={t("chat.composer.skills.clear")}
-              >
-                <Puzzle size={13} /> <span className="tabular-nums">{selectedSkillIds.length}</span>
-              </button>
-            )}
-            <ModelPill disabled={disabled} model={model} provider={provider} providers={providers} onModelChange={onModelChange} />
-            {onCodingModeChange && (
-              <ModePill
-                mode={codingMode}
-                disabled={disabled}
-                onChange={onCodingModeChange}
-              />
-            )}
-            {onExecutionModeChange && (
-              <button
-                type="button"
-                onClick={() => onExecutionModeChange(executionMode === "autopilot" ? "supervised" : "autopilot")}
-                className={cn(
-                  "grid size-7 place-items-center rounded-md transition-colors",
-                  executionMode === "autopilot"
-                    ? "bg-primary/15 text-primary"
-                    : "bg-(--ui-row-active) text-foreground",
-                )}
-                title={
-                  executionMode === "autopilot"
-                    ? t("chat.composer.autopilotOn")
-                    : t("chat.composer.supervisedOn")
-                }
-                aria-label={
-                  executionMode === "autopilot"
-                    ? t("chat.composer.autopilotOn")
-                    : t("chat.composer.supervisedOn")
-                }
-                aria-pressed={executionMode === "autopilot"}
-              >
-                {executionMode === "autopilot" ? <Bot size={14} /> : <ShieldCheck size={14} />}
-              </button>
-            )}
-            {onViewChanges && (
-              <button
-                type="button"
-                onClick={onViewChanges}
-                disabled={disabled}
-                className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground disabled:opacity-40"
-                title={t("chat.composer.viewChanges")}
-                aria-label={t("chat.composer.viewChanges")}
-              >
-                <History size={14} />
-              </button>
-            )}
-            <button
-              onClick={() => setExpanded((v) => !v)}
-              className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground"
-              title={expanded ? t("chat.composer.collapse") : t("chat.composer.expand")}
-              aria-label={expanded ? t("chat.composer.collapse") : t("chat.composer.expand")}
-            >
-              {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            </button>
-            {voiceInput && micSupported && (
-              <button
-                onClick={toggleDictation}
-                className={cn(
-                  "grid size-7 place-items-center rounded-md transition-colors",
-                  listening
-                    ? "animate-pulse bg-danger/20 text-danger"
-                    : "text-muted hover:bg-(--ui-row-hover) hover:text-foreground",
-                )}
-                title={listening ? t("chat.composer.stopDictation") : t("chat.composer.startDictation")}
-                aria-label={listening ? t("chat.composer.stopDictation") : t("chat.composer.startDictation")}
-                aria-pressed={listening}
-              >
-                <Mic size={14} />
-              </button>
-            )}
-            {speechSupported && (
-              <button
-                onClick={() => setUiSetting("autoSpeak", !autoSpeak)}
-                className={cn(
-                  "grid size-7 place-items-center rounded-md transition-colors",
-                  autoSpeak
-                    ? "bg-(--ui-row-active) text-foreground"
-                    : "text-muted hover:bg-(--ui-row-hover) hover:text-foreground",
-                )}
-                title={autoSpeak ? t("chat.composer.disableSpeech") : t("chat.composer.enableSpeech")}
-                aria-label={autoSpeak ? t("chat.composer.disableSpeech") : t("chat.composer.enableSpeech")}
-                aria-pressed={autoSpeak}
-              >
-                {autoSpeak ? <Volume2 size={14} /> : <VolumeX size={14} />}
-              </button>
-            )}
-            <div className="ml-auto">
-              {busy ? (
-                <div className="flex items-center gap-1">
-                  {(value.trim() || attachments.length > 0) && (
-                    <button
-                      onClick={submit}
-                      className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px"
-                      title={t("chat.composer.queue")}
-                      aria-label={t("chat.composer.queue")}
-                    >
-                      <ArrowUp size={16} />
-                    </button>
-                  )}
+          <div className="composer-footer">
+            <div className="composer-footer-tools">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
                   <button
-                    onClick={onStop}
-                    disabled={stopping}
-                    className="grid size-8 place-items-center rounded-[8px] bg-danger text-white transition-colors hover:brightness-110"
-                    title={stopping ? t("chat.composer.stopping") : t("chat.composer.stop")}
-                    aria-label={stopping ? t("chat.composer.stopping") : t("chat.composer.stop")}
-                    aria-busy={stopping}
+                    className="composer-tool composer-context-trigger grid size-7 place-items-center rounded-md text-muted transition-colors hover:text-foreground data-[state=open]:bg-(--ui-row-active) data-[state=open]:text-foreground"
+                    title={t("chat.composer.addContext")}
+                    aria-label={t("chat.composer.addContext")}
                   >
-                    <Square size={13} fill="currentColor" />
+                    <Plus size={16} />
                   </button>
-                </div>
-              ) : (
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" side="top" className="w-64">
+                  <DropdownMenuLabel>{t("chat.composer.attach")}</DropdownMenuLabel>
+                  <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker(); }}>
+                    <FileText size={15} /> {t("chat.composer.attachFiles")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ dir: true }); }}>
+                    <Folder size={15} /> {t("chat.composer.attachFolder")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); openPicker({ accept: "image/*", images: true }); }}>
+                    <ImageIcon size={15} /> {t("chat.composer.attachImages")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className={dropdownMenuRow} onSelect={(e) => { e.preventDefault(); void pasteFromClipboard(); }}>
+                    <Clipboard size={15} /> {t("chat.composer.pasteClipboard")}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger className={dropdownMenuRow}>
+                      <MessageSquareText size={15} /> {t("chat.snippets.menu")}
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="w-60">
+                      {snippets.length === 0 ? (
+                        <div className="px-2 py-1.5 text-[12px] text-muted">{t("chat.snippets.empty")}</div>
+                      ) : (
+                        snippets.map((s) => (
+                          <DropdownMenuItem key={s.id} className={dropdownMenuRow} onSelect={() => insertText(s.text)}>
+                            <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                          </DropdownMenuItem>
+                        ))
+                      )}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem className={cn(dropdownMenuRow, "text-muted")} disabled={!value.trim()} onSelect={(e) => { e.preventDefault(); saveSnippet(); }}>
+                        <Plus size={14} /> {t("chat.snippets.saveCurrent")}
+                      </DropdownMenuItem>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger className={dropdownMenuRow}>
+                      <Puzzle size={15} /> {t("chat.composer.skills.menu")}
+                      {selectedSkillIds.length > 0 && (
+                        <span className="ml-auto rounded bg-(--ui-row-active) px-1.5 py-0.5 text-[10px] tabular-nums text-secondary">
+                          {selectedSkillIds.length}
+                        </span>
+                      )}
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent className="w-72">
+                      {!skillsSelectable ? (
+                        <div className="px-2 py-1.5 text-[12px] leading-snug text-muted">
+                          {t("chat.composer.skills.teamManaged")}
+                        </div>
+                      ) : enabledSkills.length === 0 ? (
+                        <div className="px-2 py-1.5 text-[12px] leading-snug text-muted">
+                          {t("chat.composer.skills.empty")}
+                        </div>
+                      ) : (
+                        enabledSkills.map((skill) => {
+                          const selected = selectedSkillIds.includes(skill.id);
+                          return (
+                            <DropdownMenuItem
+                              key={skill.id}
+                              className={dropdownMenuRow}
+                              disabled={!selected && selectedSkillIds.length >= MAX_SELECTED_SKILLS}
+                              onSelect={(event) => { event.preventDefault(); toggleSkill(skill.id); }}
+                            >
+                              <Check size={14} className={cn("shrink-0", selected ? "opacity-100 text-primary" : "opacity-0")} />
+                              <span className="min-w-0 flex-1 truncate">{skill.name}</span>
+                              {skill.description && <span className="max-w-28 truncate text-[10px] text-muted">{skill.description}</span>}
+                            </DropdownMenuItem>
+                          );
+                        })
+                      )}
+                      {skillsSelectable && enabledSkills.length > 0 && (
+                        <>
+                          <DropdownMenuSeparator />
+                          <div className="px-2 py-1.5 text-[11px] leading-snug text-muted">
+                            {t("chat.composer.skills.hint")}
+                          </div>
+                        </>
+                      )}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  {selectedSkillIds.length > 0 && (
+                    <DropdownMenuItem className={cn(dropdownMenuRow, "text-muted")} onSelect={() => setSelectedSkillIds([])}>
+                      <X size={14} /> {t("chat.composer.skills.clear")}
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  <div className="px-2 py-1 text-[11px] leading-snug text-muted">
+                    {t("chat.composer.contextHint")}
+                  </div>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {selectedSkillIds.length > 0 && (
                 <button
-                  onClick={submit}
-                  disabled={!value.trim() && attachments.length === 0}
-                   className="send-button grid size-8 place-items-center rounded-[8px] bg-foreground text-bg transition-all hover:-translate-y-px disabled:translate-y-0 disabled:opacity-30"
-                  title={t("chat.composer.send")}
-                  aria-label={t("chat.composer.send")}
+                  onClick={() => setSelectedSkillIds([])}
+                  className="flex h-7 items-center gap-1 rounded-md bg-(--ui-row-active) px-1.5 text-[11px] text-secondary transition-colors hover:text-foreground"
+                  title={t("chat.composer.skills.clear")}
+                  aria-label={t("chat.composer.skills.clear")}
                 >
-                  <ArrowUp size={16} />
+                  <Puzzle size={13} /> <span className="tabular-nums">{selectedSkillIds.length}</span>
                 </button>
               )}
+              <ModelPill disabled={disabled} model={model} provider={provider} providers={providers} onModelChange={onModelChange} />
+              {onCodingModeChange && (
+                <ModePill
+                  mode={codingMode}
+                  disabled={disabled}
+                  onChange={onCodingModeChange}
+                />
+              )}
+              {onExecutionModeChange && (
+                <button
+                  type="button"
+                  onClick={() => onExecutionModeChange(executionMode === "autopilot" ? "supervised" : "autopilot")}
+                  className={cn(
+                    "grid size-7 place-items-center rounded-md transition-colors",
+                    executionMode === "autopilot"
+                      ? "bg-primary/15 text-primary"
+                      : "bg-(--ui-row-active) text-foreground",
+                  )}
+                  title={
+                    executionMode === "autopilot"
+                      ? t("chat.composer.autopilotOn")
+                      : t("chat.composer.supervisedOn")
+                  }
+                  aria-label={
+                    executionMode === "autopilot"
+                      ? t("chat.composer.autopilotOn")
+                      : t("chat.composer.supervisedOn")
+                  }
+                  aria-pressed={executionMode === "autopilot"}
+                >
+                  {executionMode === "autopilot" ? <Bot size={14} /> : <ShieldCheck size={14} />}
+                </button>
+              )}
+              {onViewChanges && (
+                <button
+                  type="button"
+                  onClick={onViewChanges}
+                  disabled={disabled}
+                  className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground disabled:opacity-40"
+                  title={t("chat.composer.viewChanges")}
+                  aria-label={t("chat.composer.viewChanges")}
+                >
+                  <History size={14} />
+                </button>
+              )}
+              <button
+                onClick={() => setExpanded((v) => !v)}
+                className="grid size-7 place-items-center rounded-md text-muted transition-colors hover:bg-(--ui-row-hover) hover:text-foreground"
+                title={expanded ? t("chat.composer.collapse") : t("chat.composer.expand")}
+                aria-label={expanded ? t("chat.composer.collapse") : t("chat.composer.expand")}
+              >
+                {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              </button>
+            </div>
+            <div className="composer-footer-actions">
+              {speechSupported && (
+                <button
+                  onClick={() => setUiSetting("autoSpeak", !autoSpeak)}
+                  className={cn(
+                    "grid size-7 place-items-center rounded-md transition-colors",
+                    autoSpeak
+                      ? "bg-(--ui-row-active) text-foreground"
+                      : "text-muted hover:bg-(--ui-row-hover) hover:text-foreground",
+                  )}
+                  title={autoSpeak ? t("chat.composer.disableSpeech") : t("chat.composer.enableSpeech")}
+                  aria-label={autoSpeak ? t("chat.composer.disableSpeech") : t("chat.composer.enableSpeech")}
+                  aria-pressed={autoSpeak}
+                >
+                  {autoSpeak ? <Volume2 size={14} /> : <VolumeX size={14} />}
+                </button>
+              )}
+              {voiceInput && micSupported && (
+                <button
+                  onClick={toggleDictation}
+                  className={cn(
+                    "grid size-7 place-items-center rounded-md transition-colors",
+                    listening
+                      ? "animate-pulse bg-danger/20 text-danger"
+                      : "text-muted hover:bg-(--ui-row-hover) hover:text-foreground",
+                  )}
+                  title={listening ? t("chat.composer.stopDictation") : t("chat.composer.startDictation")}
+                  aria-label={listening ? t("chat.composer.stopDictation") : t("chat.composer.startDictation")}
+                  aria-pressed={listening}
+                >
+                  <Mic size={14} />
+                </button>
+              )}
+              {sendControls}
             </div>
           </div>
         </div>

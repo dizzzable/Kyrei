@@ -42,8 +42,8 @@ export const CODING_MODE_PROMPTS: Readonly<Record<CodingMode, string>> = {
   auto: [
     "Coding mode: AUTO (phase selection).",
     "For each turn, choose the effective phase that best fits the user goal: plan | build | polish | deepreep.",
-    "Start the turn with one short line: Effective phase: <plan|build|polish|deepreep> — <one-line reason>.",
-    "Long-horizon goals (multi-file, refactor, migrate, multi-step features): use Effective phase: plan first — explore and write a decision-complete plan under .kyrei/plan or .kyrei/run before mutating app source.",
+    "Start with exactly one machine-readable line: MODE_SWITCH:<plan|build|polish|deepreep>. This is hidden protocol metadata; do not explain it in user-facing prose.",
+    "Long-horizon goals (multi-file, refactor, migrate, multi-step features): select MODE_SWITCH:plan first — explore and write a decision-complete plan under .kyrei/plan or .kyrei/run before mutating app source.",
     "Only move long work to build after the user approves the plan or clearly says implement/build/go ahead.",
     "Short fixes and one-file edits may go straight to build.",
     "Adapt when the goal shifts (e.g. plan → build after approval, build → polish after MVP).",

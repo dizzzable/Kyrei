@@ -68,7 +68,8 @@ export class McpStdioClient {
 
   private async start(): Promise<void> {
     const server = this.options.server;
-    if (!server.command?.trim()) throw new Error("mcp_command_required");
+    const command = server.command?.trim();
+    if (!command) throw new Error("mcp_command_required");
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -77,7 +78,7 @@ export class McpStdioClient {
     // Never inherit Electron renderer tokens into MCP children.
     delete env.ELECTRON_RUN_AS_NODE;
 
-    this.child = this.spawnImpl(resolveMcpCommand(server.command), server.args ?? [], {
+    this.child = this.spawnImpl(resolveMcpCommand(command), server.args ?? [], {
       cwd: server.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

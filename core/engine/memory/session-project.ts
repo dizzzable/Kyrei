@@ -137,7 +137,10 @@ export async function projectSessionsIntoMemory(
   sessions: readonly ProjectableSession[],
   opts: ProjectSessionsOptions,
 ): Promise<ProjectSessionsResult> {
-  const maxSessions = opts.maxSessions ?? 40;
+  // A caller that asks for a full rebuild must get the complete snapshot. The
+  // previous implicit 40-session limit made Settings claim success while
+  // silently omitting older chats.
+  const maxSessions = opts.maxSessions ?? sessions.length;
   const maxMessages = opts.maxMessagesPerSession ?? 80;
   const maxChars = opts.maxCharsPerMessage ?? 4_000;
   const pruneStale = opts.pruneStale !== false;

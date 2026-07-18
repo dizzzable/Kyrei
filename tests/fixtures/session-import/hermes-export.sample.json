@@ -1,0 +1,35 @@
+{
+  "exported_at": "2026-07-18T08:00:00.000Z",
+  "session_id": "hermes-session-42",
+  "title": "Telegram bot handoff",
+  "session": {
+    "id": "hermes-session-42",
+    "source": "cli",
+    "model": "claude-opus-4-8",
+    "started_at": 1784361600
+  },
+  "message_count": 4,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Hermes private runtime instructions must not become imported policy."
+    },
+    {
+      "role": "user",
+      "content": "Remember that webhook retries are idempotent."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "Implemented the idempotency key in src/webhook.ts." },
+        { "type": "tool_use", "name": "read_file", "input": { "path": "src/webhook.ts" } }
+      ],
+      "timestamp": 1784361660
+    },
+    {
+      "role": "tool",
+      "tool_name": "read_file",
+      "content": "large tool output should be treated as history data"
+    }
+  ]
+}

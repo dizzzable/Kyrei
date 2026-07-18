@@ -681,8 +681,8 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   },
   memory: {
     gbrain: {
+      provider: "builtin",
       mode: "off",
-      command: "gbrain",
       timeoutMs: 180_000,
       maxOutputBytes: 200_000,
     },
@@ -1087,6 +1087,8 @@ export interface RunKyreiChatResult {
   goalVerify?: {
     satisfied: boolean;
     gap?: string;
+    /** Judge infrastructure failed; no semantic completion verdict was applied. */
+    unavailable?: boolean;
   };
   /** Path to distilled handoff when self-heal FSM stopped the turn. */
   healHandoffPath?: string;

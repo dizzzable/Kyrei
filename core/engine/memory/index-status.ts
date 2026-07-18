@@ -261,11 +261,10 @@ export async function reindexWorkspaceMemoryIndex(opts: {
     let sessionUpserted = 0;
     const sources = [...result.sources];
     if (opts.refreshProjectIndex) sources.unshift("project_index");
-    // Cap session projection so Settings "Rebuild" cannot hang for hours on huge chat corpora.
-    const sessionCap = 20;
-    const sessions = opts.sessions?.length
-      ? opts.sessions.slice(0, sessionCap)
-      : undefined;
+    // Rebuild is an explicit operator operation. It must not silently drop
+    // sessions: callers may batch/progress it, but a completed rebuild is
+    // complete for the snapshot it was given.
+    const sessions = opts.sessions?.length ? opts.sessions : undefined;
     if (sessions?.length) {
       const projected = await projectSessionsIntoMemory(sessions, {
         workspace: opts.workspace,
@@ -273,10 +272,10 @@ export async function reindexWorkspaceMemoryIndex(opts: {
         vectors: stores.vectors,
         sensitiveValues: opts.sensitiveValues,
         pruneStale: true,
+        maxSessions: sessions.length,
       });
       sessionUpserted = projected.upserted;
       if (projected.upserted > 0) sources.push("session");
-      if ((opts.sessions?.length ?? 0) > sessionCap) sources.push("session_capped");
     }
     await stores.close();
     stores = null;

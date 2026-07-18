@@ -6,6 +6,7 @@
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import type { EngineConfig } from "../types.js";
 import { cleanupIncomplete } from "./cleanup.js";
+import { sanitizeModelMessages } from "./model-message-sanitize.js";
 import { checkBudget, type BudgetLimits, type BudgetUsage } from "./budget.js";
 import { verifyGoal, type GoalJudge, type GoalVerdict } from "./goal-verifier.js";
 import {
@@ -16,7 +17,7 @@ import {
 
 /** Sanitize history so the next model request cannot see dangling tool pairs. */
 export function prepareMessagesForModel(messages: readonly ModelMessage[]): ModelMessage[] {
-  return cleanupIncomplete([...messages]);
+  return cleanupIncomplete(sanitizeModelMessages(messages).messages);
 }
 
 export function budgetLimitsFromConfig(cfg: EngineConfig): BudgetLimits {
@@ -47,8 +48,8 @@ export function isBudgetBreached(cfg: EngineConfig, usage: BudgetUsage): { breac
 }
 
 /**
- * Cheap text-only goal judge. Returns unsatisfied on parse/model failure (fail-closed
- * for explicit goals — better to keep working than falsely declare done).
+ * Cheap text-only goal judge. Semantic negative verdicts remain fail-closed.
+ * Provider, transport and parser failures are unavailable rather than unmet goals.
  */
 export function createModelGoalJudge(
   model: LanguageModel,
@@ -79,7 +80,7 @@ export function createModelGoalJudge(
         ],
       });
       const match = text.match(/\{[\s\S]*\}/);
-      if (!match) return { satisfied: false, gap: "goal_verify_unparsed" };
+      if (!match) return { satisfied: false, unavailable: true };
       const parsed = JSON.parse(match[0]!) as { satisfied?: unknown; gap?: unknown };
       return {
         satisfied: parsed.satisfied === true,
@@ -87,11 +88,8 @@ export function createModelGoalJudge(
           ? { gap: parsed.gap.trim().slice(0, 500) }
           : {}),
       };
-    } catch (error) {
-      return {
-        satisfied: false,
-        gap: `goal_verify_error: ${(error as Error).message}`.slice(0, 500),
-      };
+    } catch {
+      return { satisfied: false, unavailable: true };
     }
   };
 }

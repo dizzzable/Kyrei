@@ -109,6 +109,7 @@ describe("resolveEngineConfig (task 2.6)", () => {
       memory: { gbrain: { mode: "read", command: "gbrain-local", source: "personal", timeoutMs: 30_000 } },
     });
     expect(config.memory.gbrain).toEqual({
+      provider: "external-cli",
       mode: "read",
       command: "gbrain-local",
       source: "personal",
@@ -121,7 +122,7 @@ describe("resolveEngineConfig (task 2.6)", () => {
     const { config, warnings } = resolveEngineConfig({ memory: { gbrain: { mode: "read", source: "" } } });
     expect(config.memory.gbrain.mode).toBe("read");
     expect(config.memory.gbrain.source).toBeUndefined();
-    expect(warnings).toEqual([]);
+    expect(warnings).toContain("migrated default GBrain setup to built-in Kyrei Memory");
   });
 
   it("validates nested permissions", () => {

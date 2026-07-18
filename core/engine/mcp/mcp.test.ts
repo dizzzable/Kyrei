@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { tryParseFramedMessage, McpStdioClient, resolveMcpCommand } from "./stdio-client.js";
+import { McpHttpClient } from "./http-client.js";
 import { createMcpManager, normalizeMcpConfig } from "./manager.js";
 import { buildMcpTools } from "../tools/mcp.js";
 import { decide } from "../security/permissions.js";
@@ -33,7 +34,22 @@ describe("normalizeMcpConfig", () => {
       ],
     });
     expect(cfg.enabled).toBe(true);
-    expect(cfg.servers.map((s) => s.id)).toEqual(["fs_", "fs"]);
+    expect(cfg.servers.map((s) => s.id)).toEqual(["fs_", "fs", "dup"]);
+    expect(cfg.servers.at(-1)).toMatchObject({ transport: "unsupported", reason: "mcp_command_required" });
+  });
+
+  it("retains HTTP and unknown transports with an explicit status contract", () => {
+    const cfg = normalizeMcpConfig({
+      enabled: true,
+      servers: [
+        { id: "remote", transport: "streamable-http", url: "https://mcp.example.test/mcp" },
+        { id: "legacy", transport: "sse", url: "https://mcp.example.test/sse" },
+      ],
+    });
+    expect(cfg.servers).toEqual([
+      expect.objectContaining({ id: "remote", transport: "streamable-http" }),
+      expect.objectContaining({ id: "legacy", transport: "unsupported", reason: "transport_unsupported", configuredTransport: "sse" }),
+    ]);
   });
 });
 
@@ -157,5 +173,34 @@ describe("McpStdioClient integration (mock process)", () => {
     expect(tools).toEqual([{ name: "echo", description: "Echo" }]);
     await client.close();
     expect(child.kill).toHaveBeenCalled();
+  });
+});
+
+describe("McpHttpClient", () => {
+  it("negotiates an HTTP session and carries it through tool discovery", async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "DELETE") return new Response("", { status: 204 });
+      const message = JSON.parse(String(init?.body)) as { id?: number; method?: string };
+      if (message.method === "initialize") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26" } }), {
+          headers: { "content-type": "application/json", "mcp-session-id": "safe-session-1" },
+        });
+      }
+      if (message.method === "tools/list") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "status" }] } }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("", { status: 202 });
+    }) as typeof fetch;
+    const client = new McpHttpClient({
+      server: { id: "remote", transport: "streamable-http", url: "https://mcp.example.test/mcp" },
+      fetchImpl,
+    });
+    await expect(client.listTools()).resolves.toEqual([{ name: "status" }]);
+    const listCall = fetchImpl.mock.calls.find(([, init]) => JSON.parse(String((init as RequestInit).body)).method === "tools/list");
+    expect((listCall?.[1] as RequestInit).headers).toMatchObject({ "MCP-Session-Id": "safe-session-1", "MCP-Protocol-Version": "2025-03-26" });
+    await client.close();
+    expect(fetchImpl).toHaveBeenLastCalledWith("https://mcp.example.test/mcp", expect.objectContaining({ method: "DELETE" }));
   });
 });

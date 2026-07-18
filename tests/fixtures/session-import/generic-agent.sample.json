@@ -1,0 +1,10 @@
+{
+  "conversation": {
+    "id": "cursor-chat-9",
+    "title": "Database migration",
+    "messages": [
+      { "author": { "role": "user" }, "content": [{ "type": "text", "text": "Move the migration into a transaction." }] },
+      { "author": { "role": "assistant" }, "content": { "text": "Wrapped migration v9 in a transaction." } }
+    ]
+  }
+}

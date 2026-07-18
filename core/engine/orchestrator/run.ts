@@ -70,6 +70,7 @@ import { shouldForcePlanMode } from "../context/plan-gate.js";
 import { createHarnessMetrics } from "../observability/harness-metrics.js";
 import { buildBudgetedSymbolMap, symbolMapLastWasCacheHit } from "../intel/repo-symbols.js";
 import { assembleSystemContext } from "../memory/layers.js";
+import { buildAutomaticRecallContext } from "../memory/auto-recall.js";
 import { MemoryIndexSession } from "../memory/index-session.js";
 import { snippetsFromModelMessages } from "../memory/session-project.js";
 import { configureEmbedAdapterFromConfig } from "../memory/embed-adapter.js";
@@ -91,6 +92,7 @@ import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/f
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
 import { buildSystemPromptParts } from "./system-prompt.js";
 import { packSystemForCache } from "../prompt/cache-packing.js";
+import type { ToolName } from "../prompt/tool-descriptions.js";
 import { resolvePersonalityText } from "../personality-catalog.js";
 import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
 import { makePrepareStep } from "./prepare-step.js";
@@ -360,6 +362,8 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   const brainTools = buildGBrainTools(cfg.memory.gbrain, {
     signal: opts.abortSignal,
     maxModelOutputChars: cfg.maxToolOutput,
+    ...(opts.globalMemoryDir ? { dataDir: opts.globalMemoryDir } : {}),
+    sensitiveValues,
   });
   const planningTools =
     workspaceReady && cfg.planning?.enabled
@@ -512,6 +516,15 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         ...(cfg.memory?.decay ? { decay: cfg.memory.decay } : {}),
       });
       projectContext = assembled.trim() ? assembled : undefined;
+      if (memoryIndex?.memoryStore) {
+        const recalled = await buildAutomaticRecallContext({
+          query: lastUserTextFromMessages(opts.messages ?? []),
+          memory: memoryIndex.memoryStore,
+          limit: Math.min(4, cfg.memory.recall?.k ?? 4),
+          maxChars: 3_200,
+        });
+        if (recalled) projectContext = projectContext ? `${projectContext}\n\n${recalled}` : recalled;
+      }
       // Wave D4: budgeted symbol map (fail-open; complements import graph tools).
       try {
         const symbolMap = await buildBudgetedSymbolMap(opts.workspace!, { maxChars: 1_600 });
@@ -542,6 +555,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         abortSignal: opts.abortSignal,
         skills: opts.skills,
         projectContext,
+        codingMode: effectiveStartMode,
         sensitiveValues,
         emit: opts.emit,
         onSkillUsed: opts.onSkillUsed,
@@ -563,9 +577,16 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         maxResultChars: cfg.maxToolOutput,
       })
     : {};
+  const promptToolRecord = filterToolsForCodingMode({
+    ...(tools ?? {}),
+    ...(delegationEnabled ? { delegate_read: true } : {}),
+    ...teamTools,
+  }, effectiveStartMode) ?? {};
+  const availableToolNames = Object.keys(promptToolRecord) as ToolName[];
   const systemParts = buildSystemPromptParts({
     workspace: opts.workspace,
     hasTools,
+    availableToolNames,
     personality: resolvePersonalityText({
       personality: cfg.personality,
       personalityPresetId: cfg.personalityPresetId,
@@ -576,7 +597,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     promptProfile: cfg.promptProfiles.find((profile) => profile.id === cfg.activePromptProfileId)?.systemPrompt,
     projectContext,
     hasBrainTools: Object.keys(brainTools).length > 0,
-    hasBrainWriteTools: cfg.memory.gbrain.mode === "read-write",
+    hasBrainWriteTools: Object.hasOwn(brainTools, "brain_capture"),
     // Reads (query/fetch) work without sessionId; writes need sessionId but policy still useful.
     hasDecisionTools: Boolean(cfg.memory.ltm?.enabled && workspaceReady),
     hasPlanningTools: Object.keys(planningTools).length > 0,
@@ -977,7 +998,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
   }
 
   let status = bridged.status;
-  let goalVerify: { satisfied: boolean; gap?: string } | undefined;
+  let goalVerify: { satisfied: boolean; gap?: string; unavailable?: boolean } | undefined;
   let healHandoffPath: string | undefined;
   let fileReview: import("../types.js").FileReviewState | undefined;
 
@@ -1098,18 +1119,17 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         judge,
       });
       if (verdict) {
-        goalVerify = {
-          satisfied: verdict.satisfied,
-          ...(verdict.gap ? { gap: verdict.gap } : {}),
-        };
-        if (!verdict.satisfied && status === "complete") {
-          status = "goal_unsatisfied";
-          opts.emit({
-            type: "message.delta",
-            payload: {
-              text: `\n\n[goal-verify] цель не подтверждена: ${verdict.gap ?? "gap unknown"}`,
-            },
-          });
+        if (verdict.unavailable) {
+          goalVerify = { satisfied: false, unavailable: true };
+          console.warn("[kyrei reliability] goal verifier unavailable; semantic gate skipped");
+        } else {
+          goalVerify = {
+            satisfied: verdict.satisfied,
+            ...(verdict.gap ? { gap: verdict.gap } : {}),
+          };
+          if (!verdict.satisfied && status === "complete") {
+            status = "goal_unsatisfied";
+          }
         }
       }
     } catch (error) {
@@ -1194,7 +1214,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
         type: "message.delta",
         payload: { text: verifyBeforeDoneMessage("en") },
       });
-      if (!goalVerify) {
+      if (!goalVerify || goalVerify.unavailable) {
         goalVerify = {
           satisfied: false,
           gap: "mutations_without_verify_evidence",

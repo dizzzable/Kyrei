@@ -11,6 +11,7 @@ import type {
   RuntimeTeamSpec,
 } from "../types.js";
 import type { ModelParams } from "../types.js";
+import type { CodingMode } from "../coding-mode.js";
 import { buildModel, buildProviderOptions, hasProviderCredentials, resolveTurnModelParams } from "../provider/build.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { buildTools } from "../tools/index.js";
@@ -72,6 +73,8 @@ export interface CreateTeamRoleExecutorsOptions {
    * so Team roles inherit the same thinking policy as main when supported.
    */
   readonly modelParams?: ModelParams;
+  /** Parent turn's effective start mode, including a forced long-task plan gate. */
+  readonly codingMode?: CodingMode;
 }
 
 /** Pure capability clamp used by pipeline departments before any tool is built. */
@@ -285,7 +288,7 @@ export async function createTeamRoleExecutors(
         skills: assignedSkills,
         workspace: canReadWorkspace && workspaceReady ? options.workspace : undefined,
         projectContext: canReadWorkspace ? projectContext : undefined,
-        codingModeHint: codingModePrompt(normalizeCodingMode(options.config.codingMode)),
+        codingModeHint: codingModePrompt(options.codingMode ?? normalizeCodingMode(options.config.codingMode)),
         maxDepth: options.spec.limits.maxDepth,
         maxSteps: options.spec.limits.maxStepsPerAgent,
         maxRetries: options.config.apiMaxRetries,
