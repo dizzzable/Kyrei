@@ -27,7 +27,7 @@ import {
 import { TOOL_DESCRIPTIONS, type ToolName } from "./tool-descriptions.js";
 
 /** Bump on ANY change to the produced prompt text. */
-export const PROMPT_VERSION = "1.29.0";
+export const PROMPT_VERSION = "1.34.0";
 
 /**
  * Prompt changelog (newest first). Keep entries short and factual.
@@ -35,6 +35,11 @@ export const PROMPT_VERSION = "1.29.0";
  *   editing rules, verification, safety, response language.
  */
 export const PROMPT_CHANGELOG: ReadonlyArray<{ version: string; note: string }> = [
+  { version: "1.34.0", note: "Avoid redundant MCP catalog listings when the user already supplied an exact server and tool selection." },
+  { version: "1.33.0", note: "Treat an explicit request to invoke an available named tool as a mandatory runtime action before final prose." },
+  { version: "1.32.0", note: "Require an actual result before claiming a named available tool or requested check was performed." },
+  { version: "1.31.0", note: "Clarify direct web research versus isolated read-only delegation versus configured Team roles to prevent unnecessary fan-out." },
+  { version: "1.30.0", note: "Require a newline after AUTO mode metadata so streaming gateways cannot fuse the hidden marker with user-facing text." },
   { version: "1.29.0", note: "Complete lazy Skill catalog: bounded prompt preview, metadata search across the full catalog, and on-demand instruction reads." },
   { version: "1.28.0", note: "Always-on tool-free safety envelope, bounded untrusted project context, and complete skill-document discovery policy." },
   { version: "1.27.0", note: "Prompt contract hardening: optional resolved-tool manifest and JSON-delimited lower-priority user style/profile config." },
@@ -125,6 +130,11 @@ const IDENTITY =
 
 const WORKFLOW = HARNESS_WORKFLOW;
 
+const TOOL_EXECUTION_CONTRACT =
+  "Tool truthfulness: when the user explicitly asks for a named available tool, current runtime state, a source lookup, or a verification, call the relevant tool before answering. " +
+  "An explicit request to invoke an available named tool is a mandatory runtime action, not a request for a plan or acknowledgement: invoke it before final prose, even when you expect the result. " +
+  "Never claim that a tool, check, search, or inspection happened until its result exists in this turn. If the capability is unavailable or fails, state that plainly and use a safe relevant fallback only when one exists. Do not make decorative tool calls.";
+
 const TOOL_POLICY =
   "Tools (use names exactly; prefer these over shell for files):\n" +
   `- list_dir — ${TOOL_DESCRIPTIONS.list_dir}\n` +
@@ -213,7 +223,7 @@ const OPENVIKING_TOOL_POLICY =
 
 const DELEGATION_POLICY =
   `- delegate_read — ${TOOL_DESCRIPTIONS.delegate_read}\n` +
-  "Delegate only independent research that benefits from isolated context or parallelism. Keep dependent work in the parent, and verify child summaries before relying on them.";
+  "For one focused web query or one source, use web_search/web_fetch directly in the parent. Delegate only two or more independent research goals that benefit from isolated context or parallelism. delegate_read creates temporary read-only subagents; it is distinct from configured Team roles and never selects accounts, providers, or models. Keep dependent work in the parent, and verify child summaries before relying on them.";
 
 const CORE_TOOL_NAMES = [
   "list_dir",
@@ -541,6 +551,7 @@ export function buildSystemPromptParts(o: SystemPromptInput): SystemPromptParts 
     ...(timezone ? [`User timezone: ${timezone}.`] : []),
     codingModePrompt(mode),
     resolvedWorkflow(manifest),
+    TOOL_EXECUTION_CONTRACT,
     HARNESS_KARPATHY,
     HARNESS_CARE,
     resolvedCoreToolPolicy(manifest),

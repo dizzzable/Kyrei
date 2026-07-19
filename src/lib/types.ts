@@ -562,6 +562,17 @@ export type ProviderProtocol =
   /** Official local Codex App Server; executed by the local gateway. */
   | "codex-app-server";
 
+/**
+ * Request dialect used by an OpenAI-compatible endpoint for its thinking
+ * control.  This is endpoint configuration, not a guess based on a model id.
+ */
+export type OpenAICompatibleReasoningTransport =
+  | "openai-reasoning-effort"
+  | "thinking-toggle"
+  | "zai-thinking-preserved"
+  | "kimi-thinking-preserved"
+  | "kimi-k3-reasoning-max";
+
 /** Write-only provider credentials. The gateway never returns these values. */
 export interface ProviderCredentialsInput {
   apiKey?: string;
@@ -678,6 +689,8 @@ export interface ProviderProfile {
   id: string;
   name: string;
   protocol: ProviderProtocol;
+  /** Custom OpenAI-compatible reasoning request dialect. */
+  reasoningTransport?: OpenAICompatibleReasoningTransport;
   baseURL: string;
   headers?: Record<string, string>;
   models: ProviderModel[];

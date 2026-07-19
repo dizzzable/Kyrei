@@ -8,6 +8,7 @@ import {
   classifyProviderFailure,
   isAuthFailure,
   isRetryable,
+  isToolChoiceUnsupported,
   isToolUnsupported,
   retryAfterMsOf,
   statusOf,
@@ -59,10 +60,16 @@ export interface StreamLike {
 }
 
 /**
- * start(candidateIndex, useTools) returns a fresh streamText-like result.
+ * start(candidateIndex, useTools, useForcedToolChoice) returns a fresh
+ * streamText-like result. The third argument is false only for a compatible
+ * endpoint that rejected `tool_choice` while still accepting regular tools.
  * It may prepare a bounded initial context before opening the provider stream.
  */
-export type StartFn = (candidateIndex: number, useTools: boolean) => StreamLike | PromiseLike<StreamLike>;
+export type StartFn = (
+  candidateIndex: number,
+  useTools: boolean,
+  useForcedToolChoice?: boolean,
+) => StreamLike | PromiseLike<StreamLike>;
 
 interface Probe {
   values: unknown[];
@@ -246,6 +253,7 @@ function beginAttempt(
 async function openAttempt(
   candidateIndex: number,
   useTools: boolean,
+  useForcedToolChoice: boolean,
   start: StartFn,
   attempts: ProviderStreamAttemptOutcome[],
   lifecycle?: ProviderStreamAttemptLifecycle,
@@ -255,7 +263,7 @@ async function openAttempt(
 
   let stream: StreamLike;
   try {
-    stream = await start(candidateIndex, useTools);
+    stream = await start(candidateIndex, useTools, useForcedToolChoice);
     observeResponseMessages(stream);
   } catch (error) {
     finishAttempt(active, attempts, attemptOutcome(candidateIndex, outcomeForError(error), "start", error));
@@ -360,7 +368,7 @@ export async function openStream(
   const attempts: ProviderStreamAttemptOutcome[] = [];
 
   for (let candidate = 0; candidate < candidateCount; candidate += 1) {
-    const initial = await openAttempt(candidate, hasTools, start, attempts, options.attemptLifecycle);
+    const initial = await openAttempt(candidate, hasTools, true, start, attempts, options.attemptLifecycle);
     if (initial.kind === "capacity") continue;
     if (initial.kind === "failed") {
       if (canTryNextCandidate(initial.error, candidate, candidateCount)) continue;
@@ -369,9 +377,48 @@ export async function openStream(
     const error = probeError(initial.inspected);
 
     if (error !== undefined) {
+      if (hasTools && isToolChoiceUnsupported(error)) {
+        // An endpoint can support regular function calls but reject OpenAI's
+        // optional `tool_choice` field. Retrying without the forced selector
+        // preserves the entire tool surface instead of silently degrading the
+        // turn to prose-only mode.
+        finishAttempt(initial.active, attempts, attemptOutcome(candidate, "tool-unsupported", "probe", error));
+        const withoutForcedToolChoice = await openAttempt(
+          candidate,
+          true,
+          false,
+          start,
+          attempts,
+          options.attemptLifecycle,
+        );
+        if (withoutForcedToolChoice.kind === "capacity") continue;
+        if (withoutForcedToolChoice.kind === "failed") {
+          if (canTryNextCandidate(withoutForcedToolChoice.error, candidate, candidateCount)) continue;
+          return attachStreamAttempts(withoutForcedToolChoice.error, attempts);
+        }
+        const errorWithoutForcedToolChoice = probeError(withoutForcedToolChoice.inspected);
+        if (errorWithoutForcedToolChoice === undefined) {
+          return wrap(
+            withoutForcedToolChoice.stream,
+            withoutForcedToolChoice.inspected,
+            candidate,
+            attempts,
+            withoutForcedToolChoice.active,
+          );
+        }
+        finishAttempt(
+          withoutForcedToolChoice.active,
+          attempts,
+          attemptOutcome(candidate, outcomeForError(errorWithoutForcedToolChoice), "probe", errorWithoutForcedToolChoice),
+        );
+        if (!isToolUnsupported(errorWithoutForcedToolChoice)) {
+          if (canTryNextCandidate(errorWithoutForcedToolChoice, candidate, candidateCount)) continue;
+          return wrap(withoutForcedToolChoice.stream, withoutForcedToolChoice.inspected, candidate, attempts);
+        }
+      }
       if (hasTools && isToolUnsupported(error)) {
         finishAttempt(initial.active, attempts, attemptOutcome(candidate, "tool-unsupported", "probe", error));
-        const withoutTools = await openAttempt(candidate, false, start, attempts, options.attemptLifecycle);
+        const withoutTools = await openAttempt(candidate, false, false, start, attempts, options.attemptLifecycle);
         if (withoutTools.kind === "capacity") continue;
         if (withoutTools.kind === "failed") {
           if (canTryNextCandidate(withoutTools.error, candidate, candidateCount)) continue;

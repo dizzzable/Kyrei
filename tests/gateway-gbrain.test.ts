@@ -102,6 +102,33 @@ describe("gateway GBrain onboarding", () => {
       .toMatchObject({ engine: { memory: { gbrain: { mode: "read" } } } });
   });
 
+  it("preserves an explicit read-write choice while provisioning the built-in store", async () => {
+    const current = await request<{ engine: Record<string, unknown> }>("/api/config");
+    const memory = current.engine.memory && typeof current.engine.memory === "object"
+      ? current.engine.memory as Record<string, unknown>
+      : {};
+    await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        engine: {
+          ...current.engine,
+          memory: { ...memory, gbrain: { provider: "builtin", mode: "read-write" } },
+        },
+      }),
+    });
+
+    const result = await request<{
+      status: { state: string; provider: string; mode: string };
+      config: { engine: { memory: { gbrain: { provider: string; mode: string } } } };
+    }>("/api/memory/gbrain/initialize", { method: "POST" });
+
+    expect(initializeBuiltinGBrainStore).toHaveBeenCalledWith(join(dataDir, "memory"));
+    expect(result).toMatchObject({
+      status: { state: "ready", provider: "builtin", mode: "read-write" },
+      config: { engine: { memory: { gbrain: { provider: "builtin", mode: "read-write" } } } },
+    });
+  });
+
   it("keeps the legacy install endpoint local and never runs Bun or GitHub setup", async () => {
     const result = await request<{
       status: { state: string; provider: string; mode: string };

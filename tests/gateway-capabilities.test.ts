@@ -170,6 +170,40 @@ describe("gateway operational capabilities", () => {
     await expect(response.json()).resolves.toMatchObject({ code: "prompt_skills_invalid" });
   });
 
+  it("does not advertise disabled or unavailable ambient Skills to a normal chat turn", async () => {
+    const config = await request<{ activeProviderId: string }>("/api/config");
+    await request(`/api/providers/${config.activeProviderId}/secret`, {
+      method: "PUT",
+      body: JSON.stringify({ apiKey: "ambient-skill-credential" }),
+    });
+    const enabled = await request<{ skill: { id: string } }>("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({ name: "available-ambient", content: "Available ambient workflow." }),
+    });
+    const disabled = await request<{ skill: { id: string } }>("/api/skills", {
+      method: "POST",
+      body: JSON.stringify({ name: "disabled-ambient", content: "Disabled ambient workflow." }),
+    });
+    await request(`/api/skills/${disabled.skill.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: false }),
+    });
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Discover an available workflow" }),
+    });
+
+    await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+    const options = runKyreiChat.mock.calls[0]?.[0] as {
+      skills: Array<{ id: string }>;
+      requiredSkillIds?: string[];
+    };
+    expect(options.skills.map((skill) => skill.id)).toEqual([enabled.skill.id]);
+    expect(options.requiredSkillIds).toBeUndefined();
+  });
+
   it("fails open for ambient skill runtime load errors", async () => {
     const runtimeSkills = vi.spyOn(SkillsStore.prototype, "catalogSkills")
       .mockRejectedValueOnce(new Error("skill runtime unavailable"));

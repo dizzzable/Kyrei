@@ -7,7 +7,31 @@ const MODEL_TUNING_PROTOCOLS: ReadonlySet<ProviderProtocol> = new Set([
   "google-generative-ai",
   "google-vertex",
   "amazon-bedrock",
+  // The official ChatGPT/Codex connector serializes these controls through
+  // app-server thread start/resume rather than the AI SDK, but it is still a
+  // real executable tuning surface.
+  "codex-app-server",
 ]);
+
+/**
+ * A user-selected OpenAI-compatible endpoint may support `reasoning_effort`
+ * while exposing an incomplete `/models` capability record. The official API
+ * keeps its catalog as the source of truth; every other endpoint is an
+ * explicit operator choice and may expose the compatible field directly.
+ */
+export function allowsConfiguredEndpointTuning(profile: {
+  protocol?: ProviderProtocol;
+  baseURL?: string;
+} | undefined): boolean {
+  if (profile?.protocol !== "openai-chat") return false;
+  const baseURL = profile.baseURL?.trim();
+  if (!baseURL) return false;
+  try {
+    return new URL(baseURL).hostname.toLowerCase() !== "api.openai.com";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * UI reasoning controls are available only when both layers agree:
@@ -17,8 +41,14 @@ const MODEL_TUNING_PROTOCOLS: ReadonlySet<ProviderProtocol> = new Set([
 export function supportsModelTuning(
   protocol: ProviderProtocol | undefined,
   capabilities?: ModelCapabilityMetadata,
+  options?: { allowConfiguredEndpointTuning?: boolean },
 ): boolean {
   if (protocol === undefined || !MODEL_TUNING_PROTOCOLS.has(protocol)) return false;
+  // A user-managed OpenAI-compatible endpoint can document a reasoning field
+  // even when its model catalog reports stale or incomplete capability data.
+  // The endpoint selection is an explicit user decision; never infer it from
+  // a model name.
+  if (options?.allowConfiguredEndpointTuning && protocol === "openai-chat") return true;
   return capabilities?.features?.reasoning !== false;
 }
 

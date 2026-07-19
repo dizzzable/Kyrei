@@ -7,6 +7,11 @@ describe("assistant display sanitizer", () => {
     expect(sanitizeAssistantDisplayText("MODE_SWITCH:build\n\nShip the fix.")).toBe("Ship the fix.");
   });
 
+  it("removes a mode marker fused to the first streaming text chunk", () => {
+    expect(sanitizeAssistantDisplayText("MODE_SWITCH:deepreepMEMORY_AFTER_REBUILD_OK"))
+      .toBe("MEMORY_AFTER_REBUILD_OK");
+  });
+
   it("removes standalone internal phase and verification lines", () => {
     expect(sanitizeAssistantDisplayText(
       "Effective phase: build — implement now.\n\nShip the fix.\n[goal-verify] gap remains\n\n[verify-before-done] run tests first.",

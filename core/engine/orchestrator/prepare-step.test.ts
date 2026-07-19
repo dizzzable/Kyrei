@@ -3,6 +3,7 @@ import { mkdtemp, rm, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_ENGINE_CONFIG } from "../types.js";
+import { estimateMessages } from "../context/tokens.js";
 import { makePrepareStep } from "./prepare-step.js";
 import type { CcrStore } from "../context/ccr.js";
 
@@ -120,6 +121,90 @@ describe("prepare-step handoff + LTM checkpoint", () => {
       || (result?.messages?.length ?? 99) < messages.length
       || putBodies.length > 0,
     ).toBe(true);
+  });
+
+  it("compacts a 700k-character restored transcript before it reaches the provider", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      contextBudget: { softPct: 0.75, hardPct: 0.9 },
+      compression: {
+        ...DEFAULT_ENGINE_CONFIG.compression,
+        enabled: true,
+        summaryEnabled: true,
+        summaryUseLlm: false,
+        summaryMinMessages: 4,
+        protectFirstN: 1,
+        protectLastN: 2,
+        alwaysMaskToolBodies: true,
+      },
+    };
+    const ccr = {
+      put: async () => "sha256:" + "b".repeat(64),
+      get: async () => null,
+      has: async () => false,
+      gc: async () => ({ removed: 0, freedBytes: 0 }),
+    } as unknown as CcrStore;
+    const prepare = makePrepareStep(cfg, {
+      model: "gpt-5.6-sol",
+      window: 128_000,
+      ccr,
+      workspace: ws,
+      sessionId: "sess-700k",
+    });
+    const chunk = "x".repeat(50_000);
+    const messages = Array.from({ length: 14 }, (_, index) => ({
+      role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: `turn ${index}: ${chunk}`,
+    }));
+
+    const result = await prepare({ messages });
+    const compacted = result?.messages ?? [];
+
+    expect(compacted.length).toBeLessThan(messages.length);
+    expect(JSON.stringify(compacted)).toContain("END OF CONTEXT SUMMARY");
+    expect(compacted.some((message) => String(message.content).includes(`turn 13: ${chunk}`))).toBe(true);
+  });
+
+  it("clips a single oversized protected turn so compaction actually fits the model window", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      contextBudget: { softPct: 0.75, hardPct: 0.9 },
+      compression: {
+        ...DEFAULT_ENGINE_CONFIG.compression,
+        enabled: true,
+        summaryEnabled: true,
+        summaryUseLlm: false,
+        summaryMinMessages: 4,
+        protectFirstN: 1,
+        protectLastN: 2,
+      },
+    };
+    const ccr = {
+      put: async () => "sha256:" + "c".repeat(64),
+      get: async () => null,
+      has: async () => false,
+      gc: async () => ({ removed: 0, freedBytes: 0 }),
+    } as unknown as CcrStore;
+    const prepare = makePrepareStep(cfg, {
+      model: "gpt-5.6-sol",
+      window: 128_000,
+      ccr,
+      workspace: ws,
+      sessionId: "sess-oversized-turn",
+    });
+    const messages = [
+      { role: "user" as const, content: `pasted specification: ${"x".repeat(700_000)}` },
+      ...Array.from({ length: 13 }, (_, index) => ({
+        role: (index % 2 === 0 ? "assistant" : "user") as "user" | "assistant",
+        content: `ordinary turn ${index}`,
+      })),
+    ];
+
+    const result = await prepare({ messages });
+    const compacted = result?.messages ?? [];
+
+    expect(JSON.stringify(compacted)).toContain("message body truncated");
+    expect(await estimateMessages(compacted, "gpt-5.6-sol")).toBeLessThan(115_200);
   });
 
   it("writeHandoff path contract used by prepare-step is workspace-root based", async () => {

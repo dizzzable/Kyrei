@@ -3284,9 +3284,30 @@ export async function startGateway({
   }
 
   function runtimeSkillsForPrompt(skillIds, { strictRequested = false } = {}) {
-    return skillIds?.length
-      ? skillsStore.catalogSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS, strictRequested })
-      : skillsStore.catalogSkills();
+    if (skillIds?.length) {
+      return skillsStore.catalogSkills({ ids: skillIds, maxSkills: MAX_PROMPT_SKILLS, strictRequested });
+    }
+
+    // Ambient Skills are a discovery catalogue for search_skills/read_skill.
+    // Never advertise disabled or unavailable entries to the model: doing so
+    // creates deterministic read_skill failures and can turn an otherwise
+    // useful tool turn into a retry loop. Explicit selections keep their
+    // strict validation path above so the user receives an actionable error.
+    return skillsStore.catalogSkills().then((catalog) => {
+      const skills = catalog.skills.filter((skill) =>
+        skill.enabled !== false
+        && skill.compatible !== false
+        && skill.availability !== "unavailable"
+        && skill.availability !== "incompatible");
+      return {
+        ...catalog,
+        skills,
+        total: skills.length,
+        included: skills.length,
+        truncated: false,
+        unavailable: [],
+      };
+    });
   }
 
   const buildPipelineRuntimeIdentity = async (definition, configSnapshot = config, secretsSnapshot = secrets) => {
@@ -3781,6 +3802,9 @@ export async function startGateway({
       return { status: { ...before, mode: "read" }, config: snapshot };
     }
     const gbrain = configuredGBrainRuntime(config.engine);
+    // Provisioning must not silently weaken an explicit write-capable memory
+    // choice. First-run/off configurations still default to safe read access.
+    const enabledMode = gbrain.mode === "read-write" ? "read-write" : "read";
     if (gbrain.provider === "builtin") {
       let mod;
       try {
@@ -3796,8 +3820,8 @@ export async function startGateway({
       }
       const after = await inspectGBrain({ force: true });
       if (after.state !== "ready") throw gbrainGatewayError("gbrain_initialization_unverified");
-      const snapshot = await persistGBrainConfig({ provider: "builtin", mode: "read" });
-      return { status: { ...after, mode: "read" }, config: snapshot };
+      const snapshot = await persistGBrainConfig({ provider: "builtin", mode: enabledMode });
+      return { status: { ...after, mode: enabledMode }, config: snapshot };
     }
     if (before.state === "unavailable") throw gbrainGatewayError("gbrain_command_unavailable");
     if (before.state !== "not_initialized") throw gbrainGatewayError("gbrain_initialization_unavailable");
@@ -3824,8 +3848,8 @@ export async function startGateway({
 
     const after = await inspectGBrain({ force: true });
     if (after.state !== "ready") throw gbrainGatewayError("gbrain_initialization_unverified");
-    const snapshot = await persistGBrainConfig({ mode: "read" });
-    return { status: { ...after, mode: "read" }, config: snapshot };
+    const snapshot = await persistGBrainConfig({ mode: enabledMode });
+    return { status: { ...after, mode: enabledMode }, config: snapshot };
   };
 
   /**
@@ -5347,6 +5371,7 @@ export async function startGateway({
         providerId: provider.id,
         ...(poolEnabled ? { accountId: account.id } : {}),
         protocol: provider.protocol,
+        ...(provider.reasoningTransport ? { reasoningTransport: provider.reasoningTransport } : {}),
         baseURL: provider.baseURL,
         model: model.id,
         apiKey: provider.requiresApiKey || provider.credentialSource === "browser-subscription"
@@ -6640,6 +6665,7 @@ export async function startGateway({
         messages: turnMessages,
         providerBase: mainTarget.baseURL,
         providerProtocol: mainTarget.protocol,
+        providerReasoningTransport: mainTarget.reasoningTransport,
         providerId: mainTarget.providerId,
         providerAccountId: mainTarget.accountId,
         providerHeaders: mainTarget.headers,
@@ -6819,7 +6845,9 @@ export async function startGateway({
         const usage = result?.usage && typeof result.usage === "object" ? result.usage : null;
         const route = result?.route && typeof result.route === "object" ? result.route : null;
         const inputTokens = Number(usage?.inputTokens);
+        const cachedInputTokens = Number(usage?.cachedInputTokens);
         const outputTokens = Number(usage?.outputTokens);
+        const reasoningTokens = Number(usage?.reasoningTokens);
         const totalTokens = Number(usage?.totalTokens)
           || ((Number.isFinite(inputTokens) ? inputTokens : 0) + (Number.isFinite(outputTokens) ? outputTokens : 0));
         if (totalTokens > 0 || Number(usage?.costUsd) > 0) {
@@ -6830,7 +6858,9 @@ export async function startGateway({
             accountId: route?.accountId ?? mainTarget.accountId,
             modelId: route?.modelId ?? mainTarget.model,
             ...(Number.isFinite(inputTokens) ? { inputTokens } : {}),
+            ...(Number.isFinite(cachedInputTokens) ? { cachedInputTokens } : {}),
             ...(Number.isFinite(outputTokens) ? { outputTokens } : {}),
+            ...(Number.isFinite(reasoningTokens) ? { reasoningTokens } : {}),
             totalTokens,
             ...(Number.isFinite(Number(usage?.costUsd)) ? { costUsd: Number(usage.costUsd) } : {}),
             status: turnStatus,

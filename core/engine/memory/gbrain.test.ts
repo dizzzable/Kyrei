@@ -113,4 +113,5 @@ describe("GBrain optional adapter", () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
 });

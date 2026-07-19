@@ -98,6 +98,20 @@ describe("read-only child runner", () => {
     expect(instructions).toContain("language of the goal");
   });
 
+  it("keeps a large child Skill catalog discoverable without inlining it all", () => {
+    const skills = Array.from({ length: 33 }, (_, index) => ({
+      id: `skill-${index}`,
+      name: `Skill ${index}`,
+      description: `Domain ${index}`,
+    }));
+    const instructions = buildReadOnlyChildInstructions("C:/repo", skills);
+
+    expect(instructions).toContain("catalog contains 33 entries; this prompt previews 32");
+    expect(instructions).toContain("skill-31: Skill 31");
+    expect(instructions).not.toContain("skill-32: Skill 32");
+    expect(instructions).toContain("Use search_skills to find every other Skill by domain.");
+  });
+
   it("uses the supplied parent model and reports real usage, tools, and files", async () => {
     generateTextMock.mockImplementationOnce(async (options: Record<string, unknown>) => {
       const onToolExecutionStart = options["onToolExecutionStart"] as (event: unknown) => void;

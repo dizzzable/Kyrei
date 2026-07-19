@@ -29,6 +29,40 @@ describe("buildProviderOptions (reasoning/effort)", () => {
     expect(buildProviderOptions("openai-chat", { effort: "high" })).toEqual({ kyrei: { reasoningEffort: "high" } });
     expect(buildProviderOptions("openai-responses", { effort: "low" })).toEqual({ openai: { reasoningEffort: "low" } });
   });
+  it("uses an explicit thinking-toggle dialect for compatible endpoints such as Z.AI", () => {
+    expect(buildProviderOptions("openai-chat", { effort: "high" }, "thinking-toggle")).toEqual({
+      kyrei: { thinking: { type: "enabled" } },
+    });
+    expect(buildProviderOptions("openai-chat", { effort: "off" }, "thinking-toggle")).toEqual({
+      kyrei: { thinking: { type: "disabled" } },
+    });
+    expect(buildProviderOptions("openai-chat", { fast: true }, "thinking-toggle")).toEqual({
+      kyrei: { thinking: { type: "disabled" } },
+    });
+  });
+  it("serializes provider-specific preserved thinking without guessing from a model name", () => {
+    expect(buildProviderOptions("openai-chat", { effort: "high" }, "zai-thinking-preserved")).toEqual({
+      kyrei: { thinking: { type: "enabled", clear_thinking: false } },
+    });
+    expect(buildProviderOptions("openai-chat", { effort: "off" }, "zai-thinking-preserved")).toEqual({
+      kyrei: { thinking: { type: "disabled" } },
+    });
+    expect(buildProviderOptions("openai-chat", { effort: "high" }, "kimi-thinking-preserved")).toEqual({
+      kyrei: { thinking: { type: "enabled", keep: "all" } },
+    });
+    expect(buildProviderOptions("openai-chat", { effort: "high" }, "kimi-k3-reasoning-max")).toEqual({
+      kyrei: { reasoningEffort: "max" },
+    });
+    expect(buildProviderOptions("openai-chat", { effort: "max" }, "kimi-k3-reasoning-max")).toEqual({
+      kyrei: { reasoningEffort: "max" },
+    });
+    expect(buildProviderOptions("openai-chat", { effort: "off" }, "kimi-k3-reasoning-max")).toEqual({
+      kyrei: { reasoningEffort: "max" },
+    });
+    expect(buildProviderOptions("openai-chat", { fast: true }, "kimi-k3-reasoning-max")).toEqual({
+      kyrei: { reasoningEffort: "max" },
+    });
+  });
   it("preserves xhigh for responses and clamps UI-only max elsewhere", () => {
     expect(buildProviderOptions("openai-chat", { effort: "xhigh" })).toEqual({ kyrei: { reasoningEffort: "high" } });
     expect(buildProviderOptions("openai-chat", { effort: "max" })).toEqual({ kyrei: { reasoningEffort: "high" } });
@@ -38,6 +72,9 @@ describe("buildProviderOptions (reasoning/effort)", () => {
   it("derives from fast/reasoning when no explicit effort", () => {
     expect(buildProviderOptions("openai-chat", { fast: true })).toEqual({ kyrei: { reasoningEffort: "minimal" } });
     expect(buildProviderOptions("openai-chat", { reasoning: true })).toEqual({ kyrei: { reasoningEffort: "medium" } });
+    expect(buildProviderOptions("openai-responses", { fast: true })).toEqual({
+      openai: { reasoningEffort: "minimal", serviceTier: "priority" },
+    });
   });
   it("explicit effort wins over fast", () => {
     expect(buildProviderOptions("openai-chat", { effort: "high", fast: true })).toEqual({ kyrei: { reasoningEffort: "high" } });
@@ -157,6 +194,84 @@ describe("native provider builders", () => {
     expect(noKey.config.fetch).toBe(customFetch);
     expect(noKeyHeaders).not.toHaveProperty("authorization");
     expect(keyedHeaders.authorization).toBe("Bearer custom-key");
+  });
+
+  it("serializes the selected compatible reasoning dialect into the outgoing request", async () => {
+    const model = buildModel({
+      protocol: "openai-chat",
+      baseURL: "https://custom.example/v1",
+      apiKey: "custom-key",
+      model: "glm-5",
+    }) as unknown as {
+      getArgs: (options: {
+        prompt: unknown[];
+        providerOptions?: Record<string, Record<string, unknown>>;
+      }) => Promise<{ args: Record<string, unknown> }>;
+    };
+
+    const { args } = await model.getArgs({
+      prompt: [{ role: "user", content: [{ type: "text", text: "diagnostic" }] }],
+      providerOptions: buildProviderOptions("openai-chat", { effort: "high" }, "thinking-toggle"),
+    });
+
+    expect(args).toMatchObject({ thinking: { type: "enabled" } });
+    expect(args.reasoning_effort).toBeUndefined();
+  });
+
+  it("passes preserved-thinking fields through unchanged for documented GLM and Kimi endpoints", async () => {
+    const model = buildModel({
+      protocol: "openai-chat",
+      baseURL: "https://custom.example/v1",
+      apiKey: "custom-key",
+      model: "reasoning-model",
+    }) as unknown as {
+      getArgs: (options: {
+        prompt: unknown[];
+        providerOptions?: Record<string, Record<string, unknown>>;
+      }) => Promise<{ args: Record<string, unknown> }>;
+    };
+    const prompt = [{ role: "user", content: [{ type: "text", text: "diagnostic" }] }];
+
+    const zai = await model.getArgs({
+      prompt,
+      providerOptions: buildProviderOptions("openai-chat", { effort: "high" }, "zai-thinking-preserved"),
+    });
+    const kimi = await model.getArgs({
+      prompt,
+      providerOptions: buildProviderOptions("openai-chat", { effort: "high" }, "kimi-thinking-preserved"),
+    });
+    const kimiK3 = await model.getArgs({
+      prompt,
+      providerOptions: buildProviderOptions("openai-chat", { effort: "high" }, "kimi-k3-reasoning-max"),
+    });
+
+    expect(zai.args).toMatchObject({ thinking: { type: "enabled", clear_thinking: false } });
+    expect(kimi.args).toMatchObject({ thinking: { type: "enabled", keep: "all" } });
+    expect(kimiK3.args).toMatchObject({ reasoning_effort: "max" });
+  });
+
+  it("serializes the fast OpenAI Responses path as a priority service tier", async () => {
+    const model = buildModel({
+      protocol: "openai-responses",
+      baseURL: "https://api.openai.com/v1",
+      apiKey: "test-key",
+      model: "gpt-5.6-sol",
+    }) as unknown as {
+      getArgs: (options: {
+        prompt: unknown[];
+        providerOptions?: Record<string, Record<string, unknown>>;
+      }) => Promise<{ args: Record<string, unknown> }>;
+    };
+
+    const { args } = await model.getArgs({
+      prompt: [{ role: "user", content: [{ type: "text", text: "diagnostic" }] }],
+      providerOptions: buildProviderOptions("openai-responses", { fast: true }),
+    });
+
+    expect(args).toMatchObject({
+      reasoning: { effort: "minimal" },
+      service_tier: "priority",
+    });
   });
 
   it("requires protocol-complete credential sets", () => {
@@ -319,6 +434,24 @@ async function collect(s: StreamLike): Promise<string[]> {
 }
 
 describe("openStream — no-tools fallback", () => {
+  it("retries with regular tools when only forced tool choice is rejected", async () => {
+    const calls: Array<{ c: number; useTools: boolean; useForcedToolChoice?: boolean }> = [];
+    const start = (c: number, useTools: boolean, useForcedToolChoice?: boolean): StreamLike => {
+      calls.push({ c, useTools, useForcedToolChoice });
+      if (useForcedToolChoice !== false) {
+        return streamOf([{ type: "error", error: { statusCode: 400, message: "unknown parameter: tool_choice" } }]);
+      }
+      return streamOf([{ type: "text-delta", text: "tools retained" }, { type: "finish" }]);
+    };
+
+    const stream = await openStream(1, true, start);
+    expect(await collect(stream)).toEqual(["text-delta", "finish"]);
+    expect(calls).toEqual([
+      { c: 0, useTools: true, useForcedToolChoice: true },
+      { c: 0, useTools: true, useForcedToolChoice: false },
+    ]);
+  });
+
   it("retries the same candidate without tools on tool-unsupported error", async () => {
     let calls: Array<{ c: number; useTools: boolean }> = [];
     const start = (c: number, useTools: boolean): StreamLike => {

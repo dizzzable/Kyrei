@@ -8,7 +8,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createStores } from "../data/index.js";
 import type { MemoryDoc } from "../data/ports.js";
@@ -121,10 +121,17 @@ export function inspectBuiltinGBrainStore(dataDir: string): { initialized: boole
 
 /** Explicit, local-only provisioning for the built-in provider. */
 export async function initializeBuiltinGBrainStore(dataDir: string): Promise<void> {
-  const stores = createStores(builtInStoreDir(dataDir));
+  const dir = builtInStoreDir(dataDir);
+  const stores = createStores(dir);
   try {
-    // Opening the durable store is the provisioning step. Do not create a
-    // sentinel: SQLite and file fallback remain the source of truth.
+    // Opening SQLite creates index.db. The file fallback is also durable, but
+    // remains empty until the first write; create its actual empty document
+    // store here so an explicit provision can be verified without inventing a
+    // separate sentinel or polluting personal memory with a fake document.
+    const fileDocs = join(dir, "memory-docs.json");
+    if (stores.backend === "file" && !existsSync(fileDocs)) {
+      writeFileSync(fileDocs, "[]\n", "utf8");
+    }
   } finally {
     await stores.close();
   }

@@ -446,11 +446,13 @@ export function UsageSettings({ config, getCurrentEngine, onSaved }: UsageSettin
 
       {summary ? (
         <>
-          <div className="grid gap-2 sm:grid-cols-4">
+          <div className="grid gap-2 sm:grid-cols-4 lg:grid-cols-6">
             {[
               { label: t("settings.usage.requests"), value: String(summary.requestCount) },
               { label: t("settings.usage.tokens"), value: formatTokens(summary.totalTokens) },
               { label: t("settings.usage.input"), value: formatTokens(summary.inputTokens) },
+              { label: t("settings.usage.cachedInput"), value: formatTokens(summary.cachedInputTokens) },
+              { label: t("settings.usage.reasoning"), value: formatTokens(summary.reasoningTokens) },
               { label: t("settings.usage.cost"), value: formatUsd(summary.costUsd) },
             ].map((card) => (
               <div key={card.label} className="rounded-lg border border-border-soft bg-surface/45 px-3 py-2.5">

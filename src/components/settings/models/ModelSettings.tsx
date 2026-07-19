@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Switch } from "@/components/ui";
 import { useI18n } from "@/i18n";
 import { gateway } from "@/lib/gateway";
-import { supportsModelTuning } from "@/lib/model-capabilities";
+import { allowsConfiguredEndpointTuning, supportsModelTuning } from "@/lib/model-capabilities";
 import type { AppConfig, ModelRef } from "@/lib/types";
 import { getModelPreset, setModelPreset } from "@/store/model-presets";
 import { ModelAssignmentRow } from "./ModelAssignmentRow";
@@ -38,7 +38,10 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
     [config.activeProviderId, config.providers],
   );
   const models = useMemo(() => modelOptionsForProvider(config.providers, providerId), [config.providers, providerId]);
+  const selectedProvider = config.providers.find((provider) => provider.id === providerId);
   const selectedModel = models.find((model) => model.id === modelId);
+  const hasFixedReasoning = selectedProvider?.protocol === "openai-chat"
+    && selectedProvider.reasoningTransport === "kimi-k3-reasoning-max";
   const capabilityCopy: ModelCapabilitySettingsCopy = {
     title: t("settings.model.capabilities.title"),
     description: t("settings.model.capabilities.description"),
@@ -80,8 +83,15 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
     },
   };
   const tuningSupported = supportsModelTuning(
-    config.providers.find((provider) => provider.id === providerId)?.protocol,
+    selectedProvider?.protocol,
     selectedModel?.capabilities,
+    {
+      // A custom OpenAI-compatible endpoint is deliberately selected by the
+      // operator. Its catalog may omit reasoning metadata even though the
+      // endpoint accepts `reasoning_effort`; keep the Settings controls in
+      // parity with the composer instead of hiding an executable setting.
+      allowConfiguredEndpointTuning: allowsConfiguredEndpointTuning(selectedProvider),
+    },
   );
 
   useEffect(() => {
@@ -97,9 +107,10 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
 
   const storedPreset = getModelPreset(providerId, modelId);
   const storedEffort = storedPreset.thinking === false ? "off" : storedPreset.effort || "medium";
+  const tuningEditable = tuningSupported && !hasFixedReasoning;
   const dirty = providerId !== config.activeProviderId
     || modelId !== config.activeModelId
-    || (tuningSupported && (effort !== storedEffort || fast !== Boolean(storedPreset.fast)));
+    || (tuningEditable && (effort !== storedEffort || fast !== Boolean(storedPreset.fast)));
 
   const chooseProvider = (nextProviderId: string) => {
     setProviderId(nextProviderId);
@@ -113,7 +124,7 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
     setFailed(false);
     try {
       const next = await gateway.setConfig({ activeProviderId: providerId, activeModelId: modelId });
-      if (tuningSupported) {
+      if (tuningEditable) {
         setModelPreset(providerId, modelId, { thinking: effort !== "off", effort: effort === "off" ? undefined : effort, fast });
       }
       onSaved(next);
@@ -201,9 +212,9 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
           <label className="inline-flex items-center gap-2 text-[10.5px] text-muted">
             <span>{t("settings.model.reasoning")}</span>
             <select
-              value={tuningSupported ? effort : "off"}
-              disabled={busy || !tuningSupported}
-              aria-describedby={!tuningSupported ? "model-tuning-unavailable" : undefined}
+              value={tuningEditable ? effort : "off"}
+              disabled={busy || !tuningEditable}
+              aria-describedby={!tuningEditable ? "model-tuning-unavailable" : undefined}
               onChange={(event) => { setEffort(event.target.value); setFast(false); setSaved(false); }}
               className="h-7 rounded-md border border-border bg-surface px-2 text-[11px] text-foreground outline-none focus:border-primary/60"
             >
@@ -214,16 +225,20 @@ export function ModelSettings({ config, onSaved }: ModelSettingsProps) {
             <span>{t("settings.model.fast")}</span>
             <Switch
               size="xs"
-              checked={tuningSupported && fast}
-              disabled={busy || !tuningSupported}
-              aria-describedby={!tuningSupported ? "model-tuning-unavailable" : undefined}
+              checked={tuningEditable && fast}
+              disabled={busy || !tuningEditable}
+              aria-describedby={!tuningEditable ? "model-tuning-unavailable" : undefined}
               onCheckedChange={(value) => { setFast(value); if (value) setEffort("minimal"); setSaved(false); }}
               aria-label={t("settings.model.fast")}
             />
           </label>
           {mainChanged ? <span className="ml-auto text-[9.5px] text-warning">{t("settings.model.pendingDefault")}</span> : null}
         </div>
-        {!tuningSupported ? (
+        {hasFixedReasoning ? (
+          <p id="model-tuning-unavailable" className="text-[10px] leading-4 text-muted">
+            {t("settings.model.fixedReasoning")}
+          </p>
+        ) : !tuningSupported ? (
           <p id="model-tuning-unavailable" className="text-[10px] leading-4 text-muted">
             {t("settings.model.tuningUnavailable")}
           </p>

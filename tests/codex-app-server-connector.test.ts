@@ -124,13 +124,51 @@ describe("Codex App Server connector boundary", () => {
       method: "thread/start",
       params: expect.objectContaining({
         sandbox: "workspace-write",
-        config: { model_reasoning_effort: "high", service_tier: "priority" },
+        config: { model_reasoning_effort: "high" },
+        serviceTier: "priority",
       }),
     });
     expect(requests).toContainEqual({
       method: "turn/start",
       params: expect.objectContaining({ sandbox: "workspace-write" }),
     });
+  });
+
+  it("reapplies model tuning when resuming a persisted native thread", async () => {
+    const requests: Array<{ method?: string; params?: Record<string, unknown> }> = [];
+    const child = new FakeAppServerChild((message, send) => {
+      if (typeof message.method !== "string") return;
+      requests.push({ method: message.method, params: message.params as Record<string, unknown> });
+      if (message.method === "initialize") return send({ id: message.id, result: {} });
+      if (message.method === "thread/resume") return send({ id: message.id, result: { thread: { id: "thr-resume" } } });
+      if (message.method === "turn/start") {
+        send({ id: message.id, result: { turn: { id: "turn-resume" } } });
+        return queueMicrotask(() => send({ method: "turn/completed", params: { turn: { status: "completed" } } }));
+      }
+    });
+    const connector = new CodexAppServerConnector({
+      executable: "/opt/codex/bin/codex", platform: "linux", spawn: vi.fn(() => child), clock: inertClock, environment: { PATH: "/usr/bin" },
+    });
+
+    await connector.runTurn({
+      threadId: "thr-resume",
+      prompt: "continue",
+      workspace: "/workspace",
+      model: "gpt-5.2-codex",
+      modelParams: { effort: "xhigh", fast: true },
+    });
+
+    expect(requests).toContainEqual({
+      method: "thread/resume",
+      params: {
+        threadId: "thr-resume",
+        cwd: "/workspace",
+        model: "gpt-5.2-codex",
+        config: { model_reasoning_effort: "xhigh" },
+        serviceTier: "priority",
+      },
+    });
+    expect(requests.some((request) => request.method === "thread/start")).toBe(false);
   });
 
   it("interrupts a newly created native thread instead of losing the cancel request", async () => {

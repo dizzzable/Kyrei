@@ -22,6 +22,7 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(p).toContain("write_file");
     expect(p).toContain("Safety and trust boundaries");
     expect(p).toContain("Portable agent loop");
+    expect(p).toContain("Tool truthfulness");
     expect(p).toContain("Quality discipline");
     expect(p).toContain("Surgical changes");
     expect(p).toContain("Coding mode: AUTO");
@@ -65,6 +66,16 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(prompt).toContain("run_command");
     expect(prompt).toContain("web_search");
     expect(prompt).toContain("project_map");
+  });
+
+  it("uses an explicit MCP server and tool selection without relisting the catalog", () => {
+    const prompt = buildSystemPrompt({
+      hasTools: true,
+      hasMcpTools: true,
+      availableToolNames: ["mcp_list_tools", "mcp_call"],
+    })!;
+
+    expect(prompt).toContain("If the user supplies both an exact serverId and MCP tool name");
   });
 
   it("injects build, polish, plan, deepreep coding-mode contracts", () => {

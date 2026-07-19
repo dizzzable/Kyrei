@@ -175,3 +175,15 @@ export function isToolUnsupported(err: unknown): boolean {
   const msg = String(e?.["message"] ?? e?.["responseBody"] ?? e?.["data"] ?? "").toLowerCase();
   return /tool|function|tool_choice|not supported|unknown parameter|unsupported/.test(msg);
 }
+
+/**
+ * Some OpenAI-compatible gateways implement tool calls but reject the optional
+ * forced-selection field. Keep tools enabled and retry without that field
+ * before classifying the whole tool surface as unsupported.
+ */
+export function isToolChoiceUnsupported(err: unknown): boolean {
+  const s = statusOf(err);
+  if (![400, 422].includes(s ?? 0)) return false;
+  const msg = errorMessageOf(err);
+  return /tool[_\s-]?choice|function[_\s-]?choice|forced[_\s-]?tool|required[_\s-]?tool|tool[_\s-]?selection/.test(msg);
+}

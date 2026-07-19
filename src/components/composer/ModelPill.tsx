@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ChevronDown, RefreshCw, Search } from "lucide-react";
 import { gateway, type ModelCatalogEntry } from "@/lib/gateway";
-import { supportsModelTuning } from "@/lib/model-capabilities";
+import { allowsConfiguredEndpointTuning, supportsModelTuning } from "@/lib/model-capabilities";
 import { displayModelName, formatModelStatusLabel, modelDisplayParts, reasoningEffortLabel } from "@/lib/model-status-label";
 import type { ProviderProfile, ProviderProtocol } from "@/lib/types";
 import { setModelPreset, useModelPreset } from "@/store/model-presets";
@@ -33,23 +33,31 @@ const EFFORTS = [
   { value: "max", labelKey: "chat.model.effort.max" },
 ] as const satisfies readonly { value: string; labelKey: ChatTranslationKey }[];
 
+function hasFixedReasoning(profile: ProviderProfile | undefined): boolean {
+  return profile?.protocol === "openai-chat" && profile.reasoningTransport === "kimi-k3-reasoning-max";
+}
+
 /** Per-model options are shown only where the engine can serialize them. */
 function ModelOptions({
   provider,
   model,
   protocol,
   capabilities,
+  allowConfiguredEndpointTuning,
+  fixedReasoning,
 }: {
   provider: string;
   model: string;
   protocol?: ProviderProtocol;
   capabilities?: ModelCatalogEntry["capabilities"];
+  allowConfiguredEndpointTuning?: boolean;
+  fixedReasoning?: boolean;
 }) {
   const { t } = useI18n();
   const preset = useModelPreset(provider, model);
   const thinking = preset.thinking !== false;
   const effort = preset.effort || "medium";
-  if (!supportsModelTuning(protocol, capabilities)) {
+  if (!supportsModelTuning(protocol, capabilities, { allowConfiguredEndpointTuning })) {
     return (
       <DropdownMenuSubContent className="w-52">
         <DropdownMenuLabel>{t("chat.model.options")}</DropdownMenuLabel>
@@ -57,8 +65,16 @@ function ModelOptions({
       </DropdownMenuSubContent>
     );
   }
+  if (fixedReasoning) {
+    return (
+      <DropdownMenuSubContent className="w-64">
+        <DropdownMenuLabel>{t("chat.model.options")}</DropdownMenuLabel>
+        <p className="px-2 py-1.5 text-[11px] leading-4 text-muted">{t("chat.model.fixedReasoning")}</p>
+      </DropdownMenuSubContent>
+    );
+  }
   return (
-    <DropdownMenuSubContent className="w-44">
+    <DropdownMenuSubContent className="w-64">
       <DropdownMenuLabel>{t("chat.model.options")}</DropdownMenuLabel>
       <div className={cn(dropdownMenuRow, "justify-between")} onClick={(e) => e.stopPropagation()}>
         <span>{t("chat.model.thinking")}</span>
@@ -81,6 +97,7 @@ function ModelOptions({
           aria-label={t("chat.model.fast")}
         />
       </div>
+      <p className="px-2 pb-1.5 text-[10px] leading-3.5 text-muted">{t("chat.model.fastHint")}</p>
       <DropdownMenuSeparator />
       <DropdownMenuLabel>{t("chat.model.effort")}</DropdownMenuLabel>
       <DropdownMenuRadioGroup value={effort} onValueChange={(v) => setModelPreset(provider, model, { effort: v, thinking: true, fast: false })}>
@@ -98,20 +115,26 @@ function ModelOptions({
 function ModelRow({
   entry,
   protocol,
+  allowConfiguredEndpointTuning,
+  fixedReasoning,
   active,
   onSelect,
   closeMenu,
 }: {
   entry: ModelCatalogEntry;
   protocol?: ProviderProtocol;
+  allowConfiguredEndpointTuning?: boolean;
+  fixedReasoning?: boolean;
   active: boolean;
   onSelect: (providerId: string, modelId: string) => void;
   closeMenu: () => void;
 }) {
   const { t } = useI18n();
   const preset = useModelPreset(entry.provider, entry.id);
-  const tuningSupported = supportsModelTuning(protocol, entry.capabilities);
-  const meta = tuningSupported
+  const tuningSupported = supportsModelTuning(protocol, entry.capabilities, { allowConfiguredEndpointTuning });
+  const meta = fixedReasoning
+    ? t("chat.model.effort.max")
+    : tuningSupported
     ? [
         preset.fast ? t("chat.model.fast") : null,
         preset.thinking === false
@@ -134,7 +157,14 @@ function ModelRow({
         </span>
         {active && <Check className="ml-auto size-3.5 text-primary" aria-hidden />}
       </DropdownMenuSubTrigger>
-      <ModelOptions provider={entry.provider} model={entry.id} protocol={protocol} capabilities={entry.capabilities} />
+      <ModelOptions
+        provider={entry.provider}
+        model={entry.id}
+        protocol={protocol}
+        capabilities={entry.capabilities}
+        allowConfiguredEndpointTuning={allowConfiguredEndpointTuning}
+        fixedReasoning={fixedReasoning}
+      />
     </DropdownMenuSub>
   );
 }
@@ -160,6 +190,10 @@ export function ModelPill({
   const [loading, setLoading] = useState(false);
   const protocols = useMemo(
     () => new Map(providers.map((profile) => [profile.id, profile.protocol] as const)),
+    [providers],
+  );
+  const profilesById = useMemo(
+    () => new Map(providers.map((profile) => [profile.id, profile] as const)),
     [providers],
   );
 
@@ -188,8 +222,14 @@ export function ModelPill({
   }, [models, search]);
 
   const currentEntry = models.find((entry) => entry.provider === provider && entry.id === model);
-  const label = supportsModelTuning(protocols.get(provider), currentEntry?.capabilities)
-    ? formatModelStatusLabel(model, t, { fastMode: preset.fast, reasoningEffort: preset.thinking === false ? "none" : preset.effort })
+  const currentFixedReasoning = hasFixedReasoning(profilesById.get(provider));
+  const label = supportsModelTuning(protocols.get(provider), currentEntry?.capabilities, {
+    allowConfiguredEndpointTuning: allowsConfiguredEndpointTuning(profilesById.get(provider)),
+  })
+    ? formatModelStatusLabel(model, t, {
+      fastMode: currentFixedReasoning ? false : preset.fast,
+      reasoningEffort: currentFixedReasoning ? "max" : preset.thinking === false ? "none" : preset.effort,
+    })
     : displayModelName(model, t);
 
   return (
@@ -229,6 +269,8 @@ export function ModelPill({
                     key={`${m.provider}:${m.id}`}
                     entry={m}
                     protocol={protocols.get(m.provider)}
+                    allowConfiguredEndpointTuning={allowsConfiguredEndpointTuning(profilesById.get(m.provider))}
+                    fixedReasoning={hasFixedReasoning(profilesById.get(m.provider))}
                     active={m.id === model && m.provider === provider}
                     onSelect={onModelChange}
                     closeMenu={() => setOpen(false)}

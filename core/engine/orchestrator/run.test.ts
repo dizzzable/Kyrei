@@ -17,6 +17,8 @@ const buildMemorySearchToolsMock = vi.fn(() => ({}));
 const buildMemoryAskToolsMock = vi.fn(() => ({}));
 const buildMemoryWriteToolsMock = vi.fn(() => ({}));
 const buildSkillToolsMock = vi.fn();
+const buildMcpToolsMock = vi.fn(() => ({}));
+const createMcpManagerMock = vi.fn(() => ({ close: vi.fn(async () => undefined) }));
 const buildModelMock = vi.fn();
 const buildProviderOptionsMock = vi.fn();
 const resolveEngineConfigMock = vi.fn();
@@ -110,6 +112,15 @@ vi.mock("../tools/web.js", () => ({
 
 vi.mock("../tools/skills.js", () => ({
   buildSkillTools: buildSkillToolsMock,
+}));
+
+vi.mock("../tools/mcp.js", () => ({
+  buildMcpTools: buildMcpToolsMock,
+}));
+
+vi.mock("../mcp/manager.js", () => ({
+  normalizeMcpConfig: (config: unknown) => config,
+  createMcpManager: createMcpManagerMock,
 }));
 
 vi.mock("../security/audit.js", () => ({
@@ -220,6 +231,8 @@ describe("runKyreiChat project context wiring", () => {
     buildMemoryWriteToolsMock.mockReturnValue({});
     buildWebToolsMock.mockReturnValue({});
     buildSkillToolsMock.mockReturnValue({});
+    buildMcpToolsMock.mockReturnValue({});
+    createMcpManagerMock.mockReturnValue({ close: vi.fn(async () => undefined) });
     buildModelMock.mockReturnValue({ model: "mock" });
     buildProviderOptionsMock.mockReturnValue(undefined);
     resolveEngineConfigMock.mockReturnValue({ config: engineConfig(), warnings: [] });
@@ -266,6 +279,157 @@ describe("runKyreiChat project context wiring", () => {
     const streamOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(streamOptions.instructions).toBe("system prompt");
     expect(streamOptions).not.toHaveProperty("system");
+  });
+
+  it("forces one explicitly requested available diagnostic tool instead of allowing a text-only claim", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        memory: {
+          ...engineConfig().memory,
+          gbrain: { mode: "read", provider: "builtin" },
+        },
+      },
+      warnings: [],
+    });
+    const execute = vi.fn(async () => "state=ready");
+    buildGBrainToolsMock.mockReturnValueOnce({ brain_status: { name: "brain_status", execute } });
+    streamTextMock.mockReturnValueOnce({
+      stream: (async function* () {})(),
+      responseMessages: Promise.resolve([{ role: "assistant", content: "The diagnostic is unavailable." }]),
+    });
+
+    const { runKyreiChat } = await import("./run.js");
+    const result = await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "Use the available brain_status tool before you answer." }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    const streamOptions = streamTextMock.mock.calls[0]?.[0] as { toolChoice?: unknown };
+    expect(streamOptions.toolChoice).toEqual({ type: "tool", toolName: "brain_status" });
+    expect(execute).toHaveBeenCalledWith({}, expect.objectContaining({ messages: [] }));
+    expect(result.text).toContain("Authoritative brain_status result");
+    expect(result.parts).toContainEqual(expect.objectContaining({
+      type: "tool",
+      name: "brain_status",
+      result: "state=ready",
+    }));
+    expect(result.responseMessages).toEqual([{
+      role: "assistant",
+      content: expect.stringContaining("Authoritative brain_status result"),
+    }]);
+  });
+
+  it("keeps an explicitly requested MCP catalog diagnostic when an endpoint retries without tool_choice", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        mcp: {
+          ...engineConfig().mcp,
+          enabled: true,
+          servers: [{ id: "project-mcp", transport: "stdio", command: "node", args: [] }],
+        },
+      },
+      warnings: [],
+    });
+    const execute = vi.fn(async () => "project-mcp: 1 tool");
+    buildMcpToolsMock.mockReturnValueOnce({ mcp_list_tools: { name: "mcp_list_tools", execute } });
+    openStreamMock.mockImplementationOnce(async (
+      _count: number,
+      hasTools: boolean,
+      start: (candidate: number, useTools: boolean) => Promise<{ stream: AsyncIterable<unknown>; responseMessages: PromiseLike<unknown[]> }>,
+    ) => {
+      expect(hasTools).toBe(true);
+      await start(0, true);
+      return await start(0, false);
+    });
+
+    const { runKyreiChat } = await import("./run.js");
+    const result = await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "Use mcp_list_tools before you answer." }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(2);
+    expect(streamTextMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      toolChoice: { type: "tool", toolName: "mcp_list_tools" },
+    }));
+    expect(streamTextMock.mock.calls[1]?.[0]).not.toHaveProperty("tools");
+    expect(execute).toHaveBeenCalledWith({}, expect.objectContaining({ messages: [] }));
+    expect(result.text).toContain("Authoritative mcp_list_tools result");
+    expect(result.parts).toContainEqual(expect.objectContaining({
+      type: "tool",
+      name: "mcp_list_tools",
+      result: "project-mcp: 1 tool",
+    }));
+  });
+
+  it("forces only an exact MCP call selection so it reaches the normal approval path", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        mcp: {
+          ...engineConfig().mcp,
+          enabled: true,
+          servers: [{ id: "project-mcp", transport: "stdio", command: "node", args: [] }],
+        },
+      },
+      warnings: [],
+    });
+    buildMcpToolsMock.mockReturnValueOnce({ mcp_call: { name: "mcp_call" } });
+
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{
+        role: "user",
+        content: "Invoke mcp_call with serverId project-mcp, tool repository_status, and empty arguments.",
+      }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    expect(streamTextMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      toolChoice: { type: "tool", toolName: "mcp_call" },
+    }));
+  });
+
+  it("stops an explicitly forced diagnostic after its first completed tool step", async () => {
+    resolveEngineConfigMock.mockReturnValueOnce({
+      config: {
+        ...engineConfig(),
+        memory: {
+          ...engineConfig().memory,
+          gbrain: { mode: "read", provider: "builtin" },
+        },
+      },
+      warnings: [],
+    });
+    buildGBrainToolsMock.mockReturnValueOnce({ brain_status: { name: "brain_status", execute: vi.fn() } });
+
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "Use brain_status now." }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    const streamOptions = streamTextMock.mock.calls[0]?.[0] as {
+      stopWhen?: Array<(value: { steps: Array<{ toolCalls: Array<{ toolName: string }> }> }) => boolean>;
+    };
+    const forcedStop = streamOptions.stopWhen?.[0];
+    expect(forcedStop).toBeTypeOf("function");
+    expect(forcedStop?.({ steps: [{ toolCalls: [{ toolName: "brain_status" }] }] })).toBe(true);
+    expect(forcedStop?.({ steps: [{ toolCalls: [{ toolName: "memory_search" }] }] })).toBe(false);
   });
 
   it("puts a clean-session continuation packet ahead of project context without altering chat messages", async () => {
@@ -1749,5 +1913,76 @@ describe("runKyreiChat project context wiring", () => {
         phase: "stream",
       },
     ]));
+  });
+
+  it("gives memory-reading Team roles the parent built-in memory directory", async () => {
+    const config = engineConfig();
+    config.memory.gbrain = {
+      provider: "builtin",
+      mode: "read",
+      timeoutMs: 30_000,
+      maxOutputBytes: 200_000,
+    };
+    resolveEngineConfigMock.mockReturnValue({ config, warnings: [] });
+    buildGBrainToolsMock.mockReturnValue({ brain_search: { name: "brain_search" } });
+    buildModelMock.mockImplementation((options: { model: string }) => ({ builtFor: options.model }));
+    generateTextMock.mockResolvedValue({
+      text: '<team_artifact>{"summary":"memory checked","confidence":0.9,"evidence":["local store"],"validation":[],"uncertainties":[],"whatWasNotChecked":[],"provenance":[]}</team_artifact>',
+      steps: [],
+      toolCalls: [],
+      usage: {},
+    });
+
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "Check personal memory" }],
+      providerBase: "https://main.example/v1",
+      providerProtocol: "openai-chat",
+      providerId: "main",
+      apiKey: "main-secret",
+      model: "main-model",
+      globalMemoryDir: "/profile/kyrei-memory",
+      team: {
+        profileId: "memory-team",
+        name: "Memory team",
+        workflow: "supervisor",
+        limits: { maxParallel: 1, maxDepth: 0, maxAgents: 1, maxTasks: 1, maxStepsPerAgent: 2, timeoutMs: 30_000 },
+        roles: [{
+          id: "memory-reader",
+          name: "Memory reader",
+          target: {
+            providerId: "memory-worker",
+            protocol: "openai-chat",
+            baseURL: "https://worker.example/v1",
+            model: "worker-model",
+            apiKey: "worker-secret",
+          },
+          skillIds: [],
+          capabilities: ["memory.read"],
+          canSpawn: false,
+          maxChildren: 0,
+        }],
+      },
+    });
+
+    const parentOptions = streamTextMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    const team = (parentOptions.tools as Record<string, {
+      execute: (input: unknown, options: unknown) => Promise<string>;
+    }>).team_delegate;
+    await team.execute({ tasks: [{ id: "memory", goal: "Search local memory", memberId: "memory-reader" }] }, {
+      toolCallId: "team-memory", messages: [],
+    });
+
+    expect(buildGBrainToolsMock.mock.calls).toEqual(expect.arrayContaining([
+      [
+        expect.objectContaining({ provider: "builtin", mode: "read" }),
+        expect.objectContaining({ dataDir: "/profile/kyrei-memory" }),
+      ],
+    ]));
+    expect(buildGBrainToolsMock.mock.calls.length).toBeGreaterThan(1);
+    expect(buildGBrainToolsMock.mock.calls.every(([, options]) => (
+      (options as { dataDir?: string }).dataDir === "/profile/kyrei-memory"
+    ))).toBe(true);
   });
 });

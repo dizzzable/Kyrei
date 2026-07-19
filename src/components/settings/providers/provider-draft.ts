@@ -3,6 +3,7 @@ import type {
   ProviderCredentialsInput,
   ProviderDiscoveryInput,
   ProviderModel,
+  OpenAICompatibleReasoningTransport,
   ProviderProfile,
   ProviderProtocol,
   ProviderTemplate,
@@ -16,6 +17,7 @@ export interface ProviderDraft {
   idLocked: boolean;
   name: string;
   protocol: ProviderProtocol;
+  reasoningTransport: OpenAICompatibleReasoningTransport;
   baseURL: string;
   requiresApiKey: boolean;
   hasStoredCredentials: boolean;
@@ -124,6 +126,7 @@ export function createDraftFromProfile(profile: ProviderProfile, useAsDefault: b
     idLocked: true,
     name: profile.name,
     protocol: profile.protocol,
+    reasoningTransport: profile.reasoningTransport ?? "openai-reasoning-effort",
     baseURL: profile.baseURL,
     requiresApiKey: profile.requiresApiKey,
     hasStoredCredentials: Boolean(profile.hasStoredCredentials || profile.hasKey),
@@ -152,6 +155,7 @@ export function createDraftFromTemplate(template: ProviderTemplate, useAsDefault
     idLocked: false,
     name: custom ? "" : template.name,
     protocol: template.protocol ?? "openai-chat",
+    reasoningTransport: "openai-reasoning-effort",
     baseURL: template.baseURL ?? "",
     requiresApiKey: template.requiresApiKey !== false,
     hasStoredCredentials: false,
@@ -262,6 +266,7 @@ export function draftProviderInput(draft: ProviderDraft): Partial<ProviderProfil
     id: draft.id.trim(),
     name: draft.name.trim(),
     protocol: draft.protocol,
+    ...(draft.protocol === "openai-chat" ? { reasoningTransport: draft.reasoningTransport } : {}),
     baseURL: draft.baseURL.trim(),
     requiresApiKey: draft.requiresApiKey,
     enabled: true,

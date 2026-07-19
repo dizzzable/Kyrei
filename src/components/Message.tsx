@@ -86,11 +86,28 @@ export const Message = memo(function Message({
     .map((part) => sanitizeAssistantDisplayText(part.text))
     .join("");
   const hasText = visibleText.trim().length > 0;
+  const hasReasoningPart = message.parts.some((part) => part.type === "reasoning");
+  const hasToolPart = message.parts.some((part) => part.type === "tool");
+  // A number of compatible gateways honour the reasoning request but expose
+  // only a final answer, never a reasoning delta. Keep the active state
+  // legible without inventing or revealing a chain of thought. Once the
+  // provider supplies text, reasoning, or a tool card, its own UI takes over.
+  const showPendingThinking = Boolean(
+    message.pending && showReasoning && !hasText && !hasReasoningPart && !hasToolPart,
+  );
 
   // Assistant: no avatar bubble — plain prose in a single 12px left gutter
   // (Hermes --message-text-indent), footer actions right-aligned on hover.
   return (
     <div className="assistant-message group min-w-0">
+      {showPendingThinking && (
+        <ThinkingDisclosure part={{
+          type: "reasoning",
+          id: `${message.id}:pending-thinking`,
+          text: "",
+          state: "streaming",
+        }} />
+      )}
       {message.parts.map((part, i) => {
         if (part.type === "tool") return <ToolRow key={part.toolCallId || i} part={part} />;
         if (part.type === "approval") return <ApprovalCard key={part.approvalId || i} part={part} onDecision={onApprovalDecision} />;

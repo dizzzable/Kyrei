@@ -16,7 +16,9 @@ describe("usage-ledger", () => {
       providerId: "openai",
       modelId: "gpt-4o-mini",
       inputTokens: 100,
+      cachedInputTokens: 60,
       outputTokens: 20,
+      reasoningTokens: 12,
       costUsd: 0.00123,
       kind: "chat_turn",
       status: "complete",
@@ -25,7 +27,9 @@ describe("usage-ledger", () => {
       providerId: "openai",
       modelId: "gpt-4o-mini",
       inputTokens: 100,
+      cachedInputTokens: 60,
       outputTokens: 20,
+      reasoningTokens: 12,
       totalTokens: 120,
       kind: "chat_turn",
     });
@@ -41,6 +45,8 @@ describe("usage-ledger", () => {
         providerId: "openai",
         modelId: "gpt-4o-mini",
         totalTokens: 100,
+        cachedInputTokens: 48,
+        reasoningTokens: 20,
         costUsd: 0.01,
       },
       {
@@ -64,6 +70,8 @@ describe("usage-ledger", () => {
     ]);
     expect(summary.requestCount).toBe(3);
     expect(summary.totalTokens).toBe(175);
+    expect(summary.cachedInputTokens).toBe(48);
+    expect(summary.reasoningTokens).toBe(20);
     expect(summary.byProvider[0]?.key).toBe("openai");
     expect(summary.byDay).toHaveLength(2);
   });

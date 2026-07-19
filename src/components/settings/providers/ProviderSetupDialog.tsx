@@ -15,7 +15,11 @@ import {
 } from "@/components/ui";
 import { GatewayRequestError } from "@/lib/gateway";
 import { desktopRuntime } from "@/lib/desktop";
-import type { ProviderModel, ProviderProtocol } from "@/lib/types";
+import type {
+  OpenAICompatibleReasoningTransport,
+  ProviderModel,
+  ProviderProtocol,
+} from "@/lib/types";
 import { useI18n, type TranslationKey } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { ModelDiscovery } from "./ModelDiscovery";
@@ -34,6 +38,17 @@ const PROTOCOLS: readonly { value: ProviderProtocol; label: TranslationKey }[] =
   { value: "google-generative-ai", label: "settings.providers.protocol.google" },
   { value: "amazon-bedrock", label: "settings.providers.protocol.bedrock" },
   { value: "google-vertex", label: "settings.providers.protocol.vertex" },
+];
+
+const OPENAI_COMPATIBLE_REASONING_TRANSPORTS: readonly {
+  value: OpenAICompatibleReasoningTransport;
+  label: TranslationKey;
+}[] = [
+  { value: "openai-reasoning-effort", label: "settings.providers.reasoningTransport.openaiReasoningEffort" },
+  { value: "thinking-toggle", label: "settings.providers.reasoningTransport.thinkingToggle" },
+  { value: "zai-thinking-preserved", label: "settings.providers.reasoningTransport.zaiThinkingPreserved" },
+  { value: "kimi-thinking-preserved", label: "settings.providers.reasoningTransport.kimiThinkingPreserved" },
+  { value: "kimi-k3-reasoning-max", label: "settings.providers.reasoningTransport.kimiK3ReasoningMax" },
 ];
 
 const DISCOVERY_ERRORS: Record<string, TranslationKey> = {
@@ -169,6 +184,24 @@ export function ProviderSetupDialog({
                   <Input value={draft.baseURL} disabled={unavailable} onChange={(event) => onDraftChange(updateProviderDraftEndpoint(draft, { baseURL: event.target.value }))} placeholder={t("settings.providers.baseUrlPlaceholder")} spellCheck={false} />
                 </label>
               </div>
+              {draft.protocol === "openai-chat" ? (
+                <label className="space-y-1">
+                  <span className="text-[11px] text-secondary">{t("settings.providers.reasoningTransport.label")}</span>
+                  <select
+                    value={draft.reasoningTransport}
+                    disabled={unavailable}
+                    onChange={(event) => update({
+                      reasoningTransport: event.target.value as OpenAICompatibleReasoningTransport,
+                    })}
+                    className="h-8 w-full rounded-md border border-border bg-surface px-2.5 text-[12px] text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/25"
+                  >
+                    {OPENAI_COMPATIBLE_REASONING_TRANSPORTS.map((transport) => (
+                      <option key={transport.value} value={transport.value}>{t(transport.label)}</option>
+                    ))}
+                  </select>
+                  <span className="block text-[9.5px] leading-4 text-muted">{t("settings.providers.reasoningTransport.hint")}</span>
+                </label>
+              ) : null}
               <label className="flex items-center justify-between gap-4 rounded-md border border-border-soft bg-bg/25 px-3 py-2">
                 <span>
                   <span className="block text-[11px] font-medium text-secondary">{t("settings.providers.requiresCredentialsShort")}</span>

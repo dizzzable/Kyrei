@@ -7,6 +7,7 @@ import { startGateway } from "../core/gateway.js";
 describe("gateway MCP diagnostics", () => {
   let dataDir = "";
   let server: { port: number; token: string; close(): Promise<void> };
+  let runKyreiChat = vi.fn();
   const close = vi.fn(async () => undefined);
   const normalizeMcpConfig = vi.fn((raw: Record<string, unknown>) => ({
     enabled: raw.enabled === true,
@@ -30,11 +31,12 @@ describe("gateway MCP diagnostics", () => {
   beforeEach(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "kyrei-gateway-mcp-"));
     close.mockClear();
+    runKyreiChat = vi.fn(async () => ({ text: "done", parts: [], status: "complete", attempts: [] }));
     server = await startGateway({
       dataDir,
       preferredPort: 0,
       engineLoader: async () => ({
-        runKyreiChat: vi.fn(),
+        runKyreiChat,
         normalizeMcpConfig,
         createMcpManager,
       }),
@@ -130,6 +132,56 @@ describe("gateway MCP diagnostics", () => {
         { id: "global-docs", command: "npx", source: "global", ok: true, toolCount: 3 },
         { id: "project-db", command: "node", source: "project", ok: true, toolCount: 3 },
       ]);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the trusted effective MCP scope into a live agent turn", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kyrei-gateway-mcp-turn-"));
+    try {
+      await mkdir(join(workspace, ".kyrei"));
+      await writeFile(join(workspace, ".kyrei", "mcp.json"), JSON.stringify({
+        version: 1,
+        enabled: true,
+        servers: [{ id: "project-search", command: "node" }],
+      }), "utf8");
+      const current = await request<{ engine?: Record<string, unknown>; activeProviderId: string }>("/api/config");
+      await request("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          workspace,
+          engine: {
+            ...(current.engine ?? {}),
+            mcp: { enabled: true, servers: [{ id: "global-docs", command: "npx" }] },
+          },
+        }),
+      });
+      await request(`/api/providers/${current.activeProviderId}/secret`, {
+        method: "PUT",
+        body: JSON.stringify({ apiKey: "gateway-mcp-turn-test-key" }),
+      });
+      await request("/api/mcp/project/trust", {
+        method: "POST",
+        body: JSON.stringify({ trusted: true }),
+      });
+      const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+      await request("/api/prompt", {
+        method: "POST",
+        body: JSON.stringify({ session: session.id, text: "List the configured MCP tools" }),
+      });
+
+      await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+      const options = runKyreiChat.mock.calls[0]?.[0] as {
+        config?: { mcp?: { enabled?: boolean; servers?: Array<{ id: string; source?: string }> } };
+      };
+      expect(options.config?.mcp).toMatchObject({
+        enabled: true,
+        servers: [
+          { id: "global-docs", source: "global" },
+          { id: "project-search", source: "project" },
+        ],
+      });
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }

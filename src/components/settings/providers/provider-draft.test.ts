@@ -66,6 +66,20 @@ describe("provider setup drafts", () => {
     expect(configured.models).toEqual([{ id: "chat-model", name: "Chat model" }]);
     expect(draft.idLocked).toBe(true);
     expect(draft.useAsDefault).toBe(false);
+    expect(draft.reasoningTransport).toBe("openai-reasoning-effort");
+  });
+
+  it("persists the documented reasoning dialect per OpenAI-compatible endpoint", () => {
+    const draft = createDraftFromProfile({
+      ...configured,
+      reasoningTransport: "thinking-toggle",
+    }, false);
+
+    expect(draftProviderInput(draft)).toMatchObject({
+      protocol: "openai-chat",
+      reasoningTransport: "thinking-toggle",
+    });
+    expect(draftProviderInput({ ...draft, protocol: "anthropic-messages" })).not.toHaveProperty("reasoningTransport");
   });
 
   it("keeps Custom last while preserving the curated template order", () => {

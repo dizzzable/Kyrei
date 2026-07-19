@@ -39,6 +39,7 @@ describe("stream-bridge (integration with MockLanguageModelV4)", () => {
     expect(out.text).toBe("Привет");
     expect(out.status).toBe("complete");
     expect(events.filter((e) => e.type === "message.delta")).toHaveLength(2);
+    expect(out.usage).toEqual({ inputTokens: 5, outputTokens: 2, totalTokens: 7 });
     const last = events.at(-1)!;
     expect(last.type).toBe("message.complete");
     if (last.type === "message.complete") {
@@ -86,6 +87,29 @@ describe("stream-bridge (synthetic parts)", () => {
       text: "checking evidence",
       state: "complete",
     }));
+  });
+
+  it("normalizes V4 cache and reasoning usage into numeric context metrics", async () => {
+    const out = await bridgeStream(
+      parts([{
+        type: "finish",
+        finishReason: "stop",
+        totalUsage: {
+          inputTokens: { total: 2_048, noCache: 512, cacheRead: 1_536, cacheWrite: undefined },
+          outputTokens: { total: 1_024, text: 700, reasoning: 324 },
+        },
+      }]),
+      () => undefined,
+      ctx(),
+    );
+
+    expect(out.usage).toEqual({
+      inputTokens: 2_048,
+      outputTokens: 1_024,
+      totalTokens: 3_072,
+      cachedInputTokens: 1_536,
+      reasoningTokens: 324,
+    });
   });
 
   it("emits and persists a user approval request as an awaiting-approval turn", async () => {

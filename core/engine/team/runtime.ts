@@ -191,6 +191,11 @@ export async function createTeamRoleExecutors(
         ? buildGBrainTools(options.config.memory.gbrain, {
             signal,
             maxModelOutputChars: options.config.maxToolOutput,
+            // Team members must use the same profile-level Kyrei Memory as
+            // their parent. Without this, built-in memory refused to expose
+            // tools because it correctly had no safe directory to open.
+            ...(options.globalMemoryDir ? { dataDir: options.globalMemoryDir } : {}),
+            sensitiveValues: options.sensitiveValues,
           })
         : {};
       const scopedPlanningTools =
@@ -310,10 +315,16 @@ export async function createTeamRoleExecutors(
         ),
         cost: entry.cost,
         // Inherit turn/default effort so Anthropic/Google/OpenAI thinking works on roles.
-        providerOptions: buildProviderOptions(
-          target.protocol,
-          resolveTurnModelParams(options.modelParams, options.config.defaultReasoningEffort),
-        ),
+        providerOptions: target.reasoningTransport
+          ? buildProviderOptions(
+            target.protocol,
+            resolveTurnModelParams(options.modelParams, options.config.defaultReasoningEffort),
+            target.reasoningTransport,
+          )
+          : buildProviderOptions(
+            target.protocol,
+            resolveTurnModelParams(options.modelParams, options.config.defaultReasoningEffort),
+          ),
         emit: options.emit,
         ...(options.providerAttemptLifecycle
           ? {

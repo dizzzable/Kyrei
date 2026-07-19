@@ -1912,6 +1912,72 @@ describe("gateway provider registry", () => {
     });
   });
 
+  it("replays stored provider reasoning as structured history on the next turn", async () => {
+    let call = 0;
+    const runKyreiChat = vi.fn(async (opts: Record<string, unknown>) => {
+      call += 1;
+      if (call === 1) {
+        return {
+          text: "Initial conclusion.",
+          parts: [{ type: "reasoning", id: "reasoning-1", text: "Checked the project state.", state: "complete" }],
+          status: "complete",
+          responseMessages: [{
+            role: "assistant",
+            content: [
+              { type: "reasoning", text: "Checked the project state." },
+              { type: "text", text: "Initial conclusion." },
+            ],
+          }],
+          route: { providerId: opts.providerId, modelId: opts.model },
+          attempts: [],
+        };
+      }
+      return {
+        text: "Follow-up conclusion.",
+        parts: [],
+        status: "complete",
+        responseMessages: [],
+        route: { providerId: opts.providerId, modelId: opts.model },
+        attempts: [],
+      };
+    });
+    await restartGateway({ engineLoader: async () => ({ runKyreiChat, listModels: () => [] }) });
+    const config = await request<{ activeProviderId: string }>("/api/config");
+    await request(`/api/providers/${config.activeProviderId}/secret`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "reasoning-replay-test-key" }),
+    });
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+
+    await request("/api/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: session.id, text: "Inspect the project" }),
+    });
+    await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => {
+      const history = await request<{ messages: Array<{ content: string }> }>(`/api/sessions/${session.id}/messages`);
+      expect(history.messages.some((message) => message.content === "Initial conclusion.")).toBe(true);
+    });
+
+    await request("/api/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: session.id, text: "Continue from that work" }),
+    });
+    await vi.waitFor(() => expect(runKyreiChat).toHaveBeenCalledTimes(2));
+
+    const replayedHistory = (runKyreiChat.mock.calls[1]?.[0] as { messages?: unknown[] }).messages ?? [];
+    expect(replayedHistory).toContainEqual({
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: "Checked the project state." },
+        { type: "text", text: "Initial conclusion." },
+      ],
+    });
+  });
+
   it("flushes a newly created session and its model target during gateway shutdown", async () => {
     const config = await request<{ activeProviderId: string; activeModelId: string }>("/api/config");
     await request(`/api/providers/${config.activeProviderId}/secret`, {

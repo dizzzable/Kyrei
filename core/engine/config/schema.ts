@@ -288,7 +288,12 @@ const McpServerConfigSchema = z.object({
   // configuration validation before the MCP manager can open it.
   transport: z.enum(["stdio", "streamable-http", "unsupported"]).optional(),
   command: z.string().trim().min(1).max(1_024).optional(),
-  args: z.array(z.string().max(512)).max(32).optional(),
+  // MCP launchers commonly embed JSON or a small `node -e` bridge in one
+  // argument. 512 characters caused the entire MCP block to fall back to its
+  // defaults while Settings still inspected the raw config, producing a false
+  // "available" status. Stay below practical command-line limits while
+  // allowing legitimate launcher payloads.
+  args: z.array(z.string().max(16_384)).max(32).optional(),
   env: z.record(z.string().max(128), z.string().max(4_096)).optional(),
   cwd: z.string().trim().max(1_024).optional(),
   url: z.string().trim().min(1).max(2_048).optional(),

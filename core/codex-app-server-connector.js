@@ -387,6 +387,24 @@ export function normalizeCodexTurnModelParams(modelParams) {
   return result;
 }
 
+/**
+ * The app-server schema accepts model/service-tier overrides on both a newly
+ * started thread and a resumed one.  Keeping the shape in one place prevents a
+ * changed Kyrei preset from silently applying only after the user creates a
+ * completely new chat.
+ */
+function codexThreadTuningParams(nativeModelParams, model) {
+  return {
+    ...(typeof model === "string" && model !== CODEX_CHATGPT_DEFAULT_MODEL && SAFE_MODEL_ID.test(model)
+      ? { model }
+      : {}),
+    ...(nativeModelParams.reasoningEffort
+      ? { config: { model_reasoning_effort: nativeModelParams.reasoningEffort } }
+      : {}),
+    ...(nativeModelParams.serviceTier ? { serviceTier: nativeModelParams.serviceTier } : {}),
+  };
+}
+
 export class CodexAppServerConnector {
   constructor({
     executable,
@@ -723,7 +741,11 @@ export class CodexAppServerConnector {
       signal?.addEventListener?.("abort", abort, { once: true });
       if (activeThreadId) {
         try {
-          await client.request("thread/resume", { threadId: activeThreadId, cwd: workspace });
+          await client.request("thread/resume", {
+            threadId: activeThreadId,
+            cwd: workspace,
+            ...codexThreadTuningParams(nativeModelParams, model),
+          });
         } catch {
           activeThreadId = "";
         }
@@ -734,13 +756,7 @@ export class CodexAppServerConnector {
           approvalPolicy: "never",
           sandbox: "workspace-write",
           personality: "friendly",
-          ...(typeof model === "string" && model !== CODEX_CHATGPT_DEFAULT_MODEL && SAFE_MODEL_ID.test(model) ? { model } : {}),
-          ...(Object.keys(nativeModelParams).length ? {
-            config: {
-              ...(nativeModelParams.reasoningEffort ? { model_reasoning_effort: nativeModelParams.reasoningEffort } : {}),
-              ...(nativeModelParams.serviceTier ? { service_tier: nativeModelParams.serviceTier } : {}),
-            },
-          } : {}),
+          ...codexThreadTuningParams(nativeModelParams, model),
         }));
         activeThreadId = typeof asRecord(started.thread).id === "string" ? asRecord(started.thread).id : "";
         if (!SAFE_ID.test(activeThreadId)) throw connectorError("codex_app_server_thread_invalid", "Codex returned an invalid thread id");

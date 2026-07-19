@@ -12,6 +12,7 @@ import type { CcrStore } from "../context/ccr.js";
 import { estimateMessages, isOverflow, providerUsageFromSteps } from "../context/tokens.js";
 import {
   pruneToolOutputs,
+  pruneOversizedTextBodies,
   DEFAULT_PRUNE,
   firedCheckpointMark,
   summarizeMiddleTurns,
@@ -264,6 +265,29 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
             }
           }
         }
+      }
+    }
+
+    // Stage B deliberately protects the first task framing and recent turns.
+    // A single pasted transcript can still make one of those protected bodies
+    // larger than the provider window, so cap only the model projection after
+    // ordinary compaction has had a chance to preserve it intact.
+    const est3 = await estimateMessages(working, model);
+    const of3 = isOverflow(est3, providerUsage, {
+      window,
+      softPct: cfg.contextBudget.softPct,
+      hardPct: cfg.contextBudget.hardPct,
+    });
+    if (of3.hard) {
+      const oversized = await pruneOversizedTextBodies(working, ccr, {
+        // Never let a retained user/assistant turn monopolize a window. This
+        // is a projection cap, not a mutation of the durable chat transcript.
+        maxTextChars: Math.max(1_000, Math.min(cfg.maxToolOutput, 12_000)),
+        retrievePageChars: Math.min(cfg.maxToolOutput, 8_000),
+      });
+      if (oversized.prunedCount > 0) {
+        working = prepareMessagesForModel(oversized.messages);
+        changed = true;
       }
     }
 

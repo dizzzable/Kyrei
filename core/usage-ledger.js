@@ -25,7 +25,9 @@ const MAX_STRING = 200;
  * @property {string} [accountId]
  * @property {string} [modelId]
  * @property {number} [inputTokens]
+ * @property {number} [cachedInputTokens]
  * @property {number} [outputTokens]
+ * @property {number} [reasoningTokens]
  * @property {number} [totalTokens]
  * @property {number} [costUsd]
  * @property {string} [status] complete | error | interrupted | …
@@ -38,7 +40,9 @@ const MAX_STRING = 200;
  * @typedef {object} UsageLedgerSummary
  * @property {number} requestCount
  * @property {number} inputTokens
+ * @property {number} cachedInputTokens
  * @property {number} outputTokens
+ * @property {number} reasoningTokens
  * @property {number} totalTokens
  * @property {number} costUsd
  * @property {Array<{ key: string, requestCount: number, totalTokens: number, costUsd: number }>} byProvider
@@ -76,7 +80,9 @@ export function normalizeUsageEvent(raw) {
     ? kindRaw
     : "other";
   const inputTokens = nonNegInt(source.inputTokens);
+  const cachedInputTokens = nonNegInt(source.cachedInputTokens);
   const outputTokens = nonNegInt(source.outputTokens);
+  const reasoningTokens = nonNegInt(source.reasoningTokens);
   let totalTokens = nonNegInt(source.totalTokens);
   if (totalTokens === undefined && (inputTokens !== undefined || outputTokens !== undefined)) {
     totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0);
@@ -90,7 +96,9 @@ export function normalizeUsageEvent(raw) {
     ...(text(source.accountId, 80) ? { accountId: text(source.accountId, 80) } : {}),
     ...(text(source.modelId, 200) ? { modelId: text(source.modelId, 200) } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(nonNegCost(source.costUsd) !== undefined ? { costUsd: nonNegCost(source.costUsd) } : {}),
     ...(text(source.status, 40) ? { status: text(source.status, 40) } : {}),
@@ -123,7 +131,9 @@ export function summarizeUsageEvents(events, opts = {}) {
   const byDay = new Map();
   let requestCount = 0;
   let inputTokens = 0;
+  let cachedInputTokens = 0;
   let outputTokens = 0;
+  let reasoningTokens = 0;
   let totalTokens = 0;
   let costUsd = 0;
 
@@ -141,11 +151,15 @@ export function summarizeUsageEvents(events, opts = {}) {
     if (sinceMs > 0 && Number.isFinite(t) && t < sinceMs) continue;
     requestCount += 1;
     const inT = Number(event.inputTokens) || 0;
+    const cachedInT = Number(event.cachedInputTokens) || 0;
     const outT = Number(event.outputTokens) || 0;
+    const reasoningT = Number(event.reasoningTokens) || 0;
     const tot = Number(event.totalTokens) || inT + outT;
     const cost = Number(event.costUsd) || 0;
     inputTokens += inT;
+    cachedInputTokens += cachedInT;
     outputTokens += outT;
+    reasoningTokens += reasoningT;
     totalTokens += tot;
     costUsd += cost;
     bump(byProvider, event.providerId || "unknown", tot, cost);
@@ -158,7 +172,9 @@ export function summarizeUsageEvents(events, opts = {}) {
   return {
     requestCount,
     inputTokens,
+    cachedInputTokens,
     outputTokens,
+    reasoningTokens,
     totalTokens,
     costUsd: Math.round(costUsd * 1e8) / 1e8,
     byProvider: sortRows(byProvider),

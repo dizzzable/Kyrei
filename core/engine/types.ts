@@ -13,6 +13,10 @@ export interface Usage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** Provider-reported prompt tokens served from its cache, when available. */
+  cachedInputTokens?: number;
+  /** Provider-reported hidden/reasoning output tokens, when available. */
+  reasoningTokens?: number;
   costUsd?: number;
 }
 
@@ -908,6 +912,14 @@ export type ProviderProtocol =
   /** Official local Codex App Server; executed by the gateway, not AI SDK. */
   | "codex-app-server";
 
+/** Request dialect selected for one OpenAI-compatible provider endpoint. */
+export type OpenAICompatibleReasoningTransport =
+  | "openai-reasoning-effort"
+  | "thinking-toggle"
+  | "zai-thinking-preserved"
+  | "kimi-thinking-preserved"
+  | "kimi-k3-reasoning-max";
+
 /** Protocol-scoped credentials loaded only by the local gateway secret store. */
 export interface ProviderCredentials {
   apiKey?: string;
@@ -992,6 +1004,8 @@ export interface RuntimeProviderTarget {
   /** Private account identity for same-provider routing; never contains credentials. */
   accountId?: string;
   protocol: ProviderProtocol;
+  /** Custom OpenAI-compatible reasoning request dialect. */
+  reasoningTransport?: OpenAICompatibleReasoningTransport;
   baseURL: string;
   model: string;
   apiKey: string;
@@ -1131,6 +1145,8 @@ export interface RunKyreiChatOpts {
   messages: ModelMessage[];
   providerBase: string;
   providerProtocol: ProviderProtocol;
+  /** Custom OpenAI-compatible reasoning request dialect for the main target. */
+  providerReasoningTransport?: OpenAICompatibleReasoningTransport;
   /** Stable provider-registry id for events and model preset separation. */
   providerId?: string;
   /** Account selected by the gateway for the primary target. */

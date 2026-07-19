@@ -10,7 +10,12 @@ import { createGoogleVertex } from "@ai-sdk/google-vertex";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
-import type { ModelParams, ProviderCredentials, ProviderProtocol } from "../types.js";
+import type {
+  ModelParams,
+  OpenAICompatibleReasoningTransport,
+  ProviderCredentials,
+  ProviderProtocol,
+} from "../types.js";
 
 /** Provider slug used by the OpenAI-compatible builder and providerOptions. */
 export const OPENAI_COMPATIBLE_PROVIDER_NAME = "kyrei";
@@ -188,10 +193,41 @@ export function resolveTurnModelParams(
 export function buildProviderOptions(
   protocol: ProviderProtocol,
   params: ModelParams | undefined,
+  reasoningTransport?: OpenAICompatibleReasoningTransport,
 ): ProviderOptionsMap | undefined {
   if (!params) return undefined;
 
   const effort = resolveEffortLevel(params);
+  // Kimi K3 always reasons and documents `reasoning_effort: "max"` as its
+  // supported request value. Keep that endpoint contract explicit instead of
+  // coercing it through the generic OpenAI-compatible high/xhigh mapping.
+  if (protocol === "openai-chat" && reasoningTransport === "kimi-k3-reasoning-max") {
+    if (!effort && !isReasoningDisabled(params) && params.fast !== true) return undefined;
+    return {
+      [OPENAI_COMPATIBLE_PROVIDER_NAME]: {
+        reasoningEffort: "max",
+      },
+    };
+  }
+  if (protocol === "openai-chat" && (
+    reasoningTransport === "thinking-toggle"
+    || reasoningTransport === "zai-thinking-preserved"
+    || reasoningTransport === "kimi-thinking-preserved"
+  )) {
+    const disabled = isReasoningDisabled(params) || params.fast === true;
+    if (!disabled && !effort) return undefined;
+    const preserved: Record<string, JsonValue> = !disabled && reasoningTransport === "zai-thinking-preserved"
+      ? { clear_thinking: false }
+      : !disabled && reasoningTransport === "kimi-thinking-preserved"
+        ? { keep: "all" }
+        : {};
+    const thinking: Record<string, JsonValue> = { type: disabled ? "disabled" : "enabled", ...preserved };
+    return {
+      [OPENAI_COMPATIBLE_PROVIDER_NAME]: {
+        thinking,
+      },
+    };
+  }
   if (!effort) return undefined;
 
   switch (protocol) {
@@ -199,6 +235,11 @@ export function buildProviderOptions(
       return {
         [OPENAI_PROVIDER_OPTIONS_KEY]: {
           reasoningEffort: mapOpenAiEffort(protocol, effort),
+          // The official Responses API is the one OpenAI transport where the
+          // latency intent has a documented, executable service tier. Custom
+          // OpenAI-compatible gateways deliberately do not receive this
+          // field: many reject it or interpret it differently.
+          ...(params.fast === true ? { serviceTier: "priority" } : {}),
         },
       };
     case "openai-chat":
@@ -273,6 +314,11 @@ function resolveEffortLevel(params: ModelParams): ReasoningEffortLevel | undefin
   if (params.fast) return "minimal";
   if (params.reasoning) return "medium";
   return undefined;
+}
+
+function isReasoningDisabled(params: ModelParams): boolean {
+  const effort = (params.effort || "").trim().toLowerCase();
+  return effort === "off" || effort === "none" || params.reasoning === false;
 }
 
 function mapOpenAiEffort(protocol: ProviderProtocol, effort: ReasoningEffortLevel): string {

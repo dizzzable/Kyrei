@@ -7,7 +7,7 @@
  * prepareStep: two-stage context compaction (tool CCR prune + optional summary).
  */
 
-import { streamText, type ModelMessage, type ToolSet } from "ai";
+import { streamText, type ModelMessage, type StopCondition, type ToolSet } from "ai";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type {
@@ -110,6 +110,106 @@ const MODEL_OVERRIDE_BOUNDS = Object.freeze({
   contextWindow: { min: 256, max: 100_000_000 },
   maxOutput: { min: 1, max: 10_000_000 },
 });
+
+const EXPLICIT_TOOL_REQUEST = /(?:\b(?:use|call|invoke|run|check|inspect|execute)\b|используй(?:те)?|использовать|вызови(?:те)?|вызвать|запусти(?:те)?|запустить|проверь(?:те)?|проверить|выполни(?:те)?|выполнить|покажи(?:те)?|показать)/iu;
+const HOST_ENFORCED_ZERO_ARG_TOOLS = new Set(["brain_status", "mcp_list_tools", "openviking_health"]);
+const EXPLICIT_MCP_CALL = /(?<![A-Za-z0-9_])mcp_call(?![A-Za-z0-9_])/iu;
+const EXPLICIT_MCP_SERVER_ID = /\bserverId\b\s*(?::|=|\s)\s*["']?[A-Za-z0-9_-]+/iu;
+const EXPLICIT_MCP_TOOL_NAME = /\btool\b\s*(?::|=|\s)\s*["']?[A-Za-z0-9_.-]+/iu;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Some compatible models acknowledge an explicit diagnostic request in prose
+ * without calling the named available tool. Force exactly one unambiguous
+ * read/check request, then immediately return the remaining tool loop to the
+ * model so normal multi-step work is never pinned to that tool.
+ */
+function explicitlyRequestedToolName(
+  messages: ReadonlyArray<ModelMessage>,
+  tools: ToolSet | undefined,
+): string | undefined {
+  if (!tools) return undefined;
+  const text = lastUserTextFromMessages(messages).trim();
+  if (!text || !EXPLICIT_TOOL_REQUEST.test(text)) return undefined;
+  const matches = Object.keys(tools).filter((name) => (
+    new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(name)}(?![A-Za-z0-9_])`, "iu").test(text)
+  ));
+  const [match] = matches;
+  // Host-enforced execution is deliberately limited to harmless, no-argument
+  // health checks. Every other tool remains under normal model selection and
+  // approval policy, even if the user names it directly.
+  return match && HOST_ENFORCED_ZERO_ARG_TOOLS.has(match) ? match : undefined;
+}
+
+/**
+ * An exact MCP call is still model-executed and approval-gated, but it is safe
+ * to require its tool selection. Without this narrow route, some compatible
+ * models keep relisting an already identified catalog entry instead of asking
+ * the user for the required approval to call it.
+ */
+function explicitlyRequestedMcpCall(
+  messages: ReadonlyArray<ModelMessage>,
+  tools: ToolSet | undefined,
+): "mcp_call" | undefined {
+  if (!tools || !Object.hasOwn(tools, "mcp_call")) return undefined;
+  const text = lastUserTextFromMessages(messages).trim();
+  if (!text || !EXPLICIT_TOOL_REQUEST.test(text) || !EXPLICIT_MCP_CALL.test(text)) return undefined;
+  return EXPLICIT_MCP_SERVER_ID.test(text) && EXPLICIT_MCP_TOOL_NAME.test(text)
+    ? "mcp_call"
+    : undefined;
+}
+
+/** Stop the provider loop after the one diagnostic result we explicitly asked for. */
+function stopAfterForcedDiagnostic(name: string): StopCondition<ToolSet> {
+  return ({ steps }) => steps.some((step) => step.toolCalls.some((call) => call.toolName === name));
+}
+
+function directToolOutput(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && typeof (value as { output?: unknown }).output === "string") {
+    return (value as { output: string }).output;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+async function executeHostEnforcedDiagnostic(
+  name: string | undefined,
+  tools: ToolSet | undefined,
+  emit: (event: KyreiEvent) => void,
+): Promise<{ part: Extract<MessagePart, { type: "tool" }>; text: string } | undefined> {
+  if (!name || !HOST_ENFORCED_ZERO_ARG_TOOLS.has(name) || !tools) return undefined;
+  const candidate = tools[name] as unknown as {
+    execute?: (input: Record<string, never>, options?: { toolCallId?: string; messages?: ModelMessage[] }) => unknown;
+  };
+  if (typeof candidate?.execute !== "function") return undefined;
+  const toolCallId = `kyrei_direct_${Date.now().toString(36)}`;
+  const startedAt = Date.now();
+  emit({ type: "tool.start", payload: { tool_call_id: toolCallId, name, args: {} } });
+  try {
+    const text = directToolOutput(await candidate.execute({}, { toolCallId, messages: [] }));
+    const durationS = (Date.now() - startedAt) / 1_000;
+    emit({ type: "tool.complete", payload: { tool_call_id: toolCallId, name, result: text, duration_s: durationS } });
+    return {
+      part: { type: "tool", toolCallId, name, args: {}, result: text, running: false, durationS },
+      text,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const durationS = (Date.now() - startedAt) / 1_000;
+    emit({ type: "tool.complete", payload: { tool_call_id: toolCallId, name, error: message, duration_s: durationS } });
+    return {
+      part: { type: "tool", toolCallId, name, args: {}, error: message, running: false, durationS },
+      text: message,
+    };
+  }
+}
 
 // A provider's context window covers the prompt *and* the requested completion.
 // Keep room for the completion plus stable system/tool protocol overhead before
@@ -693,6 +793,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     providerId: opts.providerId ?? primary.provider,
     ...(opts.providerAccountId ? { accountId: opts.providerAccountId } : {}),
     protocol: opts.providerProtocol,
+    ...(opts.providerReasoningTransport ? { reasoningTransport: opts.providerReasoningTransport } : {}),
     baseURL: opts.providerBase,
     model: opts.model,
     apiKey: opts.apiKey,
@@ -783,7 +884,9 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
   // Shared turn params (effort/defaultReasoningEffort) for main, worker, and Team.
   const turnParams = resolveTurnModelParams(opts.modelParams, cfg.defaultReasoningEffort);
   const explicitWorkerProviderOptions = explicitWorker
-    ? buildProviderOptions(explicitWorker.protocol, turnParams)
+    ? (explicitWorker.reasoningTransport
+      ? buildProviderOptions(explicitWorker.protocol, turnParams, explicitWorker.reasoningTransport)
+      : buildProviderOptions(explicitWorker.protocol, turnParams))
     : undefined;
   const primaryContextWindowOverride = boundedModelOverride(
     opts.modelParams?.contextWindowOverride,
@@ -794,11 +897,35 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     "maxOutput",
   );
 
-  const start = async (ci: number, useTools: boolean): Promise<StreamLike> => {
+  // Resolve safe host diagnostics from the turn-level tool set before opening
+  // a provider stream. A compatibility fallback can then still honour an
+  // explicit harmless request even if a gateway retries the stream without
+  // function-calling support.
+  const requestedHostDiagnostic = explicitlyRequestedToolName(
+    (opts.messages ?? []) as ModelMessage[],
+    tools,
+  );
+  const requestedMcpCall = explicitlyRequestedMcpCall(
+    (opts.messages ?? []) as ModelMessage[],
+    tools,
+  );
+  const requestedForcedTool = requestedHostDiagnostic ?? requestedMcpCall;
+  let activeForcedDiagnostic: {
+    name: string | undefined;
+    tools: ToolSet | undefined;
+  } = { name: requestedHostDiagnostic, tools };
+
+  const start = async (
+    ci: number,
+    useTools: boolean,
+    useForcedToolChoice = true,
+  ): Promise<StreamLike> => {
     const candidate = candidates[ci] ?? candidates[0]!;
     const { entry, target, credentials } = candidate;
     const providerOptions = mergeProviderOptions(
-      buildProviderOptions(target.protocol, turnParams),
+      target.reasoningTransport
+        ? buildProviderOptions(target.protocol, turnParams, target.reasoningTransport)
+        : buildProviderOptions(target.protocol, turnParams),
       sessionPromptCacheOptions(target.protocol, opts.sessionId, entry.id),
     );
     // Manual limits are scoped to the selected primary model. A fallback can
@@ -907,6 +1034,20 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     const callTools: ToolSet | undefined = useTools && Object.keys(mergedTools).length
       ? mergedTools
       : undefined;
+    const forcedToolName = requestedForcedTool && callTools && Object.hasOwn(callTools, requestedForcedTool)
+      ? requestedForcedTool
+      : undefined;
+    // `openStream` may retry the same candidate without tools when a
+    // compatible endpoint rejects `tool_choice`. Preserve the first offered
+    // safe diagnostic across that retry so the host fallback can still return
+    // the requested authoritative result instead of silently accepting prose.
+    if (useTools && (!requestedHostDiagnostic || forcedToolName === requestedHostDiagnostic)) {
+      activeForcedDiagnostic = {
+        name: forcedToolName === requestedHostDiagnostic ? forcedToolName : undefined,
+        tools: callTools,
+      };
+    }
+    let forcedToolChoicePending = Boolean(forcedToolName);
     /** Plan-safe subset used when auto declares Effective phase: plan mid-turn. */
     const planActiveToolNames = callTools
       ? (Object.keys(
@@ -921,6 +1062,11 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
           steps?: ReadonlyArray<{ usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; promptTokens?: number } }>;
           stepNumber?: number;
         }) => {
+          // `toolChoice` applies to every model step unless prepareStep
+          // overrides it. The explicit user request is a one-shot admission
+          // gate, never a request to call the same diagnostic forever.
+          const releaseForcedToolChoice = forcedToolChoicePending;
+          forcedToolChoicePending = false;
           const compacted = compactionPrepareStep
             ? await compactionPrepareStep(stepOpts)
             : undefined;
@@ -933,12 +1079,24 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
               ...(compacted ?? {}),
               messages,
               activeTools: planActiveToolNames,
+              ...(releaseForcedToolChoice ? { toolChoice: "auto" as const } : {}),
             };
           }
-          return compacted;
+          return releaseForcedToolChoice
+            ? { ...(compacted ?? {}), toolChoice: "auto" as const }
+            : compacted;
         }
       : compactionPrepareStep;
     let guardStopReason: GuardStopReason | undefined;
+    const standardStopWhen = buildStopWhen(cfg, (reason) => {
+      guardStopReason ??= reason;
+    });
+    const stopWhen = forcedToolName
+      ? [
+          stopAfterForcedDiagnostic(forcedToolName),
+          ...(Array.isArray(standardStopWhen) ? standardStopWhen : []),
+        ]
+      : standardStopWhen;
     // Wave B2: Anthropic gets system messages with cacheControl on the stable
     // prefix; other protocols keep a single instructions string (stable first).
     const packedSystem = packSystemForCache(systemParts, target.protocol);
@@ -968,9 +1126,10 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
       ...(callTools
         ? {
             tools: callTools,
-            stopWhen: buildStopWhen(cfg, (reason) => {
-              guardStopReason ??= reason;
-            }),
+            ...(forcedToolName && useForcedToolChoice
+              ? { toolChoice: { type: "tool" as const, toolName: forcedToolName } }
+              : {}),
+            stopWhen,
           }
         : {}),
       ...(callTools && workspaceReady
@@ -1073,6 +1232,38 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     parts = bridged.parts;
   }
 
+  let finalText = bridged.text;
+  const { name: forcedToolName, tools: forcedToolSet } = activeForcedDiagnostic;
+  const completedForcedTool = forcedToolName
+    ? [...parts].reverse().find((part): part is Extract<MessagePart, { type: "tool" }> => (
+      part.type === "tool" && part.name === forcedToolName && !part.running
+    ))
+    : undefined;
+  const providerSkippedForcedTool = forcedToolName && !completedForcedTool;
+  if (completedForcedTool) {
+    const result = completedForcedTool.error ?? completedForcedTool.result ?? "";
+    finalText = completedForcedTool.error
+      ? `Requested ${forcedToolName} failed: ${result}`
+      : `Authoritative ${forcedToolName} result:\n${result}`;
+  }
+  if (providerSkippedForcedTool && bridged.status === "complete") {
+    // A custom gateway can accept `tools` yet ignore the OpenAI-compatible
+    // `tool_choice` contract and return prose. Preserve truthfulness for the
+    // narrow, zero-argument read diagnostics we can execute safely ourselves.
+    const direct = await executeHostEnforcedDiagnostic(forcedToolName, forcedToolSet, opts.emit);
+    if (direct) {
+      parts = [...parts, direct.part];
+      finalText = direct.part.error
+        ? `Requested ${forcedToolName} failed: ${direct.text}`
+        : `Authoritative ${forcedToolName} result:\n${direct.text}`;
+      // Do not archive a provider's text-only denial after the host has just
+      // performed the requested safe diagnostic. Future turns must see the
+      // authoritative observation rather than repeat the same catalog/status
+      // check because their history says it never happened.
+      responseMessages = [{ role: "assistant", content: finalText }];
+    }
+  }
+
   let status = bridged.status;
   let goalVerify: { satisfied: boolean; gap?: string; unavailable?: boolean } | undefined;
   let healHandoffPath: string | undefined;
@@ -1132,7 +1323,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     && (
       normalizeCodingMode(cfg.codingMode) === "polish"
       || intent.preferGoalVerify
-      || /KYREI_FINAL_AUDIT|KYREI_RUN_COMPLETE/.test(bridged.text)
+      || /KYREI_FINAL_AUDIT|KYREI_RUN_COMPLETE/.test(finalText)
     )
     && derivedUserGoal.length >= 12;
   const goalForVerify = opts.goal?.trim() || (verifyFromUser ? derivedUserGoal : "");
@@ -1180,7 +1371,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
       );
       const transcript = [
         ...snippetsFromModelMessages((opts.messages ?? []) as ModelMessage[], { maxMessages: 12 }),
-        { role: "assistant", text: bridged.text },
+        { role: "assistant", text: finalText },
       ]
         .map((s) => `${s.role}: ${s.text}`)
         .join("\n\n");
@@ -1222,7 +1413,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
       status,
       codingMode: codingModeNow,
       parts: partsForGate,
-      assistantText: bridged.text,
+      assistantText: finalText,
     });
 
     if (
@@ -1260,7 +1451,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
               status,
               codingMode: codingModeNow,
               parts: partsForGate,
-              assistantText: bridged.text,
+              assistantText: finalText,
             });
           } else if (rescue.command) {
             // Record failed verify as explicit gap (still not complete).
@@ -1337,7 +1528,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
   }
 
   return {
-    text: bridged.text,
+    text: finalText,
     parts,
     status,
     harness: harnessSnapshot,

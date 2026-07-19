@@ -58,6 +58,13 @@ export const SUPPORTED_PROVIDER_PROTOCOLS = [
   "google-vertex",
   "codex-app-server",
 ];
+export const OPENAI_COMPATIBLE_REASONING_TRANSPORTS = [
+  "openai-reasoning-effort",
+  "thinking-toggle",
+  "zai-thinking-preserved",
+  "kimi-thinking-preserved",
+  "kimi-k3-reasoning-max",
+];
 const DEFAULT_PROVIDER_ID = "default-openai-compatible";
 const DEFAULT_PROTOCOL = "openai-chat";
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -273,6 +280,18 @@ export function normalizeProviderProtocol(value) {
   return SUPPORTED_PROVIDER_PROTOCOLS.includes(candidate) ? candidate : DEFAULT_PROTOCOL;
 }
 
+/**
+ * Keep the OpenAI-compatible request dialect explicit per endpoint. Model
+ * names are not a trustworthy transport contract: the same GLM/Kimi name can
+ * sit behind a proxy that expects either `reasoning_effort` or `thinking`.
+ */
+export function normalizeOpenAICompatibleReasoningTransport(value) {
+  const candidate = text(value).toLowerCase();
+  return OPENAI_COMPATIBLE_REASONING_TRANSPORTS.includes(candidate)
+    ? candidate
+    : "openai-reasoning-effort";
+}
+
 export function normalizeBaseURL(value, fallback = defaultBaseURLForProtocol(DEFAULT_PROTOCOL)) {
   const candidate = text(value, fallback).replace(/\/+$/, "");
   try {
@@ -474,6 +493,9 @@ export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID, optio
   const source = object(value);
   const id = normalizeId(source.id, fallbackId);
   const protocol = normalizeProviderProtocol(source.protocol);
+  const reasoningTransport = protocol === "openai-chat"
+    ? normalizeOpenAICompatibleReasoningTransport(source.reasoningTransport)
+    : undefined;
   const baseURL = normalizeBaseURL(source.baseURL ?? source.provider, defaultBaseURLForProtocol(protocol));
   const headers = normalizeHeaders(source.headers);
   const models = normalizeModels(source.models, source.model, { providerId: id, protocol, baseURL });
@@ -488,6 +510,7 @@ export function normalizeProvider(value, fallbackId = DEFAULT_PROVIDER_ID, optio
     id,
     name,
     protocol,
+    ...(reasoningTransport ? { reasoningTransport } : {}),
     baseURL,
     ...(Object.keys(headers).length ? { headers } : {}),
     models,
@@ -540,6 +563,14 @@ export function validateProviderInput(value, { creating = false, providerId, ver
   if (!name || name.length > MAX_PROVIDER_NAME) throw new ProviderConfigError("provider_name_invalid");
   const protocol = typeof source.protocol === "string" ? source.protocol.trim().toLowerCase() : "";
   if (!SUPPORTED_PROVIDER_PROTOCOLS.includes(protocol)) throw new ProviderConfigError("provider_protocol_invalid");
+  if (
+    protocol === "openai-chat"
+    && source.reasoningTransport !== undefined
+    && !OPENAI_COMPATIBLE_REASONING_TRANSPORTS.includes(String(source.reasoningTransport).trim().toLowerCase())
+  ) throw new ProviderConfigError("provider_reasoning_transport_invalid");
+  const reasoningTransport = protocol === "openai-chat"
+    ? normalizeOpenAICompatibleReasoningTransport(source.reasoningTransport)
+    : undefined;
   const baseURL = strictBaseURL(source.baseURL);
   const models = validateModels(source.models, {
     providerId: id,
@@ -559,6 +590,7 @@ export function validateProviderInput(value, { creating = false, providerId, ver
     id,
     name,
     protocol,
+    ...(reasoningTransport ? { reasoningTransport } : {}),
     baseURL,
     ...(Object.keys(headers).length ? { headers } : {}),
     models,

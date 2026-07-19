@@ -146,7 +146,9 @@ export interface UsageSummary {
   days: number;
   requestCount: number;
   inputTokens: number;
+  cachedInputTokens: number;
   outputTokens: number;
+  reasoningTokens: number;
   totalTokens: number;
   costUsd: number;
   byProvider: Array<{ key: string; requestCount: number; totalTokens: number; costUsd: number }>;
@@ -167,7 +169,9 @@ export interface UsageLedgerEvent {
   accountId?: string;
   modelId?: string;
   inputTokens?: number;
+  cachedInputTokens?: number;
   outputTokens?: number;
+  reasoningTokens?: number;
   totalTokens?: number;
   costUsd?: number;
   status?: string;

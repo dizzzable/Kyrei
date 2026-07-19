@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProviderProtocol } from "@/lib/types";
-import { executableModelParams, supportsModelTuning } from "./model-capabilities";
+import { allowsConfiguredEndpointTuning, executableModelParams, supportsModelTuning } from "./model-capabilities";
 
 describe("supportsModelTuning", () => {
+  it("permits an operator-selected compatible endpoint but keeps OpenAI's catalog authoritative", () => {
+    expect(allowsConfiguredEndpointTuning({ protocol: "openai-chat", baseURL: "https://proxy.example.test/v1" })).toBe(true);
+    expect(allowsConfiguredEndpointTuning({ protocol: "openai-chat", baseURL: "https://api.openai.com/v1" })).toBe(false);
+    expect(allowsConfiguredEndpointTuning({ protocol: "anthropic-messages", baseURL: "https://proxy.example.test" })).toBe(false);
+  });
+
   it.each<ProviderProtocol>([
     "openai-chat",
     "openai-responses",
@@ -11,16 +17,23 @@ describe("supportsModelTuning", () => {
     "google-generative-ai",
     "amazon-bedrock",
     "google-vertex",
+    "codex-app-server",
   ])(
     "enables executable reasoning controls for %s",
     (protocol) => expect(supportsModelTuning(protocol)).toBe(true),
   );
 
   it("honors explicit live metadata that disables reasoning for a model", () => {
-    expect(supportsModelTuning("anthropic-messages", {
+    const explicitlyDisabled = {
       provenance: { source: "live-provider", confidence: "high", fields: {} },
       features: { reasoning: false },
-    })).toBe(false);
+    } as const;
+    expect(supportsModelTuning("anthropic-messages", explicitlyDisabled)).toBe(false);
+    // A user-managed compatible endpoint has an explicitly selected request
+    // dialect; stale discovery metadata must not hide its controls.
+    expect(supportsModelTuning("openai-chat", explicitlyDisabled, {
+      allowConfiguredEndpointTuning: true,
+    })).toBe(true);
   });
 
   it("defaults unknown provider metadata to unsupported", () => {
@@ -48,6 +61,7 @@ describe("executableModelParams", () => {
     expect(executableModelParams("openai-chat", { effort: "high" })).toEqual({ effort: "high" });
     expect(executableModelParams("openai-chat", { thinking: true })).toEqual({ effort: "medium" });
     expect(executableModelParams("google-generative-ai", { thinking: true })).toEqual({ effort: "medium" });
+    expect(executableModelParams("codex-app-server", { thinking: true })).toEqual({ effort: "medium" });
   });
 
   it("forwards bounded manual limits independently of protocol tuning support", () => {

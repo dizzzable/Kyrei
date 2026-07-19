@@ -52,4 +52,68 @@ describe("ModelSettings capability integration", () => {
     expect(html).toContain("Official registry · High confidence");
     expect(html).not.toContain("32k");
   });
+
+  it("keeps reasoning controls available for a selected custom OpenAI-compatible endpoint", () => {
+    setLang("en");
+    const customConfig: AppConfig = {
+      ...config,
+      provider: "https://gateway.example.test/v1",
+      activeProviderId: "custom",
+      activeProviderName: "Custom gateway",
+      providers: [{
+        ...config.providers[0]!,
+        id: "custom",
+        name: "Custom gateway",
+        protocol: "openai-chat",
+        baseURL: "https://gateway.example.test/v1",
+        models: [{
+          id: "reasoning-model",
+          capabilities: {
+            provenance: { source: "live-provider", confidence: "high", fields: {} },
+            // Some compatible `/models` endpoints omit this field even when
+            // they accept `reasoning_effort` on chat-completions.
+            features: { reasoning: false },
+          },
+        }],
+      }],
+      model: "reasoning-model",
+      activeModelId: "reasoning-model",
+    };
+    const html = renderToStaticMarkup(createElement(
+      I18nProvider,
+      null,
+      createElement(ModelSettings, { config: customConfig, onSaved: vi.fn() }),
+    ));
+
+    expect(html).not.toContain('id="model-tuning-unavailable"');
+  });
+
+  it("does not expose misleading Fast and effort controls for fixed-reasoning Kimi K3", () => {
+    setLang("en");
+    const kimiConfig: AppConfig = {
+      ...config,
+      provider: "https://api.moonshot.cn/v1",
+      activeProviderId: "kimi",
+      activeProviderName: "Kimi",
+      providers: [{
+        ...config.providers[0]!,
+        id: "kimi",
+        name: "Kimi",
+        protocol: "openai-chat",
+        reasoningTransport: "kimi-k3-reasoning-max",
+        baseURL: "https://api.moonshot.cn/v1",
+        models: [{ id: "kimi-k3" }],
+      }],
+      model: "kimi-k3",
+      activeModelId: "kimi-k3",
+    };
+    const html = renderToStaticMarkup(createElement(
+      I18nProvider,
+      null,
+      createElement(ModelSettings, { config: kimiConfig, onSaved: vi.fn() }),
+    ));
+
+    expect(html).toContain("always uses its maximum reasoning level");
+    expect(html).toContain('id="model-tuning-unavailable"');
+  });
 });

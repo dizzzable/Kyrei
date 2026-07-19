@@ -44,13 +44,68 @@ export interface BridgeResult {
   status: TurnStatus;
 }
 
+function finiteTokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function tokenTotal(value: unknown): number | undefined {
+  const direct = finiteTokenCount(value);
+  if (direct !== undefined) return direct;
+  if (!value || typeof value !== "object") return undefined;
+  return finiteTokenCount((value as Record<string, unknown>)["total"]);
+}
+
+function tokenDetail(value: unknown, ...keys: string[]): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  for (const key of keys) {
+    const count = finiteTokenCount(source[key]);
+    if (count !== undefined) return count;
+  }
+  return undefined;
+}
+
+/**
+ * AI SDK 6/7 exposes usage in two valid shapes:
+ * - legacy flat `{ inputTokens: 12, outputTokens: 4 }`
+ * - V4 `{ inputTokens: { total, cacheRead }, outputTokens: { total, reasoning } }`
+ *
+ * Keep the bridge boundary numeric. Passing the V4 detail objects through used
+ * to poison context-budget arithmetic with `NaN`, so compaction could miss a
+ * real provider-reported threshold.
+ */
 function toUsage(u: unknown): Usage | undefined {
   if (!u || typeof u !== "object") return undefined;
-  const o = u as Record<string, number>;
-  const inputTokens = o["inputTokens"] ?? o["promptTokens"];
-  const outputTokens = o["outputTokens"] ?? o["completionTokens"];
-  const totalTokens = o["totalTokens"] ?? ((inputTokens ?? 0) + (outputTokens ?? 0));
-  return { inputTokens, outputTokens, totalTokens };
+  const source = u as Record<string, unknown>;
+  const inputRaw = source["inputTokens"] ?? source["promptTokens"];
+  const outputRaw = source["outputTokens"] ?? source["completionTokens"];
+  const inputTokens = tokenTotal(inputRaw);
+  const outputTokens = tokenTotal(outputRaw);
+  const explicitTotal = tokenTotal(source["totalTokens"]);
+  const totalTokens = explicitTotal ?? (
+    inputTokens !== undefined || outputTokens !== undefined
+      ? (inputTokens ?? 0) + (outputTokens ?? 0)
+      : undefined
+  );
+  const cachedInputTokens = tokenDetail(
+    inputRaw,
+    "cacheRead",
+    "cacheReadTokens",
+  ) ?? tokenDetail(source["inputTokenDetails"], "cacheRead", "cacheReadTokens");
+  const reasoningTokens = tokenDetail(
+    outputRaw,
+    "reasoning",
+    "reasoningTokens",
+  ) ?? tokenDetail(source["outputTokenDetails"], "reasoning", "reasoningTokens");
+
+  const usage: Usage = {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+  };
+  return Object.keys(usage).length ? usage : undefined;
 }
 
 function errMsg(e: unknown): string {

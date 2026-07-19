@@ -44,6 +44,33 @@ describe("provider registry config", () => {
     });
   });
 
+  it("keeps the compatible reasoning dialect explicit and rejects unknown values", () => {
+    const input = validateProviderInput({
+      id: "glm",
+      name: "Z.AI GLM",
+      protocol: "openai-chat",
+      reasoningTransport: "thinking-toggle",
+      baseURL: "https://api.z.ai/api/paas/v4",
+      models: [{ id: "glm-5" }],
+      requiresApiKey: true,
+    }, { creating: true });
+    expect(input.reasoningTransport).toBe("thinking-toggle");
+
+    const config = normalizeGatewayConfig({ providers: [input] });
+    expect(config.providers[0]?.reasoningTransport).toBe("thinking-toggle");
+    for (const reasoningTransport of [
+      "zai-thinking-preserved",
+      "kimi-thinking-preserved",
+      "kimi-k3-reasoning-max",
+    ] as const) {
+      const explicit = validateProviderInput({ ...input, reasoningTransport }, { creating: true });
+      expect(explicit.reasoningTransport).toBe(reasoningTransport);
+      expect(normalizeGatewayConfig({ providers: [explicit] }).providers[0]?.reasoningTransport).toBe(reasoningTransport);
+    }
+    expect(() => validateProviderInput({ ...input, reasoningTransport: "model-name-guess" }, { creating: true }))
+      .toThrow("provider_reasoning_transport_invalid");
+  });
+
   it("persists only bounded public model capability metadata", () => {
     const config = normalizeGatewayConfig({
       providers: [{

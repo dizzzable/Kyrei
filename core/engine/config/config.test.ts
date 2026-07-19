@@ -211,6 +211,22 @@ describe("resolveEngineConfig (task 2.6)", () => {
     });
   });
 
+  it("keeps MCP enabled when a stdio launcher has a long but valid argument", () => {
+    const launcher = "x".repeat(2_048);
+    const { config, warnings } = resolveEngineConfig({
+      mcp: {
+        enabled: true,
+        servers: [{ id: "local-bridge", transport: "stdio", command: "node", args: ["-e", launcher] }],
+      },
+    });
+
+    expect(warnings).toEqual([]);
+    expect(config.mcp).toMatchObject({
+      enabled: true,
+      servers: [{ id: "local-bridge", command: "node", args: ["-e", launcher] }],
+    });
+  });
+
   it("treats an empty GBrain source field as unset", () => {
     const { config, warnings } = resolveEngineConfig({ memory: { gbrain: { mode: "read", source: "" } } });
     expect(config.memory.gbrain.mode).toBe("read");
