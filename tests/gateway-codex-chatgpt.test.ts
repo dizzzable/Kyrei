@@ -7,6 +7,8 @@ import { startGateway } from "../core/gateway.js";
 let dataDir = "";
 let server: { port: number; token: string; close(): Promise<void> };
 let connector: ReturnType<typeof fakeConnector>;
+let managedConnector: ReturnType<typeof fakeConnector>;
+let backupManagedConnector: ReturnType<typeof fakeConnector>;
 
 function login(status = "running") {
   return {
@@ -38,6 +40,7 @@ function fakeConnector(overrides: Record<string, unknown> = {}) {
     loginStatus: vi.fn(() => ({ ...login("succeeded"), finishedAt: 30 })),
     cancelLogin: vi.fn(async () => ({ ...login("cancelled"), finishedAt: 30 })),
     logout: vi.fn(async () => ({ loggedOut: true, refreshToken: "opaque-private-value" })),
+    runTurn: vi.fn(async () => ({ text: "native complete", parts: [], status: "complete", route: { providerId: "openai-codex-chatgpt" } })),
     close: vi.fn(async () => undefined),
     ...overrides,
   };
@@ -115,9 +118,19 @@ describe("gateway ChatGPT / Codex connector boundary", () => {
       id: "openai-codex-chatgpt",
       protocol: "codex-app-server",
       requiresApiKey: false,
+      hasKey: true,
     }));
     await expect(request("/api/providers/openai-codex-chatgpt/accounts"))
       .rejects.toMatchObject({ status: 400, message: "codex_app_server_managed_connector_only" });
+
+    await request("/api/config", { method: "PUT", body: JSON.stringify({ workspace: dataDir }) });
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST", body: "{}" });
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Use my personal ChatGPT login" }),
+    });
+    await vi.waitFor(() => expect(connector.runTurn).toHaveBeenCalledTimes(1));
+    expect(connector.runTurn).toHaveBeenCalledWith(expect.not.objectContaining({ accountId: expect.anything() }));
   });
 
   it("does not allow activation before the ChatGPT account is authenticated", async () => {
@@ -137,5 +150,91 @@ describe("gateway ChatGPT / Codex connector boundary", () => {
         profile: { protocol: "codex-app-server", baseURL: "https://chatgpt.com/codex", requiresApiKey: false },
       }),
     })).rejects.toMatchObject({ status: 400, message: "codex_app_server_managed_connector_only" });
+  });
+
+  it("manages multiple official ChatGPT profiles without persisting OAuth material", async () => {
+    await server.close();
+    await rm(dataDir, { recursive: true, force: true });
+    dataDir = await mkdtemp(join(tmpdir(), "kyrei-gateway-codex-pool-"));
+    connector = fakeConnector();
+    managedConnector = fakeConnector();
+    backupManagedConnector = fakeConnector();
+    const profileFactory = vi.fn(({ accountId }: { accountId: string }) => (
+      accountId === "backup-plus" ? backupManagedConnector : managedConnector
+    ));
+    server = await startGateway({
+      dataDir,
+      preferredPort: 0,
+      codexConnector: connector,
+      codexPoolConnectorFactory: profileFactory,
+    });
+
+    const created = await request<{ accounts: Array<{ id: string; status: string }> }>("/api/connectors/codex/pool/accounts", {
+      method: "POST",
+      body: JSON.stringify({ account: { id: "owner-plus", name: "Owner Plus", weight: 2 } }),
+    });
+    expect(created.accounts).toContainEqual(expect.objectContaining({ id: "owner-plus", status: "auth-required" }));
+    expect(JSON.stringify(created)).not.toMatch(/refresh|opaque|token|owner@example/i);
+
+    const refreshed = await request<{ status: { authenticated: boolean }; pool: { accounts: Array<{ status: string; planType?: string }> } }>("/api/connectors/codex/pool/accounts/owner-plus");
+    expect(refreshed.status.authenticated).toBe(true);
+    expect(refreshed.pool.accounts).toContainEqual(expect.objectContaining({ status: "ready", planType: "plus" }));
+    expect(profileFactory).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: "owner-plus",
+      codexHome: expect.stringContaining("codex-chatgpt"),
+    }));
+
+    await request("/api/connectors/codex/pool/accounts", {
+      method: "POST",
+      body: JSON.stringify({ account: { id: "backup-plus", name: "Backup Plus", priority: 10 } }),
+    });
+    await request("/api/connectors/codex/pool/accounts/backup-plus");
+
+    await request("/api/connectors/codex/pool", {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: true, strategy: "round-robin", sessionAffinity: true }),
+    });
+    const active = await request<{ activeProviderId: string; activeModelId: string }>("/api/connectors/codex/pool/activate", {
+      method: "POST",
+      body: "{}",
+    });
+    expect(active).toMatchObject({ activeProviderId: "openai-codex-chatgpt", activeModelId: "chatgpt-default" });
+
+    managedConnector.runTurn.mockRejectedValueOnce(Object.assign(new Error("temporary upstream outage"), { code: "codex_app_server_unavailable" }));
+    backupManagedConnector.runTurn.mockImplementationOnce(async (input: { accountId?: string; onThread?: (threadId: string) => Promise<void> }) => {
+      await input.onThread?.("thr-owner-plus");
+      return {
+        text: "native complete",
+        parts: [],
+        status: "complete",
+        route: { providerId: "openai-codex-chatgpt", accountId: input.accountId, modelId: "chatgpt-default" },
+      };
+    });
+    await request("/api/config", { method: "PUT", body: JSON.stringify({ workspace: dataDir }) });
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST", body: "{}" });
+    await request("/api/prompt", { method: "POST", body: JSON.stringify({ session: session.id, text: "Use the managed account" }) });
+    await vi.waitFor(() => expect(backupManagedConnector.runTurn).toHaveBeenCalledTimes(1));
+    expect(managedConnector.runTurn).toHaveBeenCalledWith(expect.objectContaining({ accountId: "owner-plus" }));
+    expect(backupManagedConnector.runTurn).toHaveBeenCalledWith(expect.objectContaining({ accountId: "backup-plus" }));
+    const sessions = await request<{ sessions: Array<{ id: string; providerAccountId?: string; codexThreadIds?: Record<string, string> }> }>("/api/sessions");
+    expect(sessions.sessions.find((row) => row.id === session.id)).toMatchObject({
+      providerAccountId: "backup-plus",
+      codexThreadIds: { "backup-plus": "thr-owner-plus" },
+    });
+
+    // An explicit subscription/entitlement stop is not a reason to burn
+    // another personal account.  Only a transient transport failure may
+    // advance through the local pool.
+    await request("/api/connectors/codex/pool/accounts/owner-plus");
+    managedConnector.runTurn.mockRejectedValueOnce(Object.assign(new Error("subscription quota exhausted"), {
+      code: "quota_exhausted",
+    }));
+    const blocked = await request<{ id: string }>("/api/sessions", { method: "POST", body: "{}" });
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: blocked.id, text: "Do not bypass the subscription limit" }),
+    });
+    await vi.waitFor(() => expect(managedConnector.runTurn).toHaveBeenCalledTimes(2));
+    expect(backupManagedConnector.runTurn).toHaveBeenCalledTimes(1);
   });
 });

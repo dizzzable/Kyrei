@@ -778,6 +778,98 @@ describe("runKyreiChat project context wiring", () => {
     },
   );
 
+  it("stops automatic recovery when a later window repeats the same tool observation", async () => {
+    const firstResponse = [{ role: "assistant", content: [{ type: "text", text: "indexing " }] }];
+    const secondResponse = [{ role: "assistant", content: [{ type: "text", text: "again" }] }];
+    streamTextMock
+      .mockReturnValueOnce({ stream: (async function* () {})(), responseMessages: Promise.resolve(firstResponse) })
+      .mockReturnValueOnce({ stream: (async function* () {})(), responseMessages: Promise.resolve(secondResponse) });
+    toPartsMock
+      .mockReturnValueOnce([{
+        type: "tool",
+        toolCallId: "index-1",
+        name: "project_index",
+        args: {},
+        result: "workspace index is current; generatedAt: 2026-07-19T03:00:00Z",
+        running: false,
+      }])
+      .mockReturnValueOnce([{
+        type: "tool",
+        toolCallId: "index-2",
+        name: "project_index",
+        args: {},
+        result: "workspace index is current; generatedAt: 2026-07-19T03:02:00Z",
+        running: false,
+      }]);
+    bridgeStreamMock
+      .mockResolvedValueOnce({ text: "indexing ", parts: [], status: "max_steps" })
+      .mockResolvedValueOnce({ text: "again", parts: [], status: "max_steps" });
+    const emit = vi.fn();
+
+    const { runKyreiChat } = await import("./run.js");
+    const result = await runKyreiChat({
+      emit,
+      messages: [{ role: "user", content: "Finish the original task" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe("max_steps");
+    expect(emit).toHaveBeenCalledWith({
+      type: "message.complete",
+      payload: { text: "indexing again", status: "max_steps" },
+    });
+  });
+
+  it("continues across recovery windows while each window adds new tool evidence", async () => {
+    const responses = ["first", "second", "done"].map((text) => ([{
+      role: "assistant",
+      content: [{ type: "text", text }],
+    }]));
+    for (const response of responses) {
+      streamTextMock.mockReturnValueOnce({
+        stream: (async function* () {})(),
+        responseMessages: Promise.resolve(response),
+      });
+    }
+    toPartsMock
+      .mockReturnValueOnce([{
+        type: "tool",
+        toolCallId: "list-1",
+        name: "list_dir",
+        args: { path: "." },
+        result: "src\ntests",
+        running: false,
+      }])
+      .mockReturnValueOnce([{
+        type: "tool",
+        toolCallId: "read-1",
+        name: "read_file",
+        args: { path: "src/index.ts" },
+        result: "export const ready = true;",
+        running: false,
+      }])
+      .mockReturnValueOnce([{ type: "text", text: "done" }]);
+    bridgeStreamMock
+      .mockResolvedValueOnce({ text: "first", parts: [], status: "max_steps" })
+      .mockResolvedValueOnce({ text: "second", parts: [], status: "max_steps" })
+      .mockResolvedValueOnce({ text: "done", parts: [], status: "complete" });
+
+    const { runKyreiChat } = await import("./run.js");
+    const result = await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "Inspect the project thoroughly" }],
+      providerBase: "http://mock",
+      apiKey: "key",
+      model: "mock-model",
+    });
+
+    expect(streamTextMock).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ text: "firstseconddone", status: "complete" });
+  });
+
   it("keeps a configured cumulative budget terminal instead of auto-continuing", async () => {
     resolveEngineConfigMock.mockReturnValue({
       config: {

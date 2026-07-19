@@ -36,6 +36,8 @@ import type {
   CodexChatgptConnectorStatus,
   CodexChatgptLoginMode,
   CodexChatgptLoginSnapshot,
+  CodexChatgptPoolAccount,
+  CodexChatgptPoolSnapshot,
   LocalPostgresRuntimeStatus,
   ProviderCredentialsInput,
   ProviderAccountInput,
@@ -655,6 +657,53 @@ export const gateway = {
     json<{ loggedOut: true }>("/api/connectors/codex/logout", { method: "POST", body: "{}" }),
   activateCodexChatgpt: () =>
     json<AppConfig>("/api/connectors/codex/activate", { method: "POST", body: "{}" }),
+  getCodexChatgptPool: () =>
+    json<CodexChatgptPoolSnapshot>("/api/connectors/codex/pool"),
+  updateCodexChatgptPool: (input: Pick<CodexChatgptPoolSnapshot, "enabled" | "strategy" | "sessionAffinity">) =>
+    json<CodexChatgptPoolSnapshot>("/api/connectors/codex/pool", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  activateCodexChatgptPool: () =>
+    json<AppConfig>("/api/connectors/codex/pool/activate", { method: "POST", body: "{}" }),
+  createCodexChatgptPoolAccount: (account: Pick<CodexChatgptPoolAccount, "id" | "name"> & Partial<Pick<CodexChatgptPoolAccount, "enabled" | "weight" | "priority" | "modelIds">>) =>
+    json<CodexChatgptPoolSnapshot>("/api/connectors/codex/pool/accounts", {
+      method: "POST",
+      body: JSON.stringify({ account }),
+    }),
+  updateCodexChatgptPoolAccount: (accountId: string, account: Partial<Pick<CodexChatgptPoolAccount, "name" | "enabled" | "weight" | "priority" | "modelIds">>) =>
+    json<CodexChatgptPoolSnapshot>(`/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ account }),
+    }),
+  deleteCodexChatgptPoolAccount: (accountId: string) =>
+    json<CodexChatgptPoolSnapshot>(`/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}`, {
+      method: "DELETE",
+      body: "{}",
+    }),
+  refreshCodexChatgptPoolAccount: (accountId: string) =>
+    json<{ accountId: string; status: CodexChatgptConnectorStatus; pool: CodexChatgptPoolSnapshot }>(
+      `/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}`,
+    ),
+  startCodexChatgptPoolLogin: (accountId: string, mode: CodexChatgptLoginMode) =>
+    json<{ login: CodexChatgptLoginSnapshot }>(`/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}/login`, {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    }).then((result) => result.login),
+  getCodexChatgptPoolLogin: (accountId: string, loginId: string) =>
+    json<{ login: CodexChatgptLoginSnapshot }>(
+      `/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}/login/${encodeURIComponent(loginId)}`,
+    ).then((result) => result.login),
+  cancelCodexChatgptPoolLogin: (accountId: string, loginId: string) =>
+    json<{ login: CodexChatgptLoginSnapshot }>(
+      `/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}/login/${encodeURIComponent(loginId)}`,
+      { method: "DELETE" },
+    ).then((result) => result.login),
+  logoutCodexChatgptPoolAccount: (accountId: string) =>
+    json<{ loggedOut: true; pool: CodexChatgptPoolSnapshot }>(
+      `/api/connectors/codex/pool/accounts/${encodeURIComponent(accountId)}/logout`,
+      { method: "POST", body: "{}" },
+    ),
   getKiroOrganizationPool: () =>
     json<KiroOrganizationPoolSnapshot>("/api/connectors/kiro/organization"),
   updateKiroOrganizationPool: (

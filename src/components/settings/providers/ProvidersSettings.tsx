@@ -12,6 +12,7 @@ import type {
 } from "@/lib/types";
 import { KiroCliConnectorCard } from "./KiroCliConnectorCard";
 import { CodexChatgptConnectorCard } from "./CodexChatgptConnectorCard";
+import { CodexChatgptPoolCard } from "./CodexChatgptPoolCard";
 import { KiroOrganizationPoolCard } from "./KiroOrganizationPoolCard";
 import { ProviderCatalog } from "./ProviderCatalog";
 import { ProviderAccountPoolDialog } from "./ProviderAccountPoolDialog";
@@ -228,6 +229,8 @@ export function ProvidersSettings({ config, onSaved }: ProvidersSettingsProps) {
       </header>
 
       <CodexChatgptConnectorCard onActivated={onSaved} />
+
+      <CodexChatgptPoolCard onActivated={onSaved} />
 
       <KiroCliConnectorCard />
 

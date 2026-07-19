@@ -37,6 +37,12 @@ import {
   serializeKiroOrganizationSecrets,
 } from "./kiro-organization-config.js";
 import {
+  codexChatgptRouterPool,
+  isCodexChatgptPoolProvider,
+  normalizeCodexChatgptPool,
+  readyCodexChatgptPoolAccounts,
+} from "./codex-chatgpt-pool-config.js";
+import {
   normalizeStoredModelCapabilities,
   resolveModelCapabilities,
 } from "./model-capabilities.js";
@@ -652,6 +658,16 @@ export function normalizeGatewayConfig(value) {
   }));
   // Keep session metadata even when the gate is closed so operators can revoke.
   const browserSubscription = normalizeBrowserSubscriptionPublicConfig(source.browserSubscription);
+  const codexChatgptPool = normalizeCodexChatgptPool(source.codexChatgptPool ?? {});
+  // v0.7.4 exposed one official personal Codex connector.  Preserve that
+  // explicitly on migration; a newly-created managed pool must never pretend
+  // that a personal ChatGPT login exists.
+  if (
+    source.codexChatgptPool === undefined
+    && unique.some((provider) => isCodexChatgptPoolProvider(provider))
+  ) {
+    codexChatgptPool.personalConnectorEnabled = true;
+  }
   return {
     version: 3,
     activeProviderId: activeProvider?.id ?? "",
@@ -668,6 +684,7 @@ export function normalizeGatewayConfig(value) {
     orchestration,
     pipelines: normalizePipelines(source.pipelines, orchestration.profiles),
     kiroOrganization: normalizeKiroOrganizationConfig(source.kiroOrganization ?? {}),
+    codexChatgptPool,
     workspace: typeof source.workspace === "string" ? source.workspace : "",
     engine,
     accessControl,
@@ -857,6 +874,31 @@ export function hasStoredProviderCredentials(provider, secretValue, context = {}
 }
 
 export function readyProviderAccounts(provider, secretState, config) {
+  if (isCodexChatgptPoolProvider(provider)) {
+    const pool = normalizeCodexChatgptPool(config?.codexChatgptPool);
+    // The pre-pool personal connector remains backwards compatible.  It owns
+    // the user's normal Codex profile and is authenticated by the official
+    // runtime at activation time; managed profiles are opt-in.
+    if (!pool.enabled && pool.personalConnectorEnabled) return [{
+      id: "primary",
+      name: "Personal official Codex",
+      enabled: true,
+      weight: 1,
+      priority: 0,
+      maxConcurrency: 1,
+      status: "ready",
+    }];
+    return pool.enabled ? readyCodexChatgptPoolAccounts(pool).map((account) => ({
+      id: account.id,
+      name: account.name,
+      enabled: account.enabled,
+      weight: account.weight,
+      priority: account.priority,
+      maxConcurrency: account.maxConcurrency,
+      status: account.status,
+      ...(account.modelIds ? { modelIds: [...account.modelIds] } : {}),
+    })) : [];
+  }
   const pool = normalizeProviderAccountPool(provider.accountPool, provider.models);
   const members = pool.enabled ? pool.members : pool.members.filter((member) => member.id === "primary");
   return members.filter((member) => member.enabled && hasStoredProviderCredentials(
@@ -876,14 +918,40 @@ export function getActiveProvider(config) {
     ?? null;
 }
 
+function publicAccountPool(provider, config) {
+  if (!isCodexChatgptPoolProvider(provider)) {
+    return normalizeProviderAccountPool(provider.accountPool, provider.models);
+  }
+  const managed = normalizeCodexChatgptPool(config.codexChatgptPool);
+  if (managed.enabled || !managed.personalConnectorEnabled) {
+    return codexChatgptRouterPool(managed);
+  }
+  return {
+    enabled: false,
+    strategy: "balanced",
+    sessionAffinity: true,
+    members: [{
+      id: "primary",
+      name: "Personal official Codex",
+      enabled: true,
+      weight: 1,
+      priority: 0,
+      maxConcurrency: 1,
+      status: "ready",
+    }],
+  };
+}
+
 export function publicGatewayConfig(config, secrets) {
   const active = getActiveProvider(config);
   const orchestration = normalizeOrchestration(config.orchestration, config.providers);
-  const safeProviders = config.providers.map((provider) => ({
-    ...provider,
-    accountPool: {
-      ...normalizeProviderAccountPool(provider.accountPool, provider.models),
-      members: normalizeProviderAccountPool(provider.accountPool, provider.models).members.map((member) => {
+  const safeProviders = config.providers.map((provider) => {
+    const accountPool = publicAccountPool(provider, config);
+    return {
+      ...provider,
+      accountPool: {
+        ...accountPool,
+        members: accountPool.members.map((member) => {
         const credentials = getProviderAccountCredentials(secrets, provider.id, member.id);
         return {
           ...member,
@@ -893,16 +961,17 @@ export function publicGatewayConfig(config, secrets) {
               && hasStoredProviderCredentials(provider, credentials, { config, secrets })),
           ready: hasStoredProviderCredentials(provider, credentials, { config, secrets }),
         };
-      }),
-    },
-    hasKey: hasReadyProviderCredentials(provider, secrets, config),
-    hasStoredCredentials: Object.keys(getProviderAccountCredentials(secrets, provider.id)).length > 0
-      || (provider.credentialSource === "browser-subscription"
-        && hasStoredProviderCredentials(provider, {}, { config, secrets })),
-    ...(provider.credentialSource === "browser-subscription"
-      ? { credentialSource: "browser-subscription" }
-      : {}),
-  }));
+        }),
+      },
+      hasKey: hasReadyProviderCredentials(provider, secrets, config),
+      hasStoredCredentials: Object.keys(getProviderAccountCredentials(secrets, provider.id)).length > 0
+        || (provider.credentialSource === "browser-subscription"
+          && hasStoredProviderCredentials(provider, {}, { config, secrets })),
+      ...(provider.credentialSource === "browser-subscription"
+        ? { credentialSource: "browser-subscription" }
+        : {}),
+    };
+  });
   const messaging = object(object(config.engine).messaging);
   return {
     provider: active?.baseURL ?? "",

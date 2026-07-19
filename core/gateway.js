@@ -118,6 +118,16 @@ import {
   CodexAppServerConnector,
 } from "./codex-app-server-connector.js";
 import { createCodexConnectorApi } from "./codex-connector-api.js";
+import { CodexChatgptProfileStore } from "./codex-chatgpt-profile-store.js";
+import {
+  CODEX_CHATGPT_POOL_PROVIDER_ID,
+  codexChatgptRouterPool,
+  isCodexChatgptPoolProvider,
+  normalizeCodexChatgptPool,
+  validateCodexChatgptPoolAccountPatch,
+  validateCodexChatgptPoolInput,
+  validateNewCodexChatgptPoolAccount,
+} from "./codex-chatgpt-pool-config.js";
 import {
   MAX_KIRO_ORGANIZATION_ACCOUNTS,
   KiroOrganizationConfigError,
@@ -1123,8 +1133,22 @@ export function requestErrorStatus(error) {
     code.startsWith("pipeline_")
     || code.startsWith("workspace_lease_")
   ) return 400;
-  if (error?.name === "SkillsStoreError" || error?.name === "ProviderConfigError" || error?.name === "ProviderDiscoveryError" || error?.name === "TeamConfigError" || error?.name === "PipelineConfigError" || error?.name === "KiroOrganizationConfigError" || error?.name === "KiroOrganizationBrokerError" || error?.name === "KiroOrganizationWorkerError" || error?.name === "BrowserSubscriptionAuthError" || error instanceof TypeError || error instanceof RangeError) return 400;
+  if (error?.name === "SkillsStoreError" || error?.name === "ProviderConfigError" || error?.name === "ProviderDiscoveryError" || error?.name === "TeamConfigError" || error?.name === "PipelineConfigError" || error?.name === "KiroOrganizationConfigError" || error?.name === "KiroOrganizationBrokerError" || error?.name === "KiroOrganizationWorkerError" || error?.name === "CodexChatgptPoolConfigError" || error?.name === "CodexChatgptProfileStoreError" || error?.name === "BrowserSubscriptionAuthError" || error instanceof TypeError || error instanceof RangeError) return 400;
   return 500;
+}
+
+/**
+ * A subscription entitlement is not a transient transport failure.  In
+ * particular, do not turn several personal ChatGPT profiles into an automatic
+ * hard-quota bypass.  The operator can inspect and re-authenticate a profile;
+ * only a genuine temporary failure may fall through to the next ready one.
+ */
+function classifyNativeCodexFailure(error) {
+  const detail = String(error?.code ?? error?.message ?? "").toLowerCase();
+  const entitlement = /quota(?:_|\s|-)*(?:exhausted|exceeded)|entitlement(?:_|\s|-)*(?:denied|exhausted)|subscription(?:_|\s|-)*(?:limit|quota|exhausted)|usage(?:_|\s|-)*limit|limit(?:_|\s|-)*reached|insufficient(?:_|\s|-)*(?:credit|quota)|billing/.test(detail);
+  if (entitlement) return { failureClass: "client", retryable: false, stopPool: true };
+  if (/auth|login|account/.test(detail)) return { failureClass: "auth_definite", retryable: true, stopPool: false };
+  return { failureClass: "network", retryable: true, stopPool: false };
 }
 
 function canonicalJson(value) {
@@ -2105,6 +2129,7 @@ export async function startGateway({
   codexConnector = new CodexAppServerConnector({
     version: process.env.KYREI_BUILD_ID ?? process.env.npm_package_version ?? "development",
   }),
+  codexPoolConnectorFactory,
   kiroOrganizationWorker,
   commandRunner,
   localPostgres,
@@ -2201,6 +2226,21 @@ export async function startGateway({
     ? { ...CORS_BASE, "Access-Control-Allow-Origin": origin, Vary: "Origin" }
     : {};
   await mkdir(dataDir, { recursive: true });
+  const codexProfileConnectorFactory = typeof codexPoolConnectorFactory === "function"
+    ? codexPoolConnectorFactory
+    : ({ codexHome }) => {
+      if (typeof codexConnector.createProfile === "function") {
+        return codexConnector.createProfile({ codexHome });
+      }
+      return new CodexAppServerConnector({
+        version: process.env.KYREI_BUILD_ID ?? process.env.npm_package_version ?? "development",
+        codexHome,
+      });
+    };
+  const codexProfileStore = new CodexChatgptProfileStore({
+    homeRoot: join(dataDir, "codex-chatgpt", "accounts"),
+    connectorFactory: codexProfileConnectorFactory,
+  });
   const persistence = createGatewayConfigPersistence({ dataDir, secretsCodec, requireProtectedSecrets });
   let loaded;
   try {
@@ -2465,6 +2505,94 @@ export async function startGateway({
     const result = configMutationTail.then(operation);
     configMutationTail = result.catch(() => {});
     return result;
+  };
+
+  const codexManagedPool = () => normalizeCodexChatgptPool(config.codexChatgptPool);
+  const codexManagedAccount = (accountId) => {
+    const account = codexManagedPool().accounts.find((candidate) => candidate.id === accountId);
+    if (!account) {
+      const error = new Error("codex_chatgpt_pool_account_not_found");
+      error.code = "codex_chatgpt_pool_account_not_found";
+      throw error;
+    }
+    return account;
+  };
+  const publicCodexManagedPool = () => {
+    const pool = codexManagedPool();
+    return {
+      enabled: pool.enabled,
+      strategy: pool.strategy,
+      sessionAffinity: pool.sessionAffinity,
+      accounts: pool.accounts.map((account) => ({
+        id: account.id,
+        name: account.name,
+        enabled: account.enabled,
+        weight: account.weight,
+        priority: account.priority,
+        maxConcurrency: account.maxConcurrency,
+        status: account.status,
+        ...(account.modelIds ? { modelIds: [...account.modelIds] } : {}),
+        ...(account.planType ? { planType: account.planType } : {}),
+        ...(account.lastVerifiedAt ? { lastVerifiedAt: account.lastVerifiedAt } : {}),
+      })),
+    };
+  };
+  const codexManagedConnectorApi = async (accountId) => {
+    codexManagedAccount(accountId);
+    return createCodexConnectorApi(await codexProfileStore.connectorFor(accountId));
+  };
+  const ensureCodexManagedProvider = (configState) => upsertProvider(configState, {
+    id: CODEX_CHATGPT_POOL_PROVIDER_ID,
+    name: "OpenAI Codex (ChatGPT)",
+    protocol: "codex-app-server",
+    baseURL: CODEX_CHATGPT_BASE_URL,
+    models: [{ id: CODEX_CHATGPT_DEFAULT_MODEL, name: "ChatGPT plan default" }],
+    enabled: true,
+    requiresApiKey: false,
+  }, CODEX_CHATGPT_POOL_PROVIDER_ID).config;
+  const commitCodexManagedPool = async (pool, { ensureProvider = false, activate = false } = {}) => {
+    let nextConfig = normalizeGatewayConfig({
+      ...config,
+      codexChatgptPool: normalizeCodexChatgptPool(pool),
+    });
+    if (ensureProvider) nextConfig = ensureCodexManagedProvider(nextConfig);
+    if (activate) {
+      nextConfig = selectExistingProviderModel(
+        nextConfig,
+        CODEX_CHATGPT_POOL_PROVIDER_ID,
+        CODEX_CHATGPT_DEFAULT_MODEL,
+      );
+    } else {
+      nextConfig = reconcileReadyRuntimeConfig(nextConfig, secrets);
+    }
+    await saveConfig(nextConfig, secrets);
+    config = nextConfig;
+    invalidateProviderRuntime(CODEX_CHATGPT_POOL_PROVIDER_ID);
+    return publicCodexManagedPool();
+  };
+  const refreshCodexManagedAccount = async (accountId) => {
+    const connector = await codexManagedConnectorApi(accountId);
+    const status = await connector.status();
+    const snapshot = await mutateConfig(async () => {
+      const current = codexManagedPool();
+      const account = current.accounts.find((candidate) => candidate.id === accountId);
+      if (!account) {
+        const error = new Error("codex_chatgpt_pool_account_not_found");
+        error.code = "codex_chatgpt_pool_account_not_found";
+        throw error;
+      }
+      const nextPool = {
+        ...current,
+        accounts: current.accounts.map((candidate) => candidate.id === accountId ? {
+          ...candidate,
+          status: candidate.enabled && status.authenticated ? "ready" : candidate.enabled ? "auth-required" : "disabled",
+          ...(status.authenticated && status.planType ? { planType: status.planType } : { planType: undefined }),
+          ...(status.authenticated ? { lastVerifiedAt: Date.now() } : {}),
+        } : candidate),
+      };
+      return commitCodexManagedPool(nextPool, { ensureProvider: true });
+    });
+    return { accountId, status, pool: snapshot };
   };
 
   const KIRO_ORGANIZATION_ACCOUNT_INPUT_FIELDS = new Set([
@@ -5001,6 +5129,35 @@ export async function startGateway({
   const accountPoolRouters = new Map();
   const providerRuntimeGenerations = new Map();
 
+  function runtimePoolFor(provider, configState = config) {
+    if (!isCodexChatgptPoolProvider(provider)) {
+      return normalizeProviderAccountPool(provider.accountPool, provider.models);
+    }
+    const managedConfig = normalizeCodexChatgptPool(configState.codexChatgptPool);
+    const managed = codexChatgptRouterPool(managedConfig);
+    if (managed.enabled) return managed;
+    // Preserve the existing one-account official connector until the operator
+    // explicitly enables managed profiles.  The personal runtime never shares
+    // its CODEX_HOME with the managed pool.
+    if (!managedConfig.personalConnectorEnabled) {
+      return { enabled: true, strategy: "balanced", sessionAffinity: true, members: [] };
+    }
+    return {
+      enabled: false,
+      strategy: "balanced",
+      sessionAffinity: true,
+      members: [{
+        id: "primary",
+        name: "Personal official Codex",
+        enabled: true,
+        weight: 1,
+        priority: 0,
+        maxConcurrency: 1,
+        status: "ready",
+      }],
+    };
+  }
+
   function providerRuntimeGeneration(providerId) {
     return providerRuntimeGenerations.get(providerId) ?? 0;
   }
@@ -5036,7 +5193,7 @@ export async function startGateway({
   }
 
   function accountPoolRouterFor(provider, secretState = secrets, configState = config) {
-    const pool = normalizeProviderAccountPool(provider.accountPool, provider.models);
+    const pool = runtimePoolFor(provider, configState);
     const readyIds = new Set(readyProviderAccounts(provider, secretState, configState).map((account) => account.id));
     const members = pool.members.map((member) => ({
       ...member,
@@ -5087,7 +5244,7 @@ export async function startGateway({
         }
         const provider = configState.providers.find((candidate) => candidate.id === target.providerId);
         if (!provider) return null;
-        const memberExists = normalizeProviderAccountPool(provider.accountPool, provider.models).members.some(
+        const memberExists = runtimePoolFor(provider, configState).members.some(
           (member) => member.id === target.accountId,
         );
         if (!memberExists) return null;
@@ -5131,7 +5288,7 @@ export async function startGateway({
   function publicProviderAccountPool(providerId) {
     const provider = config.providers.find((candidate) => candidate.id === providerId);
     if (!provider) throw new ProviderConfigError("provider_not_found");
-    const pool = normalizeProviderAccountPool(provider.accountPool, provider.models);
+    const pool = runtimePoolFor(provider);
     const publicProvider = publicConfig().providers.find((candidate) => candidate.id === providerId);
     const runtimeById = new Map(accountPoolRouterFor(provider).listMembers().map((member) => [member.id, member]));
     return {
@@ -5169,7 +5326,7 @@ export async function startGateway({
       { fallbackToDefault },
     );
     const router = accountPoolRouterFor(provider, secretState);
-    const poolEnabled = normalizeProviderAccountPool(provider.accountPool, provider.models).enabled;
+    const poolEnabled = runtimePoolFor(provider, configState).enabled;
     const ordered = router.orderedCandidates({
       sessionId: routingKey ?? sessionId,
       preferredAccountId,
@@ -6478,28 +6635,6 @@ export async function startGateway({
         convoFor(sessionId),
         continuationContextFor(sessionId),
       ]);
-      // Wave F: always pass a goal for harness (plan gate / goal-verify) from the
-      // latest user turn when the client did not set one. No secrets — chat text only.
-      let derivedGoal = "";
-      for (let i = turnMessages.length - 1; i >= 0; i--) {
-        const m = turnMessages[i];
-        if (!m || m.role !== "user") continue;
-        if (typeof m.content === "string" && m.content.trim()) {
-          derivedGoal = m.content.trim().slice(0, 4_000);
-          break;
-        }
-        if (Array.isArray(m.content)) {
-          const text = m.content
-            .map((part) => (typeof part === "string" ? part : (part && typeof part === "object" && typeof part.text === "string" ? part.text : "")))
-            .filter(Boolean)
-            .join("\n")
-            .trim();
-          if (text) {
-            derivedGoal = text.slice(0, 4_000);
-            break;
-          }
-        }
-      }
       const common = {
         emit: event => emitActiveTurnEvent(turn, event),
         messages: turnMessages,
@@ -6518,7 +6653,6 @@ export async function startGateway({
         ...(workerProvider ? { workerProvider } : {}),
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
         ...(team ? { team } : {}),
-        ...(derivedGoal ? { goal: derivedGoal } : {}),
         ...(continuationContext ? { continuationContext } : {}),
         workspace: config.workspace,
         globalMemoryDir: join(dataDir, "memory"),
@@ -6552,21 +6686,78 @@ export async function startGateway({
               path: join(attachmentsRoot(), image.relPath),
             }))
           : [];
-        result = await codexConnector.runTurn({
-          threadId: session.codexThreadId,
-          prompt: typeof text === "string" ? text : "",
-          images: codexImages,
-          workspace: storedUser?.workspace || config.workspace,
-          model: mainTarget.model,
-          signal: controller.signal,
-          onThread: async (codexThreadId) => {
-            // The opaque Codex thread id is enough to resume a ChatGPT-backed
-            // session after a Kyrei restart; it is not an OAuth credential.
-            store.upsertSession({ id: sessionId, codexThreadId, updatedAt: new Date().toISOString() });
-            await store.flush();
-          },
-          onEvent: common.emit,
-        });
+        const nativeCandidates = orderedCapacity.filter((target) => target.protocol === "codex-app-server");
+        let lastNativeError = null;
+        for (const candidate of nativeCandidates) {
+          const attempt = providerAttemptLifecycle.acquire(candidate);
+          if (!attempt) continue;
+          // A managed account owns its own durable Codex thread namespace.
+          // Keeping an id per account prevents a pool failover from trying to
+          // resume account A's thread under account B.
+          const codexAccountId = typeof candidate.accountId === "string" ? candidate.accountId : "";
+          const usesManagedCodexProfile = codexManagedPool().enabled
+            && codexManagedPool().accounts.some((account) => account.id === codexAccountId);
+          const codexThreads = session?.codexThreadIds && typeof session.codexThreadIds === "object"
+            ? session.codexThreadIds
+            : {};
+          try {
+            const codexRuntime = usesManagedCodexProfile
+              ? await codexProfileStore.connectorFor(codexAccountId)
+              : codexConnector;
+            result = await codexRuntime.runTurn({
+              threadId: usesManagedCodexProfile ? codexThreads[codexAccountId] : session.codexThreadId,
+              prompt: typeof text === "string" ? text : "",
+              images: codexImages,
+              workspace: storedUser?.workspace || config.workspace,
+              model: candidate.model,
+              ...(safeModelParams ? { modelParams: safeModelParams } : {}),
+              ...(usesManagedCodexProfile ? { accountId: codexAccountId } : {}),
+              signal: controller.signal,
+              onThread: async (codexThreadId) => {
+                // The opaque Codex thread id is enough to resume a
+                // ChatGPT-backed session after a Kyrei restart; it is not an
+                // OAuth credential.
+                const latest = store.getSession(sessionId);
+                const existingThreads = latest?.codexThreadIds && typeof latest.codexThreadIds === "object"
+                  ? latest.codexThreadIds
+                  : {};
+                store.upsertSession({
+                  id: sessionId,
+                  ...(usesManagedCodexProfile
+                    ? {
+                        codexThreadIds: { ...existingThreads, [codexAccountId]: codexThreadId },
+                        // Thread creation is the durable point at which a
+                        // managed failover becomes the session's affinity.
+                        // Persist it together with the per-account thread so
+                        // a reload or a quick follow-up cannot route back to
+                        // the account that just failed.
+                        providerAccountId: codexAccountId,
+                      }
+                    : { codexThreadId }),
+                  updatedAt: new Date().toISOString(),
+                });
+                await store.flush();
+              },
+              onEvent: common.emit,
+            });
+            providerAttemptLifecycle.release(attempt, { outcome: "success" });
+            mainTarget = candidate;
+            break;
+          } catch (error) {
+            const failure = classifyNativeCodexFailure(error);
+            providerAttemptLifecycle.release(attempt, {
+              outcome: failure.retryable ? "retryable-error" : "terminal-error",
+              failureClass: failure.failureClass,
+              retryable: failure.retryable,
+            });
+            if (controller.signal.aborted || error?.name === "AbortError") throw error;
+            if (failure.stopPool) throw error;
+            lastNativeError = error;
+          }
+        }
+        if (!result) {
+          throw lastNativeError ?? new ProviderConfigError("provider_accounts_unavailable");
+        }
       } else {
         const mod = await getEngine();
         result = await mod.runKyreiChat({
@@ -6676,7 +6867,7 @@ export async function startGateway({
       const currentSelectedProvider = config.providers.find((provider) => provider.id === selectedProviderId);
       const selectedAccountIsCurrent = Boolean(
         currentSelectedProvider
-        && normalizeProviderAccountPool(currentSelectedProvider.accountPool, currentSelectedProvider.models)
+        && runtimePoolFor(currentSelectedProvider)
           .members.some((member) => member.id === selectedAccountId),
       );
       store.upsertSession({
@@ -9141,6 +9332,119 @@ export async function startGateway({
       if (path === "/api/connectors/codex" && req.method === "GET") {
         return sendJson(res, 200, await codexApi.status());
       }
+      // Managed official ChatGPT profiles.  Each row gets an isolated
+      // CODEX_HOME below Kyrei data; the browser login and token refresh are
+      // still exclusively performed by the official Codex runtime.
+      if (path === "/api/connectors/codex/pool" && req.method === "GET") {
+        return sendJson(res, 200, publicCodexManagedPool());
+      }
+      if (path === "/api/connectors/codex/pool" && req.method === "PATCH") {
+        const body = await readBody(req);
+        const snapshot = await mutateConfig(async () => (
+          commitCodexManagedPool(validateCodexChatgptPoolInput(body.pool ?? body, codexManagedPool()), {
+            ensureProvider: true,
+          })
+        ));
+        return sendJson(res, 200, snapshot);
+      }
+      if (path === "/api/connectors/codex/pool/activate" && req.method === "POST") {
+        assertOnlyFields(await readBody(req), new Set());
+        const pool = codexManagedPool();
+        if (!pool.enabled || !pool.accounts.some((account) => account.enabled && account.status === "ready")) {
+          const error = new Error("codex_chatgpt_pool_accounts_unavailable");
+          error.code = "codex_chatgpt_pool_accounts_unavailable";
+          throw error;
+        }
+        const snapshot = await mutateConfig(async () => {
+          await commitCodexManagedPool(pool, { ensureProvider: true, activate: true });
+          return publicGatewayConfig(config, secrets);
+        });
+        return sendJson(res, 200, snapshot);
+      }
+      if (path === "/api/connectors/codex/pool/accounts" && req.method === "POST") {
+        const body = await readBody(req);
+        const snapshot = await mutateConfig(async () => {
+          const pool = codexManagedPool();
+          const account = validateNewCodexChatgptPoolAccount(body.account ?? body, pool);
+          // Prepare the fixed private directory before publishing the account.
+          // A failed filesystem operation cannot leave a selectable profile.
+          await codexProfileStore.ensureProfile(account.id);
+          return commitCodexManagedPool({
+            ...pool,
+            accounts: [...pool.accounts, account],
+          }, { ensureProvider: true });
+        });
+        return sendJson(res, 201, snapshot);
+      }
+      const codexManagedAccountMatch = path.match(/^\/api\/connectors\/codex\/pool\/accounts\/([^/]+)(\/.*)?$/);
+      if (codexManagedAccountMatch) {
+        const accountId = decodeURIComponent(codexManagedAccountMatch[1]);
+        const action = codexManagedAccountMatch[2] ?? "";
+        codexManagedAccount(accountId);
+        if (!action && req.method === "GET") {
+          return sendJson(res, 200, await refreshCodexManagedAccount(accountId));
+        }
+        if (!action && req.method === "PATCH") {
+          const body = await readBody(req);
+          const snapshot = await mutateConfig(async () => {
+            const pool = codexManagedPool();
+            const current = pool.accounts.find((account) => account.id === accountId);
+            const account = validateCodexChatgptPoolAccountPatch(body.account ?? body, current);
+            return commitCodexManagedPool({
+              ...pool,
+              accounts: pool.accounts.map((candidate) => candidate.id === accountId ? account : candidate),
+            }, { ensureProvider: true });
+          });
+          return sendJson(res, 200, snapshot);
+        }
+        if (!action && req.method === "DELETE") {
+          const connector = await codexManagedConnectorApi(accountId);
+          const status = await connector.status();
+          if (status.authenticated) await connector.logout();
+          await codexProfileStore.removeProfile(accountId);
+          const snapshot = await mutateConfig(async () => {
+            const pool = codexManagedPool();
+            return commitCodexManagedPool({
+              ...pool,
+              accounts: pool.accounts.filter((candidate) => candidate.id !== accountId),
+            }, { ensureProvider: true });
+          });
+          for (const session of store.sessions) {
+            if (session.providerId === CODEX_CHATGPT_POOL_PROVIDER_ID && session.providerAccountId === accountId) {
+              store.upsertSession({ id: session.id, providerAccountId: undefined });
+            }
+          }
+          return sendJson(res, 200, snapshot);
+        }
+        if (action === "/login" && req.method === "POST") {
+          return sendJson(res, 202, await (await codexManagedConnectorApi(accountId)).startLogin(await readBody(req)));
+        }
+        const loginMatch = action.match(/^\/login\/([^/]+)$/);
+        if (loginMatch) {
+          const connector = await codexManagedConnectorApi(accountId);
+          const loginId = decodeURIComponent(loginMatch[1]);
+          if (req.method === "GET") {
+            const value = connector.loginStatus(loginId);
+            if (value.login?.status === "succeeded") await refreshCodexManagedAccount(accountId);
+            return sendJson(res, 200, value);
+          }
+          if (req.method === "DELETE") return sendJson(res, 200, await connector.cancelLogin(loginId));
+        }
+        if (action === "/logout" && req.method === "POST") {
+          assertOnlyFields(await readBody(req), new Set());
+          await (await codexManagedConnectorApi(accountId)).logout();
+          const snapshot = await mutateConfig(async () => {
+            const pool = codexManagedPool();
+            return commitCodexManagedPool({
+              ...pool,
+              accounts: pool.accounts.map((candidate) => candidate.id === accountId
+                ? { ...candidate, status: candidate.enabled ? "auth-required" : "disabled", planType: undefined, lastVerifiedAt: undefined }
+                : candidate),
+            }, { ensureProvider: true });
+          });
+          return sendJson(res, 200, { loggedOut: true, pool: snapshot });
+        }
+      }
       if (path === "/api/connectors/codex/login" && req.method === "POST") {
         return sendJson(res, 202, await codexApi.startLogin(await readBody(req)));
       }
@@ -9177,8 +9481,12 @@ export async function startGateway({
             requiresApiKey: false,
           };
           const updated = upsertProvider(config, provider, CODEX_CHATGPT_PROVIDER_ID);
+          const personalPool = normalizeCodexChatgptPool(updated.config.codexChatgptPool);
           const nextConfig = selectExistingProviderModel(
-            updated.config,
+            normalizeGatewayConfig({
+              ...updated.config,
+              codexChatgptPool: { ...personalPool, personalConnectorEnabled: true },
+            }),
             CODEX_CHATGPT_PROVIDER_ID,
             CODEX_CHATGPT_DEFAULT_MODEL,
           );
@@ -11261,6 +11569,7 @@ export async function startGateway({
       const connectorClose = Promise.all([
         Promise.resolve(kiroApi.close()).catch(() => undefined),
         Promise.resolve(codexApi.close()).catch(() => undefined),
+        Promise.resolve(codexProfileStore.close()).catch(() => undefined),
       ]);
       const organizationClose = Promise.resolve(kiroOrganizationBroker.close()).catch(() => undefined);
       // Cooperative providers settle normally; incompatible transports are

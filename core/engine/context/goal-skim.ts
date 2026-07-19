@@ -84,6 +84,33 @@ export function userAuthorizedBuild(text: string): boolean {
   return false;
 }
 
+const SYNTHETIC_USER_MESSAGE_PATTERNS = [
+  /^\[Kyrei engine recovery checkpoint\b/i,
+  /^\[Kyrei working state\b/i,
+  /^## Context summary\b/i,
+  /^### Previous rolling summary\b/i,
+  /^--- END OF CONTEXT SUMMARY ---$/i,
+];
+
+function contentToText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  const parts = content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part === "object" && "text" in part) {
+        return String((part as { text?: unknown }).text ?? "");
+      }
+      return "";
+    })
+    .filter(Boolean);
+  return parts.join("\n").trim();
+}
+
+function isSyntheticUserMessage(text: string): boolean {
+  return SYNTHETIC_USER_MESSAGE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export interface SkimOptions {
   maxChars: number;
   /** Focus query (goal or tool focus). */
@@ -181,18 +208,10 @@ export function lastUserTextFromMessages(
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m?.role !== "user") continue;
-    const c = m.content;
-    if (typeof c === "string" && c.trim()) return c.trim();
-    if (Array.isArray(c)) {
-      const parts = c
-        .map((p) => {
-          if (typeof p === "string") return p;
-          if (p && typeof p === "object" && "text" in p) return String((p as { text?: unknown }).text ?? "");
-          return "";
-        })
-        .filter(Boolean);
-      if (parts.length) return parts.join("\n").trim();
-    }
+    const text = contentToText(m.content);
+    if (!text) continue;
+    if (isSyntheticUserMessage(text)) continue;
+    return text;
   }
   return "";
 }

@@ -819,6 +819,28 @@ export interface CodexChatgptConnectorStatus {
   error?: string;
 }
 
+/** A Kyrei-owned isolated official Codex profile; never contains OAuth data. */
+export interface CodexChatgptPoolAccount {
+  id: string;
+  name: string;
+  enabled: boolean;
+  weight: number;
+  priority: number;
+  /** Fixed at one because one official app-server profile owns one active turn. */
+  maxConcurrency: 1;
+  status: "ready" | "auth-required" | "cooldown" | "disabled";
+  modelIds?: string[];
+  planType?: string;
+  lastVerifiedAt?: number;
+}
+
+export interface CodexChatgptPoolSnapshot {
+  enabled: boolean;
+  strategy: ProviderAccountPoolStrategy;
+  sessionAffinity: boolean;
+  accounts: CodexChatgptPoolAccount[];
+}
+
 export interface AppConfig {
   /** Compatibility fields for legacy renderer surfaces; describe the active provider. */
   provider: string;

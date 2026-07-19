@@ -141,6 +141,50 @@ describe("stage B middle summary", () => {
     expect(text.toLowerCase()).toMatch(/task|done|open|dark mode|css/i);
   });
 
+  it("buildHeuristicSummary flattens the previous rolling summary instead of nesting it", () => {
+    const previousSummary = [
+      "## Context summary (reference only)",
+      "_This is historical context for the model._",
+      "",
+      "### Previous rolling summary",
+      "## Context summary (reference only)",
+      "_Nested history should not repeat._",
+      "",
+      "### Previous rolling summary",
+      "## Context summary (reference only)",
+      "_Deeper nested history should not repeat._",
+      "",
+      "### Task snapshot",
+      "- deepest historical work",
+      "",
+      "### Open threads",
+      "- deepest historical follow-up",
+      "",
+      SUMMARY_END_MARKER,
+      "",
+      "### Task snapshot",
+      "- current outer work",
+      "",
+      "### Open threads",
+      "- current outer follow-up",
+      "",
+      SUMMARY_END_MARKER,
+    ].join("\n");
+    const middle = [
+      { role: "user", content: "Please implement dark mode" },
+      { role: "assistant", content: "Next: wire Settings toggle." },
+    ] as ModelMessage[];
+
+    const text = buildHeuristicSummary(middle, { previousSummary });
+    expect((text.match(/### Previous rolling summary/g) ?? []).length).toBe(1);
+    expect(text).not.toContain("Nested history should not repeat");
+    expect(text).not.toContain("Deeper nested history should not repeat");
+    expect(text).toContain("### Task snapshot");
+    expect(text).toContain("current outer work");
+    expect(text).toContain("current outer follow-up");
+    expect(text).toContain("Please implement dark mode");
+  });
+
   it("reassembleWithSummary inserts one summary message", () => {
     const head = [{ role: "user", content: "start" }] as ModelMessage[];
     const tail = [{ role: "user", content: "latest" }] as ModelMessage[];

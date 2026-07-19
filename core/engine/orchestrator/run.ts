@@ -8,6 +8,7 @@
  */
 
 import { streamText, type ModelMessage, type ToolSet } from "ai";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type {
   RunKyreiChatOpts,
@@ -96,6 +97,7 @@ import { mergeProviderOptions, packSystemForCache } from "../prompt/cache-packin
 import type { ToolName } from "../prompt/tool-descriptions.js";
 import { resolvePersonalityText } from "../personality-catalog.js";
 import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
+import { toolSignature } from "../reliability/loop-detect.js";
 import { makePrepareStep } from "./prepare-step.js";
 import { emitNoKeyGuidance } from "./no-key-guidance.js";
 import { bridgeStream } from "../stream-bridge/bridge.js";
@@ -1090,7 +1092,9 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         ...((opts.messages ?? []) as ModelMessage[]),
         ...(responseMessages ?? []),
       ];
-      const artifact = extractHeuristicHandoff(history, opts.sessionId, "heal_handoff");
+      const artifact = extractHeuristicHandoff(history, opts.sessionId, "heal_handoff", {
+        intent: opts.goal,
+      });
       artifact.openQuestions = [
         ...artifact.openQuestions,
         "Self-heal FSM reached handoff after consecutive hard tool failures.",
@@ -1462,6 +1466,66 @@ function sumUsage(left: Usage | undefined, right: Usage | undefined): Usage | un
   };
 }
 
+/**
+ * A recovery window is useful only when it yields new, externally checkable
+ * evidence.  Plain narration and hidden checkpoint prompts are deliberately
+ * excluded: counting them as progress is what allowed the model to keep
+ * rephrasing its plan forever after a bounded tool window.
+ */
+const RECOVERY_MUTATING_TOOLS = new Set(["write_file", "edit_file"]);
+
+function normalizeRecoveryObservation(value: string | undefined): string {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    // Fresh timestamps and generated epoch ids must not make an identical
+    // observation look like new project evidence on every retry.
+    .replace(/\b\d{4}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?Z?\b/g, "<timestamp>")
+    .replace(
+      /(\b(?:timestamp|updatedAt|createdAt|generatedAt)\s*[:=]\s*)["']?[^,\n}"']+/gi,
+      (_match, prefix: string) => `${prefix}<timestamp>`,
+    )
+    .trim();
+}
+
+function recoveryObservationDigest(value: string | undefined): string {
+  return createHash("sha256")
+    .update(normalizeRecoveryObservation(value))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+/**
+ * Returns whether this bounded pass brought forward evidence not seen in an
+ * earlier recovery window.  A successful workspace mutation always counts as
+ * progress because it produces a durable checkpoint/diff for the next pass.
+ */
+function recordRecoveryProgress(
+  parts: readonly MessagePart[],
+  seenObservations: Set<string>,
+): boolean {
+  let progressed = false;
+  for (const part of parts) {
+    if (part.type !== "tool" || part.running) continue;
+
+    const isWorkspaceMutation = !part.error
+      && (RECOVERY_MUTATING_TOOLS.has(part.name) || Boolean(part.snapshotId) || Boolean(part.inlineDiff));
+    // A model-issued tool call without a result is not evidence; it may be an
+    // incomplete stream fragment at the exact point the window stopped.
+    if (typeof part.result !== "string" && typeof part.error !== "string" && !isWorkspaceMutation) continue;
+    const outcome = part.error
+      ? `error:${part.error}`
+      : `result:${part.result ?? ""}`;
+    const observation = `${toolSignature(part.name, part.args)}::${recoveryObservationDigest(outcome)}`;
+    if (!seenObservations.has(observation)) {
+      seenObservations.add(observation);
+      progressed = true;
+    }
+
+    if (isWorkspaceMutation) progressed = true;
+  }
+  return progressed;
+}
+
 function recoveryBudgetReached(opts: RunKyreiChatOpts, usage: Usage | undefined): boolean {
   if (!usage) return false;
   const cfg = resolveEngineConfig(opts.config).config;
@@ -1499,14 +1563,21 @@ function recoveryDirective(
  * approvals/review, cancellation, or genuine completion terminate the turn.
  */
 export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChatResult> {
+  // `goal` is a deliberate completion contract supplied by a caller (for
+  // example a mission), not a synonym for every normal chat message.  Keep the
+  // original user text separately for recovery guidance while preserving the
+  // intent router's decision about whether a regular turn merits verification.
+  const { goal: requestedGoal, ...passOpts } = opts;
+  const explicitGoal = requestedGoal?.trim() ?? "";
   let messages = [...((opts.messages ?? []) as ModelMessage[])];
-  const originalGoal = opts.goal?.trim() || lastUserTextFromMessages(messages);
+  const originalGoal = explicitGoal || lastUserTextFromMessages(messages);
   let text = "";
   let parts: MessagePart[] = [];
   let responseMessages: ModelMessage[] = [];
   let attempts: ProviderAttemptOutcome[] = [];
   let usage: Usage | undefined;
   let passNumber = 0;
+  const seenRecoveryObservations = new Set<string>();
 
   while (true) {
     passNumber += 1;
@@ -1515,9 +1586,9 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     let result: RunKyreiChatResult;
     try {
       result = await runKyreiChatPass({
-        ...opts,
+        ...passOpts,
         messages,
-        ...(originalGoal ? { goal: originalGoal } : {}),
+        ...(explicitGoal ? { goal: explicitGoal } : {}),
         emit: (event: KyreiEvent) => {
           if (event.type === "message.complete") return;
           if (event.type === "message.delta") {
@@ -1550,6 +1621,7 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     parts = mergeRecoveryParts(parts, stripRecoveryMarkersFromParts(result.parts));
     attempts = [...attempts, ...result.attempts];
     usage = sumUsage(usage, result.usage);
+    const madeRecoveryProgress = recordRecoveryProgress(result.parts, seenRecoveryObservations);
     const passResponseMessages = result.responseMessages?.length
       ? result.responseMessages
       : result.text
@@ -1558,9 +1630,16 @@ export async function runKyreiChat(opts: RunKyreiChatOpts): Promise<RunKyreiChat
     responseMessages = [...responseMessages, ...passResponseMessages];
 
     const budgetReached = recoveryBudgetReached(opts, usage);
+    // The first bounded window establishes the observation baseline, so it is
+    // allowed one continuation even when it contains no completed tool result.
+    // Every later recovery must bring new checkable evidence or a real workspace
+    // change.  This is deliberately not a time/pass-count cap: long tasks keep
+    // running while they keep making progress, but a project-index/memory loop
+    // cannot manufacture progress by repeating the same observations.
     const shouldRecover = INTERNAL_RECOVERY_STATUSES.has(result.status)
       && !budgetReached
-      && !opts.abortSignal?.aborted;
+      && !opts.abortSignal?.aborted
+      && (passNumber === 1 || madeRecoveryProgress);
     if (shouldRecover) {
       messages = [
         ...messages,

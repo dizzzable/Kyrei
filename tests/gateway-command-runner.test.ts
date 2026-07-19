@@ -55,6 +55,7 @@ describe("gateway command runner dependency", () => {
       sessionId: session.id,
       commandRunner,
     }));
+    expect(runKyreiChat.mock.calls[0]?.[0]).not.toHaveProperty("goal");
     expect(commandRunner.run).not.toHaveBeenCalled();
   });
 

@@ -104,6 +104,38 @@ function clip(s: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
 }
 
+function flattenPreviousSummary(previousSummary: string): string {
+  const normalized = previousSummary.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "";
+
+  const afterMarker = normalized.includes("### Previous rolling summary")
+    ? normalized.split("### Previous rolling summary").pop()!.trim()
+    : normalized;
+
+  const anchors = [
+    "### Task snapshot",
+    "### Done / actions",
+    "### Tools used",
+    "### Open threads",
+    "### Key files",
+    "### Notes",
+    "### Archived middle transcript",
+  ];
+
+  let start = -1;
+  for (const anchor of anchors) {
+    const idx = afterMarker.lastIndexOf(anchor);
+    if (idx >= 0) {
+      start = idx;
+      if (anchor === "### Task snapshot") break;
+    }
+  }
+  const excerpt = (start >= 0 ? afterMarker.slice(start) : afterMarker)
+    .replace(/\n?--- END OF CONTEXT SUMMARY ---\s*$/i, "")
+    .trim();
+  return clip(excerpt, 1_200);
+}
+
 /**
  * Prune large tool-result outputs in messages older than the last N. Only
  * touches role:"tool" messages, never the assistant tool-call → pairing intact.
@@ -340,7 +372,10 @@ export function buildHeuristicSummary(
     "",
   ];
   if (opts.previousSummary?.trim()) {
-    lines.push("### Previous rolling summary", clip(opts.previousSummary, 1_200), "");
+    const previous = flattenPreviousSummary(opts.previousSummary);
+    if (previous) {
+      lines.push("### Previous rolling summary", clip(previous, 1_200), "");
+    }
   }
   const taskSnap = uniq(tasks, 4);
   if (taskSnap.length) {

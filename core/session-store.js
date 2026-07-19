@@ -192,6 +192,18 @@ function boundedSessionId(value) {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id) ? id : "";
 }
 
+function normalizeCodexThreadIds(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const next = {};
+  for (const [accountId, threadId] of Object.entries(value)) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(accountId)) continue;
+    if (typeof threadId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(threadId)) continue;
+    next[accountId] = threadId;
+    if (Object.keys(next).length >= 64) break;
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
 function normalizeSessionRecord(value) {
   const source = value && typeof value === "object" ? value : {};
   const accountBindingWasSupplied = Object.prototype.hasOwnProperty.call(source, "providerAccountId");
@@ -207,6 +219,7 @@ function normalizeSessionRecord(value) {
     continuationSourceSessionId: rawContinuationSource,
     continuationPacketVersion: rawContinuationPacketVersion,
     continuationCreatedAt: rawContinuationCreatedAt,
+    codexThreadIds: rawCodexThreadIds,
     codingMode: rawCodingMode,
     ...rest
   } = source;
@@ -242,6 +255,7 @@ function normalizeSessionRecord(value) {
     && Number.isFinite(Date.parse(rawContinuationCreatedAt))
     ? rawContinuationCreatedAt
     : undefined;
+  const codexThreadIds = normalizeCodexThreadIds(rawCodexThreadIds);
   // Drop stale archive/lineage fields from rest so clears work.
   const {
     archived: _a,
@@ -254,6 +268,7 @@ function normalizeSessionRecord(value) {
     continuationSourceSessionId: _cs,
     continuationPacketVersion: _cpv,
     continuationCreatedAt: _cca,
+    codexThreadIds: _cti,
     codingMode: _cm,
     ...cleanRest
   } = rest;
@@ -279,6 +294,7 @@ function normalizeSessionRecord(value) {
     ...(continuationSourceSessionId ? { continuationSourceSessionId } : {}),
     ...(continuationPacketVersion ? { continuationPacketVersion } : {}),
     ...(continuationCreatedAt ? { continuationCreatedAt } : {}),
+    ...(codexThreadIds ? { codexThreadIds } : {}),
     ...(codingMode ? { codingMode } : {}),
   };
 }

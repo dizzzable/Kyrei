@@ -54,6 +54,40 @@ describe("handoff", () => {
     expect(handoff.done).toContain("Created: src/new.ts (completed Kyrei tool receipt)");
     expect(handoff.openQuestions).toContain("Recent tool failure: permission denied");
   });
+
+  it("skips synthetic recovery and summary turns when deriving intent", () => {
+    const handoff = extractHeuristicHandoff([
+      {
+        role: "user",
+        content: "[Kyrei engine recovery checkpoint 4; not a new user request and not user-visible.]\nContinue the original task autonomously.",
+      },
+      {
+        role: "user",
+        content: "## Context summary (reference only)\n### Task snapshot\n- nested history that should not win intent",
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Implement the cache fix" }],
+      },
+    ] as never, "session-2", "window_limit");
+
+    expect(handoff.intent).toBe("Implement the cache fix");
+  });
+
+  it("prefers an explicitly supplied intent over inferred user text", () => {
+    const handoff = extractHeuristicHandoff([
+      {
+        role: "user",
+        content: "[Kyrei working state — re-pinned] keep the synthetic loop out of intent",
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Fallback text should not win" }],
+      },
+    ] as never, "session-3", "window_limit", { intent: "Fix the recovery loop" });
+
+    expect(handoff.intent).toBe("Fix the recovery loop");
+  });
 });
 
 describe("layers precedence", () => {

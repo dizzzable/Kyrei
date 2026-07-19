@@ -79,7 +79,7 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
       const mark = firedCheckpointMark(of.effective, checkpointBudget, firedMarks);
       if (mark !== null) {
         try {
-          const handoff = extractHeuristicHandoff(working, sessionId, "window_limit");
+          const handoff = extractHeuristicHandoff(working, sessionId, "window_limit", { intent: goal });
           const path = await writeHandoff(workspace, handoff);
           console.info(`[kyrei] Checkpoint mark ${(mark * 100).toFixed(0)}% → handoff ${path}`);
           if (ltmDir) {

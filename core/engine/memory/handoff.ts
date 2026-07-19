@@ -12,6 +12,7 @@ import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { z } from "zod";
 import type { ModelMessage } from "ai";
+import { lastUserTextFromMessages } from "../context/goal-skim.js";
 
 export const HandoffSchema = z.object({
   id: z.string(),
@@ -94,19 +95,14 @@ export function extractHeuristicHandoff(
   messages: readonly ModelMessage[],
   sessionId: string,
   trigger: "window_limit" | "phase_complete" | "explicit" | "heal_handoff",
+  opts: { intent?: string } = {},
 ): HandoffArtifact {
   const now = new Date().toISOString();
   const id = `handoff_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  
-  // Extract intent from last user message
-  let intent = "Continue current task";
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.role === "user" && typeof m.content === "string" && m.content.trim()) {
-      intent = m.content.trim().slice(0, 200);
-      break;
-    }
-  }
+
+  const explicitIntent = opts.intent?.trim();
+  const fallbackIntent = lastUserTextFromMessages(messages as Array<{ role?: string; content?: unknown }>)?.trim();
+  const intent = (explicitIntent || fallbackIntent || "Continue current task").slice(0, 200);
   
   // Extract *completed* local writes from tool receipts. Tool-call intent alone
   // is not proof: it may be denied, awaiting approval, or interrupted.

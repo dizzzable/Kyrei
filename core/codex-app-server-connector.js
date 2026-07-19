@@ -91,13 +91,23 @@ function resolutionEnvironment(source, platform) {
 }
 
 /** Build the small environment inherited by the official Codex CLI. */
-export function buildCodexAppServerEnvironment(source = process.env, { platform = process.platform } = {}) {
+export function buildCodexAppServerEnvironment(source = process.env, { platform = process.platform, codexHome } = {}) {
   const result = {};
   for (const [key, value] of Object.entries(source && typeof source === "object" ? source : {})) {
     const normalizedKey = platform === "win32" ? key.toUpperCase() : key;
     const allowed = CHILD_ENV_KEYS.has(normalizedKey)
       || (platform !== "win32" && POSIX_LOWERCASE_ENV_KEYS.has(key));
     if (allowed && safeEnvironmentValue(value)) result[key] = value;
+  }
+  // CODEX_HOME is deliberately never inherited from the parent process.  An
+  // isolated account profile is an explicit Kyrei-owned boundary; inheriting a
+  // developer's shell setting here could silently bind one account to another
+  // profile.  The value is validated again at the connector constructor.
+  if (codexHome !== undefined) {
+    if (!isLocalAbsolutePath(codexHome, platform) || codexHome.length > 4_096) {
+      throw connectorError("codex_app_server_home_invalid", "Codex profile directory must be an absolute local path");
+    }
+    result.CODEX_HOME = pathApi(platform).normalize(codexHome);
   }
   return result;
 }
@@ -355,6 +365,28 @@ function normalizeClock(clock) {
  * persists its own account state and durable threads, so Kyrei never becomes a
  * second OAuth credential store.
  */
+/**
+ * Translate Kyrei's provider-neutral model controls to the official Codex
+ * app-server names. Unsupported or malformed input is deliberately omitted:
+ * passing arbitrary settings into a native runtime would make the UI claim a
+ * value that Codex never accepted.
+ */
+export function normalizeCodexTurnModelParams(modelParams) {
+  if (!modelParams || typeof modelParams !== "object" || Array.isArray(modelParams)) return {};
+  const result = {};
+  if (typeof modelParams.effort === "string" && /^(minimal|low|medium|high|xhigh)$/.test(modelParams.effort)) {
+    result.reasoningEffort = modelParams.effort;
+  }
+  if (modelParams.fast === true) {
+    result.serviceTier = "priority";
+  } else if (modelParams.fast === false) {
+    result.serviceTier = "default";
+  } else if (typeof modelParams.fast === "string" && /^(default|fast|flex|priority)$/.test(modelParams.fast)) {
+    result.serviceTier = modelParams.fast;
+  }
+  return result;
+}
+
 export class CodexAppServerConnector {
   constructor({
     executable,
@@ -364,6 +396,7 @@ export class CodexAppServerConnector {
     platform = process.platform,
     clock,
     version = "development",
+    codexHome,
   } = {}) {
     if (typeof resolveExecutable !== "function" || typeof spawn !== "function") {
       throw connectorError("codex_app_server_constructor_invalid", "Codex app-server connector is invalid");
@@ -375,7 +408,30 @@ export class CodexAppServerConnector {
     this.clock = normalizeClock(clock);
     this.version = typeof version === "string" && version.length <= 80 ? version : "development";
     this.executable = executable === undefined ? undefined : validateExecutable(executable, platform);
+    this.codexHome = codexHome === undefined
+      ? undefined
+      : isLocalAbsolutePath(codexHome, platform) && codexHome.length <= 4_096
+        ? pathApi(platform).normalize(codexHome)
+        : (() => { throw connectorError("codex_app_server_home_invalid", "Codex profile directory must be an absolute local path"); })();
     this.logins = new Map();
+  }
+
+  /**
+   * Make an isolated official-runtime profile.  It intentionally shares only
+   * executable discovery and operational environment with the parent
+   * connector; ChatGPT authorization remains inside the supplied CODEX_HOME.
+   */
+  createProfile({ codexHome } = {}) {
+    return new CodexAppServerConnector({
+      executable: this.executable,
+      resolveExecutable: this.resolveExecutable,
+      spawn: this.spawn,
+      environment: this.environment,
+      platform: this.platform,
+      clock: this.clock,
+      version: this.version,
+      codexHome,
+    });
   }
 
   #executable() {
@@ -394,7 +450,7 @@ export class CodexAppServerConnector {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       shell: false,
-      env: buildCodexAppServerEnvironment(this.environment, { platform: this.platform }),
+      env: buildCodexAppServerEnvironment(this.environment, { platform: this.platform, codexHome: this.codexHome }),
     });
     return new JsonRpcProcess({ child, clock: this.clock, onNotification });
   }
@@ -421,7 +477,7 @@ export class CodexAppServerConnector {
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       shell: false,
-      env: buildCodexAppServerEnvironment(this.environment, { platform: this.platform }),
+      env: buildCodexAppServerEnvironment(this.environment, { platform: this.platform, codexHome: this.codexHome }),
     });
     return new Promise((resolve) => {
       let output = "";
@@ -566,7 +622,7 @@ export class CodexAppServerConnector {
     }
   }
 
-  async runTurn({ threadId, prompt, images = [], workspace, model, onThread, onEvent, signal } = {}) {
+  async runTurn({ threadId, prompt, images = [], workspace, model, modelParams, accountId, onThread, onEvent, signal } = {}) {
     if (typeof prompt !== "string") throw connectorError("codex_app_server_prompt_invalid", "Codex prompt is invalid");
     if (typeof workspace !== "string" || !workspace.trim()) {
       throw connectorError("codex_app_server_workspace_required", "Codex requires a workspace");
@@ -657,6 +713,7 @@ export class CodexAppServerConnector {
         else rejectTurn(connectorError("codex_app_server_turn_failed", safeErrorText(asRecord(completed.error).message || "Codex turn failed")));
       }
     });
+    const nativeModelParams = normalizeCodexTurnModelParams(modelParams);
     let activeThreadId = typeof threadId === "string" && SAFE_ID.test(threadId) ? threadId : "";
     const abort = () => {
       if (activeThreadId) void client.request("turn/interrupt", { threadId: activeThreadId }).catch(() => undefined);
@@ -675,9 +732,15 @@ export class CodexAppServerConnector {
         const started = asRecord(await client.request("thread/start", {
           cwd: workspace,
           approvalPolicy: "never",
-          sandbox: "workspaceWrite",
+          sandbox: "workspace-write",
           personality: "friendly",
           ...(typeof model === "string" && model !== CODEX_CHATGPT_DEFAULT_MODEL && SAFE_MODEL_ID.test(model) ? { model } : {}),
+          ...(Object.keys(nativeModelParams).length ? {
+            config: {
+              ...(nativeModelParams.reasoningEffort ? { model_reasoning_effort: nativeModelParams.reasoningEffort } : {}),
+              ...(nativeModelParams.serviceTier ? { service_tier: nativeModelParams.serviceTier } : {}),
+            },
+          } : {}),
         }));
         activeThreadId = typeof asRecord(started.thread).id === "string" ? asRecord(started.thread).id : "";
         if (!SAFE_ID.test(activeThreadId)) throw connectorError("codex_app_server_thread_invalid", "Codex returned an invalid thread id");
@@ -693,7 +756,7 @@ export class CodexAppServerConnector {
         input,
         cwd: workspace,
         approvalPolicy: "never",
-        sandbox: "workspaceWrite",
+        sandbox: "workspace-write",
       });
       await turnDone;
       const usage = asRecord(completed?.usage);
@@ -705,7 +768,11 @@ export class CodexAppServerConnector {
         text,
         parts,
         status: "complete",
-        route: { providerId: CODEX_CHATGPT_PROVIDER_ID, modelId: model || CODEX_CHATGPT_DEFAULT_MODEL },
+        route: {
+          providerId: CODEX_CHATGPT_PROVIDER_ID,
+          modelId: model || CODEX_CHATGPT_DEFAULT_MODEL,
+          ...(typeof accountId === "string" && SAFE_ID.test(accountId) ? { accountId } : {}),
+        },
         ...(inputTokens || outputTokens || totalTokens ? { usage: { inputTokens, outputTokens, totalTokens } } : {}),
       };
     } finally {
