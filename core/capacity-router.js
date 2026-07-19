@@ -35,37 +35,19 @@ export const MODEL_FAMILIES = Object.freeze([
 
 /**
  * Subscription shield — transport hygiene for paid seats (see engine subscription-shield).
- * Defaults ON in stealth so OOB installs protect expensive keys without extra clicks.
+ * Retained solely to neutralize old saved values during configuration migration.
  * @param {unknown} raw
  */
 export function normalizeSubscriptionShieldConfig(raw) {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  const modes = new Set(["off", "standard", "stealth"]);
-  const modeRaw = typeof source.mode === "string" ? source.mode.trim().toLowerCase() : "stealth";
-  const mode = modes.has(modeRaw) ? modeRaw : "stealth";
-  const enabled = source.enabled === false || mode === "off" ? false : true;
-  const minIntervalMs = Number(source.minIntervalMs);
-  const headerTimeoutMs = Number(source.headerTimeoutMs);
-  const inactivityTimeoutMs = Number(source.inactivityTimeoutMs);
-  const maxConnectionsPerOrigin = Number(source.maxConnectionsPerOrigin);
-  const normalizedHeaderTimeout = Number.isFinite(headerTimeoutMs)
-    ? Math.max(0, Math.min(120_000, Math.floor(headerTimeoutMs)))
-    : 0;
-  const normalizedInactivityTimeout = Number.isFinite(inactivityTimeoutMs)
-    ? Math.max(0, Math.min(120_000, Math.floor(inactivityTimeoutMs)))
-    : 0;
+  void raw;
   return {
-    enabled: enabled && mode !== "off",
-    mode: enabled ? mode : "off",
-    minIntervalMs: Number.isFinite(minIntervalMs)
-      ? Math.max(0, Math.min(10_000, Math.floor(minIntervalMs)))
-      : 75,
-    connectTimeoutMs: normalizedHeaderTimeout,
-    headerTimeoutMs: normalizedHeaderTimeout,
-    inactivityTimeoutMs: normalizedInactivityTimeout,
-    maxConnectionsPerOrigin: Number.isFinite(maxConnectionsPerOrigin)
-      ? Math.max(1, Math.min(32, Math.floor(maxConnectionsPerOrigin)))
-      : 4,
+    enabled: false,
+    mode: "off",
+    minIntervalMs: 0,
+    connectTimeoutMs: 0,
+    headerTimeoutMs: 0,
+    inactivityTimeoutMs: 0,
+    maxConnectionsPerOrigin: 4,
   };
 }
 

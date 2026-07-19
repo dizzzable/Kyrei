@@ -31,11 +31,6 @@ import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
 import { KeyPool } from "../provider/keys.js";
 import {
-  normalizeSubscriptionShield,
-  shouldHideEngineIdentity,
-  wrapFetchWithSubscriptionShield,
-} from "../provider/subscription-shield.js";
-import {
   openStream,
   streamAttemptsFromError,
   type ProviderStreamAttemptOutcome,
@@ -438,18 +433,12 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     }
   };
 
-  // Subscription shield: pace + soft TLS/header hygiene for expensive seats.
-  // Gateway-owned config only — never taken from renderer chat payload.
-  const subscriptionShield = normalizeSubscriptionShield(opts.subscriptionShield);
-  const hideEngineIdentity = shouldHideEngineIdentity(subscriptionShield);
-  const providerFetchFor = (paceKey?: string, baseFetch?: typeof fetch): typeof fetch | undefined => {
-    const shieldFetch = wrapFetchWithSubscriptionShield({
-      config: subscriptionShield,
-      paceKey: paceKey || opts.providerAccountId || "primary",
-      ...(baseFetch ? { baseFetch } : {}),
-    });
-    return shieldFetch ?? baseFetch;
-  };
+  // Provider SDKs own their native streaming lifecycle. Kyrei must not install
+  // a second timeout/abort layer: long reasoning is valid and ends only on a
+  // real transport failure, failover, or explicit user cancellation. Legacy
+  // Subscription Shield settings are deliberately ignored here.
+  const identifyEngine = false;
+  const providerFetchFor = (_accountId?: string, baseFetch?: typeof fetch): typeof fetch | undefined => baseFetch;
 
   // Clean-context reviewer (Requirements §11.3) reuses the primary provider's
   // credentials/endpoint — no separate account is provisioned for it. It is
@@ -464,7 +453,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         credentials: providerCredentials,
         model: opts.model,
         headers: opts.providerHeaders,
-        identifyEngine: !hideEngineIdentity,
+        identifyEngine,
         ...(reviewFetch ? { fetch: reviewFetch } : {}),
       })
     : undefined;
@@ -952,7 +941,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
       credentials,
       model: entry.id,
       headers: target.headers,
-      identifyEngine: !hideEngineIdentity,
+      identifyEngine,
       ...(modelFetch ? { fetch: modelFetch } : {}),
     });
     const workerShieldFetch = explicitWorker
@@ -966,7 +955,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
           credentials: workerCredentials ?? {},
           model: explicitWorker.model,
           headers: explicitWorker.headers,
-          identifyEngine: !hideEngineIdentity,
+          identifyEngine,
           ...(workerShieldFetch ? { fetch: workerShieldFetch } : {}),
         })
       : model;
@@ -1361,7 +1350,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
           credentials: judgeCredentials,
           model: judgeEntry.id,
           headers: judgeTarget.headers,
-          identifyEngine: !hideEngineIdentity,
+          identifyEngine,
           ...(judgeFetch ? { fetch: judgeFetch } : {}),
         }),
         {

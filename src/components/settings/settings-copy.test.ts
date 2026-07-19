@@ -233,15 +233,13 @@ describe("settings localized rendering", () => {
     expect(russian).toContain("Контроль времени попытки");
   });
 
-  it("shows separate provider header and body inactivity controls with an unlimited value", async () => {
+  it("does not expose custom provider stream timeouts that can stop an active task", async () => {
     const english = await renderSettings("en", "capacity");
     const russian = await renderSettings("ru", "capacity");
 
-    expect(english).toContain("Header timeout (ms)");
-    expect(english).toContain("Body inactivity timeout (ms)");
-    expect(english).toContain("0 disables the timer");
-    expect(russian).toContain("Таймаут заголовков (мс)");
-    expect(russian).toContain("Таймаут тишины тела ответа (мс)");
-    expect(russian).toContain("0 отключает таймер");
+    expect(english).not.toContain("Header timeout (ms)");
+    expect(english).not.toContain("Body inactivity timeout (ms)");
+    expect(russian).not.toContain("Таймаут заголовков (мс)");
+    expect(russian).not.toContain("Таймаут тишины тела ответа (мс)");
   });
 });

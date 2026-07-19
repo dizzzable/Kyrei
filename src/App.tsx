@@ -1025,6 +1025,9 @@ export function App() {
   }, [beginSessionMutation, sessions, leaveSessionIfCurrent, describeError, finishSessionMutation, t]);
 
   const deleteSession = useCallback(async (id: string) => {
+    const session = sessions.find((item) => item.id === id);
+    const title = session ? sessionTitle(session, t("shell.session.untitled")) : t("shell.session.untitled");
+    if (!window.confirm(t("settings.sessions.deleteConfirm", { title }))) return;
     beginSessionMutation();
     try {
       await gateway.deleteSession(id);
@@ -1036,7 +1039,7 @@ export function App() {
     } finally {
       finishSessionMutation();
     }
-  }, [beginSessionMutation, sessions, leaveSessionIfCurrent, describeError, finishSessionMutation]);
+  }, [beginSessionMutation, sessions, leaveSessionIfCurrent, describeError, finishSessionMutation, t]);
 
   const applyCodingMode = useCallback(async (mode: CodingMode) => {
     if (!config) return;
@@ -1307,6 +1310,7 @@ export function App() {
         onSelect={setCurrentId}
         onNew={newSession}
         onArchive={archiveSession}
+        onDelete={deleteSession}
         onFork={(id) => void forkSessionById(id)}
         onContinue={(id) => void continueSessionById(id)}
         onRename={renameSession}

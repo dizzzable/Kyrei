@@ -1,15 +1,10 @@
 /**
  * Subscription shield — transport hygiene for expensive API seats.
  *
- * Goals (startup-safe, not free-UI scraping):
- * - Pace per-account bursts so abuse detectors see fewer hammer patterns
- * - Bound concurrent in-flight requests per origin (less handshake stampede)
- * - Optional browser-like headers; strip custom "X-Kyrei-Engine" identity
- * - Optional connect-style abort timeout around each request
- *
- * This is NOT full Chrome JA3 impersonation (needs native/curl-impersonate /
- * a custom TLS stack). Combined with account-pool anti-false-ban it protects
- * paid keys far better than raw unbounded Node fetch alone.
+ * Deprecated compatibility surface for old persisted settings. Kyrei no
+ * longer wraps provider streams with pacing, header mutation, or deadlines.
+ * A provider owns its stream lifecycle; Kyrei only accepts an explicit user
+ * cancellation or a genuine upstream transport failure.
  */
 
 export type SubscriptionShieldMode = "off" | "standard" | "stealth";
@@ -25,21 +20,14 @@ export interface SubscriptionShieldConfig {
   mode: SubscriptionShieldMode;
   /** Minimum gap between request starts for the same pace key (ms). */
   minIntervalMs: number;
-  /** Legacy persisted field. It is retained for round-tripping only. */
+  /** Legacy persisted field. It is always normalized to zero. */
   connectTimeoutMs: number;
-  /** Timeout while waiting for response headers (ms); 0 disables. */
+  /** Legacy deadline. It is always normalized to zero. */
   headerTimeoutMs: number;
-  /** Timeout between raw response body chunks (ms); 0 disables. */
+  /** Legacy stream watchdog. It is always normalized to zero. */
   inactivityTimeoutMs: number;
   /** Max concurrent in-flight requests per origin host. */
   maxConnectionsPerOrigin: number;
-}
-
-export interface SubscriptionShieldTimeoutError extends Error {
-  code: "ETIMEDOUT";
-  reason: "subscription_shield_timeout";
-  phase: "headers" | "body-inactivity";
-  timeoutMs: number;
 }
 
 export const SUBSCRIPTION_SHIELD_MODES: readonly SubscriptionShieldMode[] = [
@@ -49,9 +37,9 @@ export const SUBSCRIPTION_SHIELD_MODES: readonly SubscriptionShieldMode[] = [
 ];
 
 const DEFAULTS: SubscriptionShieldConfig = {
-  enabled: true,
-  mode: "stealth",
-  minIntervalMs: 75,
+  enabled: false,
+  mode: "off",
+  minIntervalMs: 0,
   connectTimeoutMs: 0,
   headerTimeoutMs: 0,
   inactivityTimeoutMs: 0,
@@ -64,15 +52,11 @@ const BROWSER_USER_AGENT =
 
 const paceLocks = new Map<string, Promise<void>>();
 const paceLastStart = new Map<string, number>();
-const originInflight = new Map<string, number>();
-const originWaiters = new Map<string, Array<() => void>>();
 
-/** Test hook: clear in-memory pacing / concurrency state. */
+/** Test hook: clear legacy in-memory pacing state. */
 export function resetSubscriptionShieldPaceForTests(): void {
   paceLocks.clear();
   paceLastStart.clear();
-  originInflight.clear();
-  originWaiters.clear();
 }
 
 /** No-op kept for API symmetry with earlier undici-based drafts. */
@@ -81,77 +65,14 @@ export async function closeSubscriptionShieldDispatcher(): Promise<void> {
 }
 
 export function normalizeSubscriptionShield(raw: unknown): SubscriptionShieldConfig {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw)
-    ? raw as Record<string, unknown>
-    : {};
-  const modeRaw = typeof source.mode === "string" ? source.mode.trim().toLowerCase() : "";
-  const mode = SUBSCRIPTION_SHIELD_MODES.includes(modeRaw as SubscriptionShieldMode)
-    ? modeRaw as SubscriptionShieldMode
-    : DEFAULTS.mode;
-  const enabled = source.enabled === false || mode === "off" ? false : source.enabled !== false;
-  // Before 0.7.1 this field defaulted to a hard 30-second request abort.
-  // Never promote that saved legacy default into the new header timer: a slow
-  // provider is not a failed agent. Only the explicit current field may opt
-  // into a hard transport cutoff.
-  const headerTimeoutMs = clampInt(source.headerTimeoutMs, DEFAULTS.headerTimeoutMs, 0, 120_000);
-  const inactivityTimeoutMs = clampInt(source.inactivityTimeoutMs, DEFAULTS.inactivityTimeoutMs, 0, 120_000);
-  return {
-    enabled: enabled && mode !== "off",
-    mode: enabled ? mode : "off",
-    minIntervalMs: clampInt(source.minIntervalMs, DEFAULTS.minIntervalMs, 0, 10_000),
-    connectTimeoutMs: headerTimeoutMs,
-    headerTimeoutMs,
-    inactivityTimeoutMs,
-    maxConnectionsPerOrigin: clampInt(
-      source.maxConnectionsPerOrigin,
-      DEFAULTS.maxConnectionsPerOrigin,
-      1,
-      32,
-    ),
-  };
-}
-
-function clampInt(value: unknown, fallback: number, min: number, max: number): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
+  // Read and discard the legacy value so old settings continue to deserialize
+  // without ever restoring a hidden request deadline or stream watchdog.
+  void raw;
+  return { ...DEFAULTS };
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function createSubscriptionShieldTimeoutError(
-  timeoutMs: number,
-  phase: SubscriptionShieldTimeoutError["phase"] = "headers",
-): SubscriptionShieldTimeoutError {
-  return Object.assign(new Error("subscription_shield_timeout"), {
-    name: "TimeoutError",
-    code: "ETIMEDOUT" as const,
-    reason: "subscription_shield_timeout" as const,
-    phase,
-    timeoutMs,
-  });
-}
-
-function withResponseBody(response: Response, body: ReadableStream<Uint8Array>): Response {
-  const wrapped = new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-  for (const [key, value] of [
-    ["url", response.url],
-    ["redirected", response.redirected],
-    ["type", response.type],
-  ] as const) {
-    try {
-      Object.defineProperty(wrapped, key, { value, configurable: true });
-    } catch {
-      /* best-effort mirror only */
-    }
-  }
-  return wrapped;
 }
 
 /**
@@ -183,41 +104,6 @@ export async function paceSubscriptionRequest(
     .finally(() => release());
   paceLocks.set(key, chain.then(() => undefined, () => undefined));
   await chain;
-}
-
-function originKeyFromInput(input: Parameters<typeof fetch>[0]): string {
-  try {
-    if (typeof input === "string") return new URL(input).host || "default";
-    if (input instanceof URL) return input.host || "default";
-    if (input instanceof Request) return new URL(input.url).host || "default";
-  } catch {
-    /* fall through */
-  }
-  return "default";
-}
-
-async function acquireOriginSlot(origin: string, max: number): Promise<void> {
-  const limit = Math.max(1, max);
-  const current = originInflight.get(origin) ?? 0;
-  if (current < limit) {
-    originInflight.set(origin, current + 1);
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    const waiters = originWaiters.get(origin) ?? [];
-    waiters.push(resolve);
-    originWaiters.set(origin, waiters);
-  });
-  originInflight.set(origin, (originInflight.get(origin) ?? 0) + 1);
-}
-
-function releaseOriginSlot(origin: string): void {
-  const current = Math.max(0, (originInflight.get(origin) ?? 1) - 1);
-  originInflight.set(origin, current);
-  const waiters = originWaiters.get(origin);
-  const next = waiters?.shift();
-  if (next) next();
-  if (waiters && waiters.length === 0) originWaiters.delete(origin);
 }
 
 /** Headers applied only when missing (user/provider headers always win). */
@@ -267,172 +153,18 @@ export interface WrapSubscriptionShieldFetchOpts {
   useShieldDispatcher?: boolean;
 }
 
-/**
- * Returns a fetch that paces seats and applies transport hygiene.
- * When shield is off, returns baseFetch unchanged (or undefined so callers skip).
- */
+/** Legacy no-op: callers always receive the provider-native fetch unchanged. */
 export function wrapFetchWithSubscriptionShield(
   opts: WrapSubscriptionShieldFetchOpts,
 ): typeof fetch | undefined {
-  const config = normalizeSubscriptionShield(opts.config);
-  if (!config.enabled || config.mode === "off") {
-    return opts.baseFetch;
-  }
-
-  const baseFetch = opts.baseFetch ?? globalThis.fetch.bind(globalThis);
-  const paceKey = opts.paceKey ?? "default";
-
-  const wrapped = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    await paceSubscriptionRequest(
-      paceKey,
-      config.minIntervalMs,
-      opts.now?.() ?? Date.now(),
-    );
-
-    const origin = originKeyFromInput(input);
-    await acquireOriginSlot(origin, config.maxConnectionsPerOrigin);
-
-    const headers = applySubscriptionShieldHeaders(
-      new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)),
-      config.mode,
-    );
-
-    const headerTimeoutMs = config.headerTimeoutMs;
-    const inactivityTimeoutMs = config.inactivityTimeoutMs;
-    let headerTimeoutId: ReturnType<typeof setTimeout> | undefined;
-    let timedOutPhase: SubscriptionShieldTimeoutError["phase"] | null = null;
-    let released = false;
-    let bodyOwnsCleanup = false;
-    let abortBody: ((reason: unknown) => void) | undefined;
-    const releaseOriginSlotOnce = () => {
-      if (released) return;
-      released = true;
-      releaseOriginSlot(origin);
-    };
-    const controller = headerTimeoutMs > 0 || inactivityTimeoutMs > 0 || init?.signal
-      ? new AbortController()
-      : null;
-    const onExternalAbort = () => {
-      const reason = init?.signal?.reason;
-      controller?.abort(reason);
-      abortBody?.(reason);
-    };
-    const removeExternalAbort = () => init?.signal?.removeEventListener("abort", onExternalAbort);
-    if (init?.signal?.aborted) {
-      releaseOriginSlotOnce();
-      throw init.signal.reason ?? new DOMException("The operation was aborted", "AbortError");
-    }
-    init?.signal?.addEventListener("abort", onExternalAbort, { once: true });
-    if (controller && headerTimeoutMs > 0) {
-      headerTimeoutId = setTimeout(() => {
-        timedOutPhase = "headers";
-        controller.abort(createSubscriptionShieldTimeoutError(headerTimeoutMs, "headers"));
-      }, headerTimeoutMs);
-    }
-
-    try {
-      const responsePromise = baseFetch(input, {
-        ...init,
-        headers,
-        ...(controller ? { signal: controller.signal } : {}),
-      });
-      const response = controller
-        ? await new Promise<Response>((resolve, reject) => {
-          const onControllerAbort = () => {
-            controller.signal.removeEventListener("abort", onControllerAbort);
-            reject(controller.signal.reason);
-          };
-          controller.signal.addEventListener("abort", onControllerAbort, { once: true });
-          responsePromise.then(
-            (value) => {
-              controller.signal.removeEventListener("abort", onControllerAbort);
-              resolve(value);
-            },
-            (error: unknown) => {
-              controller.signal.removeEventListener("abort", onControllerAbort);
-              reject(error);
-            },
-          );
-        })
-        : await responsePromise;
-      if (headerTimeoutId !== undefined) {
-        clearTimeout(headerTimeoutId);
-        headerTimeoutId = undefined;
-      }
-      if (!response.body) {
-        removeExternalAbort();
-        releaseOriginSlotOnce();
-        return response;
-      }
-
-      const reader = response.body.getReader();
-      let bodyTimeoutId: ReturnType<typeof setTimeout> | undefined;
-      let settled = false;
-      let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
-      const cleanupBody = () => {
-        if (settled) return false;
-        settled = true;
-        if (bodyTimeoutId !== undefined) clearTimeout(bodyTimeoutId);
-        bodyTimeoutId = undefined;
-        removeExternalAbort();
-        releaseOriginSlotOnce();
-        return true;
-      };
-      const failBody = (error: unknown) => {
-        if (!cleanupBody()) return;
-        void reader.cancel(error).catch(() => undefined);
-        try { streamController?.error(error); } catch { /* consumer already closed the stream */ }
-      };
-      abortBody = failBody;
-      const armBodyTimeout = () => {
-        if (bodyTimeoutId !== undefined) clearTimeout(bodyTimeoutId);
-        if (settled || inactivityTimeoutMs <= 0) return;
-        bodyTimeoutId = setTimeout(() => {
-          timedOutPhase = "body-inactivity";
-          failBody(createSubscriptionShieldTimeoutError(inactivityTimeoutMs, "body-inactivity"));
-        }, inactivityTimeoutMs);
-      };
-      const wrappedBody = new ReadableStream<Uint8Array>({
-        start(controllerForBody) {
-          streamController = controllerForBody;
-        },
-        async pull(controllerForBody) {
-          if (settled) return;
-          armBodyTimeout();
-          try {
-            const { done, value } = await reader.read();
-            if (settled) return;
-            if (done) {
-              if (cleanupBody()) controllerForBody.close();
-              return;
-            }
-            if (bodyTimeoutId !== undefined) clearTimeout(bodyTimeoutId);
-            bodyTimeoutId = undefined;
-            controllerForBody.enqueue(value);
-          } catch (error) {
-            if (cleanupBody()) controllerForBody.error(error);
-          }
-        },
-        cancel(reason) {
-          return cleanupBody() ? reader.cancel(reason) : undefined;
-        },
-      });
-
-      bodyOwnsCleanup = true;
-      return withResponseBody(response, wrappedBody);
-    } catch (error) {
-      releaseOriginSlotOnce();
-      if (timedOutPhase === "headers") {
-        throw Object.assign(createSubscriptionShieldTimeoutError(headerTimeoutMs, "headers"), { cause: error });
-      }
-      throw error;
-    } finally {
-      if (headerTimeoutId !== undefined) clearTimeout(headerTimeoutId);
-      if (!bodyOwnsCleanup) removeExternalAbort();
-    }
-  }) as typeof fetch;
-
-  return wrapped;
+  // Never interpose Kyrei between a provider SDK and its streaming response.
+  // In particular, do not create a controller or install a timer here: an
+  // upstream stream has the sole authority to report a transport failure.
+  void opts.config;
+  void opts.paceKey;
+  void opts.now;
+  void opts.useShieldDispatcher;
+  return opts.baseFetch;
 }
 
 /** Whether buildModel should omit the X-Kyrei-Engine identity header. */

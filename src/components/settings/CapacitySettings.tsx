@@ -10,7 +10,6 @@ import type {
   CapacityStrategy,
   ProviderAccount,
   ProviderAccountStatus,
-  SubscriptionShieldMode,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -22,8 +21,6 @@ const STRATEGIES: readonly CapacityStrategy[] = [
   "balanced",
   "priority",
 ];
-
-const SHIELD_MODES: readonly SubscriptionShieldMode[] = ["stealth", "standard", "off"];
 
 const FAMILIES = [
   "claude",
@@ -43,34 +40,19 @@ function capacityFromConfig(config: AppConfig | null | undefined): CapacityConfi
   const strategy = STRATEGIES.includes(raw?.strategy as CapacityStrategy)
     ? (raw!.strategy as CapacityStrategy)
     : "spare-first";
-  const shieldRaw = raw?.subscriptionShield;
-  const shieldMode = SHIELD_MODES.includes(shieldRaw?.mode as SubscriptionShieldMode)
-    ? (shieldRaw!.mode as SubscriptionShieldMode)
-    : "stealth";
   return {
     enabled: raw?.enabled !== false,
     strategy,
     preferSpare: raw?.preferSpare !== false,
     crossProviderFamily: raw?.crossProviderFamily !== false,
     subscriptionShield: {
-      enabled: shieldRaw?.enabled !== false && shieldMode !== "off",
-      mode: shieldMode,
-      minIntervalMs: typeof shieldRaw?.minIntervalMs === "number" ? shieldRaw.minIntervalMs : 75,
-      // `connectTimeoutMs` was a pre-0.7.1 hard request cutoff. Do not surface
-      // it as a current timeout, or merely opening Settings would revive it.
-      connectTimeoutMs: typeof shieldRaw?.headerTimeoutMs === "number" ? shieldRaw.headerTimeoutMs : 0,
-      headerTimeoutMs:
-        typeof shieldRaw?.headerTimeoutMs === "number"
-          ? shieldRaw.headerTimeoutMs
-          : 0,
-      inactivityTimeoutMs:
-        typeof shieldRaw?.inactivityTimeoutMs === "number"
-          ? shieldRaw.inactivityTimeoutMs
-          : 0,
-      maxConnectionsPerOrigin:
-        typeof shieldRaw?.maxConnectionsPerOrigin === "number"
-          ? shieldRaw.maxConnectionsPerOrigin
-          : 4,
+      enabled: false,
+      mode: "off",
+      minIntervalMs: 0,
+      connectTimeoutMs: 0,
+      headerTimeoutMs: 0,
+      inactivityTimeoutMs: 0,
+      maxConnectionsPerOrigin: 4,
     },
   };
 }
@@ -290,137 +272,6 @@ export function CapacitySettings({ config, onSaved }: CapacitySettingsProps) {
               <span className="mt-0.5 block text-[10px] leading-4 text-muted">{t("settings.capacity.crossFamilyHint")}</span>
             </span>
           </label>
-        </div>
-
-        <div className="space-y-2 rounded-md border border-border-soft bg-bg/30 p-2.5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <span className="block text-[11px] font-medium text-foreground">
-                {t("settings.capacity.shield.title")}
-              </span>
-              <span className="mt-0.5 block text-[10px] leading-4 text-muted">
-                {t("settings.capacity.shield.hint")}
-              </span>
-            </div>
-            <Switch
-              checked={Boolean(draft.subscriptionShield?.enabled) && draft.subscriptionShield?.mode !== "off"}
-              disabled={busy}
-              onCheckedChange={(enabled) => setDraft((current) => ({
-                ...current,
-                subscriptionShield: {
-                  ...current.subscriptionShield,
-                  enabled,
-                  mode: enabled
-                    ? (current.subscriptionShield?.mode === "off"
-                      ? "stealth"
-                      : current.subscriptionShield?.mode ?? "stealth")
-                    : "off",
-                  minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
-                  connectTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? 0,
-                  headerTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? 0,
-                  inactivityTimeoutMs: current.subscriptionShield?.inactivityTimeoutMs ?? 0,
-                  maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
-                },
-              }))}
-              className="mt-0.5 shrink-0"
-              aria-label={t("settings.capacity.shield.toggle")}
-            />
-          </div>
-          <label className="block space-y-1">
-            <span className="text-[10px] text-muted">{t("settings.capacity.shield.mode")}</span>
-            <select
-              value={draft.subscriptionShield?.mode ?? "stealth"}
-              disabled={busy || !draft.subscriptionShield?.enabled || draft.subscriptionShield?.mode === "off"}
-              className="h-8 w-full max-w-md rounded-md border border-border bg-surface px-2 text-[11px] text-foreground"
-              onChange={(event) => {
-                const mode = event.target.value as SubscriptionShieldMode;
-                setDraft((current) => ({
-                  ...current,
-                  subscriptionShield: {
-                    ...current.subscriptionShield,
-                    mode,
-                    enabled: mode !== "off",
-                    minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
-                    connectTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? 0,
-                    headerTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? 0,
-                    inactivityTimeoutMs: current.subscriptionShield?.inactivityTimeoutMs ?? 0,
-                    maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
-                  },
-                }));
-              }}
-            >
-              {SHIELD_MODES.filter((mode) => mode !== "off").map((mode) => (
-                <option key={mode} value={mode}>
-                  {t(`settings.capacity.shield.mode.${mode}`)}
-                </option>
-              ))}
-            </select>
-            <span className="block text-[10px] leading-4 text-muted">
-              {t(`settings.capacity.shield.modeHint.${draft.subscriptionShield?.mode === "standard" ? "standard" : "stealth"}`)}
-            </span>
-          </label>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-            <label className="block space-y-1">
-              <span className="text-[10px] text-muted">{t("settings.capacity.shield.headerTimeout")}</span>
-              <input
-                type="number"
-                min={0}
-                max={120_000}
-                step={1_000}
-                value={draft.subscriptionShield?.headerTimeoutMs ?? 0}
-                disabled={busy || !draft.subscriptionShield?.enabled || draft.subscriptionShield?.mode === "off"}
-                className="h-8 w-full rounded-md border border-border bg-surface px-2 font-mono text-[11px] text-foreground"
-                onChange={(event) => {
-                  const numeric = Number(event.target.value);
-                  const nextValue = Number.isFinite(numeric) ? Math.max(0, Math.min(120_000, Math.floor(numeric))) : 0;
-                  setDraft((current) => ({
-                    ...current,
-                    subscriptionShield: {
-                      ...current.subscriptionShield,
-                      enabled: current.subscriptionShield?.enabled ?? true,
-                      mode: current.subscriptionShield?.mode ?? "stealth",
-                      minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
-                      connectTimeoutMs: nextValue,
-                      headerTimeoutMs: nextValue,
-                      inactivityTimeoutMs: current.subscriptionShield?.inactivityTimeoutMs ?? 0,
-                      maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
-                    },
-                  }));
-                }}
-              />
-              <span className="block text-[10px] leading-4 text-muted">{t("settings.capacity.shield.headerTimeoutHint")}</span>
-            </label>
-            <label className="block space-y-1">
-              <span className="text-[10px] text-muted">{t("settings.capacity.shield.inactivityTimeout")}</span>
-              <input
-                type="number"
-                min={0}
-                max={120_000}
-                step={1_000}
-                value={draft.subscriptionShield?.inactivityTimeoutMs ?? 0}
-                disabled={busy || !draft.subscriptionShield?.enabled || draft.subscriptionShield?.mode === "off"}
-                className="h-8 w-full rounded-md border border-border bg-surface px-2 font-mono text-[11px] text-foreground"
-                onChange={(event) => {
-                  const numeric = Number(event.target.value);
-                  const nextValue = Number.isFinite(numeric) ? Math.max(0, Math.min(120_000, Math.floor(numeric))) : 0;
-                  setDraft((current) => ({
-                    ...current,
-                    subscriptionShield: {
-                      ...current.subscriptionShield,
-                      enabled: current.subscriptionShield?.enabled ?? true,
-                      mode: current.subscriptionShield?.mode ?? "stealth",
-                      minIntervalMs: current.subscriptionShield?.minIntervalMs ?? 75,
-                      connectTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? 0,
-                      headerTimeoutMs: current.subscriptionShield?.headerTimeoutMs ?? 0,
-                      inactivityTimeoutMs: nextValue,
-                      maxConnectionsPerOrigin: current.subscriptionShield?.maxConnectionsPerOrigin ?? 4,
-                    },
-                  }));
-                }}
-              />
-              <span className="block text-[10px] leading-4 text-muted">{t("settings.capacity.shield.inactivityTimeoutHint")}</span>
-            </label>
-          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">

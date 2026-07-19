@@ -64,9 +64,9 @@ describe("capacity-router", () => {
       preferSpare: true,
       crossProviderFamily: true,
       subscriptionShield: {
-        enabled: true,
-        mode: "stealth",
-        minIntervalMs: 75,
+        enabled: false,
+        mode: "off",
+        minIntervalMs: 0,
         connectTimeoutMs: 0,
         headerTimeoutMs: 0,
         inactivityTimeoutMs: 0,
@@ -75,13 +75,15 @@ describe("capacity-router", () => {
     });
   });
 
-  it("keeps explicit current transport timeout fields and ignores the legacy hard cutoff", () => {
+  it("disables legacy subscription transport settings so they cannot terminate a chat", () => {
     expect(normalizeCapacityConfig({
       subscriptionShield: {
         connectTimeoutMs: 0,
         inactivityTimeoutMs: 0,
       },
     }).subscriptionShield).toMatchObject({
+      enabled: false,
+      mode: "off",
       headerTimeoutMs: 0,
       inactivityTimeoutMs: 0,
     });
@@ -93,8 +95,10 @@ describe("capacity-router", () => {
         inactivityTimeoutMs: 18_000,
       },
     }).subscriptionShield).toMatchObject({
-      headerTimeoutMs: 12_000,
-      inactivityTimeoutMs: 18_000,
+      enabled: false,
+      mode: "off",
+      headerTimeoutMs: 0,
+      inactivityTimeoutMs: 0,
     });
     expect(normalizeCapacityConfig({
       subscriptionShield: { connectTimeoutMs: 30_000 },

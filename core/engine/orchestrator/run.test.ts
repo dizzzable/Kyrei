@@ -1379,6 +1379,32 @@ describe("runKyreiChat project context wiring", () => {
     });
   });
 
+  it("uses the provider-native stream even when an old shield timeout is persisted", async () => {
+    const { runKyreiChat } = await import("./run.js");
+    await runKyreiChat({
+      emit: () => {},
+      messages: [{ role: "user", content: "continue the task" }],
+      providerBase: "https://slow.example/v1",
+      providerProtocol: "openai-chat",
+      providerId: "slow-provider",
+      apiKey: "key",
+      model: "slow-model",
+      subscriptionShield: {
+        enabled: true,
+        mode: "stealth",
+        connectTimeoutMs: 30_000,
+      },
+    });
+
+    const modelOptions = buildModelMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(modelOptions).toMatchObject({
+      protocol: "openai-chat",
+      baseURL: "https://slow.example/v1",
+      identifyEngine: false,
+    });
+    expect(modelOptions).not.toHaveProperty("fetch");
+  });
+
   it("routes provider-scoped fallbacks with isolated credentials and reports the winning target", async () => {
     resolveEngineConfigMock.mockReturnValueOnce({
       config: { ...engineConfig(), fallbackChain: [] },
@@ -1431,7 +1457,6 @@ describe("runKyreiChat project context wiring", () => {
       model: "shared-model",
       headers: { "X-Primary": "primary-header" },
       identifyEngine: false,
-      fetch: expect.any(Function),
     });
     expect(buildModelMock).toHaveBeenNthCalledWith(2, {
       protocol: "anthropic-messages",
@@ -1441,7 +1466,6 @@ describe("runKyreiChat project context wiring", () => {
       model: "shared-model",
       headers: { "X-Backup": "backup-header" },
       identifyEngine: false,
-      fetch: expect.any(Function),
     });
     expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" });
     expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" });
@@ -1663,7 +1687,6 @@ describe("runKyreiChat project context wiring", () => {
       model: "main-model",
       headers: { "X-Main": "main-header" },
       identifyEngine: false,
-      fetch: expect.any(Function),
     });
     expect(buildModelMock).toHaveBeenCalledWith({
       protocol: "anthropic-messages",
@@ -1673,7 +1696,6 @@ describe("runKyreiChat project context wiring", () => {
       model: "worker-model",
       headers: { "X-Worker": "worker-header" },
       identifyEngine: false,
-      fetch: expect.any(Function),
     });
     expect(parentOptions["model"]).toEqual({ builtFor: "main-model" });
     const childOptions = generateTextMock.mock.calls[0]?.[0] as Record<string, unknown>;

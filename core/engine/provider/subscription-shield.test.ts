@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applySubscriptionShieldHeaders,
   closeSubscriptionShieldDispatcher,
-  createSubscriptionShieldTimeoutError,
   normalizeSubscriptionShield,
   paceSubscriptionRequest,
   resetSubscriptionShieldPaceForTests,
@@ -18,11 +17,11 @@ afterEach(async () => {
 });
 
 describe("normalizeSubscriptionShield", () => {
-  it("defaults to stealth enabled for OOB seat protection", () => {
+  it("defaults to inactive so native provider streams own their lifecycle", () => {
     expect(normalizeSubscriptionShield(undefined)).toMatchObject({
-      enabled: true,
-      mode: "stealth",
-      minIntervalMs: 75,
+      enabled: false,
+      mode: "off",
+      minIntervalMs: 0,
       headerTimeoutMs: 0,
       inactivityTimeoutMs: 0,
       maxConnectionsPerOrigin: 4,
@@ -40,26 +39,20 @@ describe("normalizeSubscriptionShield", () => {
     });
   });
 
-  it("accepts explicit header/inactivity timeouts and ignores the legacy hard cutoff", () => {
+  it("neutralizes every persisted legacy transport setting", () => {
     expect(normalizeSubscriptionShield({
+      enabled: true,
+      mode: "stealth",
       headerTimeoutMs: 11_000,
       inactivityTimeoutMs: 17_000,
       connectTimeoutMs: 29_000,
     })).toMatchObject({
-      headerTimeoutMs: 11_000,
-      inactivityTimeoutMs: 17_000,
-    });
-    expect(normalizeSubscriptionShield({ connectTimeoutMs: 30_000 })).toMatchObject({
-      // Older installs stored this default. It must not terminate modern work.
-      headerTimeoutMs: 0,
-      connectTimeoutMs: 0,
-    });
-    expect(normalizeSubscriptionShield({
-      connectTimeoutMs: 0,
-      inactivityTimeoutMs: 0,
-    })).toMatchObject({
+      enabled: false,
+      mode: "off",
+      minIntervalMs: 0,
       headerTimeoutMs: 0,
       inactivityTimeoutMs: 0,
+      connectTimeoutMs: 0,
     });
   });
 });
@@ -71,7 +64,7 @@ describe("subscription shield headers", () => {
     expect(headers.get("Authorization")).toBe("Bearer secret");
     expect(headers.get("X-Kyrei-Engine")).toBeNull();
     expect(headers.get("User-Agent")).toMatch(/Chrome\/131/);
-    expect(shouldHideEngineIdentity({ mode: "stealth" })).toBe(true);
+    expect(shouldHideEngineIdentity({ enabled: true, mode: "stealth" })).toBe(false);
   });
 
   it("does not override user-supplied User-Agent", () => {
@@ -85,16 +78,6 @@ describe("subscription shield headers", () => {
     expect(shouldHideEngineIdentity({ mode: "standard" })).toBe(false);
   });
 
-  it("builds a typed retryable timeout error for header waits", () => {
-    expect(createSubscriptionShieldTimeoutError(12_345)).toMatchObject({
-      name: "TimeoutError",
-      code: "ETIMEDOUT",
-      reason: "subscription_shield_timeout",
-      phase: "headers",
-      timeoutMs: 12_345,
-      message: "subscription_shield_timeout",
-    });
-  });
 });
 
 describe("paceSubscriptionRequest", () => {
@@ -115,61 +98,12 @@ describe("wrapFetchWithSubscriptionShield", () => {
   it("returns undefined/base when shield is off", () => {
     const base = vi.fn() as unknown as typeof fetch;
     expect(wrapFetchWithSubscriptionShield({ config: { mode: "off" }, baseFetch: base })).toBe(base);
+    expect(wrapFetchWithSubscriptionShield({ config: { enabled: true, mode: "stealth" }, baseFetch: base })).toBe(base);
     expect(wrapFetchWithSubscriptionShield({ config: { enabled: false, mode: "stealth" } })).toBeUndefined();
+    expect(wrapFetchWithSubscriptionShield({ config: { enabled: true, mode: "stealth" } })).toBeUndefined();
   });
 
-  it("paces and applies stealth headers through a custom base fetch", async () => {
-    resetSubscriptionShieldPaceForTests();
-    const calls: Array<{ ua: string | null; auth: string | null }> = [];
-    const baseFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const headers = new Headers(init?.headers);
-      calls.push({
-        ua: headers.get("User-Agent"),
-        auth: headers.get("Authorization"),
-      });
-      return new Response("{}", { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const fetchImpl = wrapFetchWithSubscriptionShield({
-      config: { enabled: true, mode: "stealth", minIntervalMs: 0 },
-      baseFetch,
-      paceKey: "acct-1",
-      useShieldDispatcher: false,
-    });
-    expect(fetchImpl).toBeTypeOf("function");
-    await fetchImpl!("https://api.example.com/v1/chat", {
-      headers: { Authorization: "Bearer sk-test", "X-Kyrei-Engine": "v2" },
-    });
-    expect(calls[0]).toMatchObject({
-      auth: "Bearer sk-test",
-      ua: expect.stringContaining("Chrome/131"),
-    });
-    // Identity header stripped on the wire.
-    const lastInit = (baseFetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as RequestInit;
-    expect(new Headers(lastInit.headers).get("X-Kyrei-Engine")).toBeNull();
-  });
-
-  it("times out while waiting for response headers", async () => {
-    vi.useFakeTimers();
-    const baseFetch = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
-      new Promise<Response>(() => undefined),
-    ) as unknown as typeof fetch;
-    const fetchImpl = wrapFetchWithSubscriptionShield({
-      config: { enabled: true, mode: "stealth", minIntervalMs: 0, headerTimeoutMs: 50, inactivityTimeoutMs: 0 },
-      baseFetch,
-    });
-
-    const pending = expect(fetchImpl!("https://api.example.com/v1/chat")).rejects.toMatchObject({
-      code: "ETIMEDOUT",
-      phase: "headers",
-      timeoutMs: 50,
-    });
-    await vi.runAllTicks();
-    await vi.advanceTimersByTimeAsync(60);
-    await pending;
-  });
-
-  it("does not let a saved legacy connect timeout abort a slow response", async () => {
+  it("returns the native provider fetch even when an old shield is enabled", async () => {
     vi.useFakeTimers();
     const baseFetch = vi.fn(() => new Promise<Response>((resolve) => {
       setTimeout(() => resolve(new Response("{}", { status: 200 })), 75);
@@ -183,98 +117,7 @@ describe("wrapFetchWithSubscriptionShield", () => {
     const pending = fetchImpl!("https://api.example.com/v1/chat");
     await vi.advanceTimersByTimeAsync(80);
     await expect(pending).resolves.toMatchObject({ status: 200 });
-  });
-
-  it("times out on silent response bodies after headers", async () => {
-    vi.useFakeTimers();
-    const stream = new ReadableStream<Uint8Array>({
-      start() {
-        // stay silent forever
-      },
-    });
-    const baseFetch = vi.fn(async () =>
-      new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
-    ) as unknown as typeof fetch;
-    const fetchImpl = wrapFetchWithSubscriptionShield({
-      config: { enabled: true, mode: "stealth", minIntervalMs: 0, headerTimeoutMs: 0, inactivityTimeoutMs: 50 },
-      baseFetch,
-    });
-
-    const response = await fetchImpl!("https://api.example.com/v1/chat");
-    const reader = response.body!.getReader();
-    const pending = expect(reader.read()).rejects.toMatchObject({
-      code: "ETIMEDOUT",
-      phase: "body-inactivity",
-      timeoutMs: 50,
-    });
-    await vi.advanceTimersByTimeAsync(60);
-    await pending;
-  });
-
-  it("refreshes inactivity timeout on every raw body chunk including SSE heartbeats", async () => {
-    vi.useFakeTimers();
-    let controller!: ReadableStreamDefaultController<Uint8Array>;
-    const stream = new ReadableStream<Uint8Array>({
-      start(ctrl) {
-        controller = ctrl;
-      },
-    });
-    const baseFetch = vi.fn(async () =>
-      new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
-    ) as unknown as typeof fetch;
-    const fetchImpl = wrapFetchWithSubscriptionShield({
-      config: { enabled: true, mode: "stealth", minIntervalMs: 0, headerTimeoutMs: 0, inactivityTimeoutMs: 50 },
-      baseFetch,
-    });
-
-    const response = await fetchImpl!("https://api.example.com/v1/chat");
-    const reader = response.body!.getReader();
-    const firstRead = reader.read();
-    controller.enqueue(new TextEncoder().encode(": ping\n\n"));
-    await expect(firstRead).resolves.toMatchObject({ done: false });
-
-    await vi.advanceTimersByTimeAsync(40);
-    const secondRead = reader.read();
-    controller.enqueue(new TextEncoder().encode("data: ok\n\n"));
-    await expect(secondRead).resolves.toMatchObject({ done: false });
-
-    const thirdRead = reader.read();
-    await vi.advanceTimersByTimeAsync(40);
-    controller.close();
-    await expect(thirdRead).resolves.toMatchObject({ done: true });
-  });
-
-  it("keeps the origin slot busy until the response body is finished", async () => {
-    vi.useFakeTimers();
-    const firstBody = new ReadableStream<Uint8Array>({
-      start() {
-        // kept open until the wrapped consumer cancels it
-      },
-    });
-    const secondBody = new ReadableStream<Uint8Array>({
-      start(ctrl) {
-        ctrl.enqueue(new Uint8Array([1]));
-        ctrl.close();
-      },
-    });
-    const baseFetch = vi
-      .fn()
-      .mockResolvedValueOnce(new Response(firstBody, { status: 200 }))
-      .mockResolvedValueOnce(new Response(secondBody, { status: 200 })) as unknown as typeof fetch;
-    const fetchImpl = wrapFetchWithSubscriptionShield({
-      config: { enabled: true, mode: "stealth", minIntervalMs: 0, headerTimeoutMs: 0, inactivityTimeoutMs: 0, maxConnectionsPerOrigin: 1 },
-      baseFetch,
-    });
-
-    const firstResponse = await fetchImpl!("https://api.example.com/v1/chat");
-    const secondPending = fetchImpl!("https://api.example.com/v1/chat");
-    await Promise.resolve();
-    expect((baseFetch as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
-
-    await firstResponse.body!.cancel();
-    await vi.runAllTimersAsync();
-    await secondPending;
-    expect((baseFetch as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+    expect(fetchImpl).toBe(baseFetch);
   });
 
   it("preserves external aborts instead of rewriting them as shield timeouts", async () => {

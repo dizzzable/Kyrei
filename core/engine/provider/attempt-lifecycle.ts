@@ -33,13 +33,6 @@ function capacityError(): Error & { code: string } {
   });
 }
 
-function isSubscriptionShieldTimeout(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const source = error as Record<string, unknown>;
-  return source["reason"] === "subscription_shield_timeout"
-    || (source["code"] === "ETIMEDOUT" && source["phase"] === "headers");
-}
-
 function isDelegationTimeout(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const source = error as Record<string, unknown>;
@@ -72,14 +65,14 @@ function failedOutcome(
     ...target,
     outcome: interruptedOutcome
       ? "interrupted"
-      : isDelegationTimeout(error) || isSubscriptionShieldTimeout(error) || isRetryable(error)
+      : isDelegationTimeout(error) || isRetryable(error)
         ? "retryable-error"
         : "terminal-error",
     phase: "stream",
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
     // Interrupted aborts must not train the account pool (user cancel / session stop).
-    ...(!interruptedOutcome ? { failureClass: isDelegationTimeout(error) || isSubscriptionShieldTimeout(error) ? "network" : classifyProviderFailure(error) } : {}),
+    ...(!interruptedOutcome ? { failureClass: isDelegationTimeout(error) ? "network" : classifyProviderFailure(error) } : {}),
   };
 }
 

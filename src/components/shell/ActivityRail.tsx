@@ -31,6 +31,7 @@ interface ActivityRailProps {
   onSelect: (id: string) => void;
   onNew: () => void;
   onArchive: (id: string) => void;
+  onDelete: (id: string) => void;
   onFork?: (id: string) => void;
   onContinue?: (id: string) => void;
   onRename: (id: string, title: string) => void;
@@ -47,6 +48,7 @@ export function ActivityRail({
   onSelect,
   onNew,
   onArchive,
+  onDelete,
   onFork,
   onContinue,
   onRename,
@@ -91,6 +93,7 @@ export function ActivityRail({
         workingId={workingId}
         onSelect={onSelect}
         onArchive={onArchive}
+        onDelete={onDelete}
         onFork={onFork}
         onContinue={onContinue}
         onRename={onRename}
