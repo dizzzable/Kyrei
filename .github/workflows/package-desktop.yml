@@ -38,7 +38,7 @@ jobs:
       - run: npm run gate
       - run: npm audit --audit-level=high
       - name: Scan committed source for secrets
-        uses: gitleaks/gitleaks-action@961680e5305a30eb575f3ddf6bb6b2e265b68f0a # main, Node 24
+        uses: gitleaks/gitleaks-action@b63d6855b47b4f60b3d2d55b2ff6f72cb5e8feff # main, Node 24
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
