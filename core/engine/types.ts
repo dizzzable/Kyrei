@@ -1124,12 +1124,14 @@ export interface RuntimeTeamSpec {
  * The tool remains the policy authority: this port is called only after
  * permission checks, pre-hooks, and sandbox command wrapping have completed.
  * Implementations must execute `command` exactly once and return its bounded
- * textual result.
+ * textual result. Wall-clock timeouts must not kill a live process: wait for
+ * exit, user cancel (`abortSignal`), or explicit terminal close.
  */
 export interface CommandRunnerPort {
   run(input: {
     command: string;
     cwd: string;
+    /** Accepted for compatibility; must not hard-kill the process. */
     timeoutMs: number;
     ownerId: string;
     actorId: string;

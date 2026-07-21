@@ -97,4 +97,71 @@ describe("terminal view state", () => {
     });
     expect(state.activeId).toBe("three");
   });
+
+  it("replaces an agent tab in place when the same session id is reused for the next command", () => {
+    let state = terminalViewReducer(emptyTerminalState("chat-a"), {
+      type: "event",
+      event: {
+        type: "created",
+        session: {
+          ...session("agent-1"),
+          kind: "agent",
+          actorId: "main",
+          toolCallId: "tool-1",
+          title: "Kyrei · main",
+          status: "exited",
+          exitCode: 0,
+          output: [{ stream: "stdout", text: "old command\n" }],
+        },
+      },
+    });
+    state = terminalViewReducer(state, { type: "activate", sessionId: "agent-1" });
+    state = terminalViewReducer(state, {
+      type: "event",
+      event: {
+        type: "created",
+        session: {
+          ...session("agent-1"),
+          kind: "agent",
+          actorId: "main",
+          toolCallId: "tool-2",
+          title: "Kyrei · main",
+          status: "running",
+          exitCode: null,
+          output: [],
+        },
+      },
+    });
+    expect(state.sessions).toHaveLength(1);
+    expect(state.activeId).toBe("agent-1");
+    expect(state.sessions[0]).toMatchObject({
+      toolCallId: "tool-2",
+      status: "running",
+      output: [],
+    });
+  });
+
+  it("focuses a newly started agent command even when another tab was active", () => {
+    let state = terminalViewReducer(emptyTerminalState("chat-a"), {
+      type: "hydrate",
+      ownerId: "chat-a",
+      sessions: [session("manual"), session("agent-1")],
+    });
+    state = terminalViewReducer(state, { type: "activate", sessionId: "manual" });
+    state = terminalViewReducer(state, {
+      type: "event",
+      event: {
+        type: "created",
+        session: {
+          ...session("agent-2"),
+          kind: "agent",
+          actorId: "main",
+          toolCallId: "tool-9",
+          title: "Kyrei · main",
+          status: "running",
+        },
+      },
+    });
+    expect(state.activeId).toBe("agent-2");
+  });
 });

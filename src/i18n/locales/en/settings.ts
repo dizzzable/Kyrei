@@ -568,7 +568,7 @@ export const enSettings = {
   "settings.options.search": "Search only",
   "settings.options.read": "Search & read",
   "settings.commandTimeout.label": "Command timeout",
-  "settings.commandTimeout.hint": "Maximum runtime for one terminal command.",
+  "settings.commandTimeout.hint": "Legacy field kept for config compatibility. Agent shell commands are no longer killed by wall-clock timeouts — they run until exit, or until you cancel the turn / close the terminal tab.",
   "settings.fileReadLimit.label": "File read limit",
   "settings.fileReadLimit.hint": "Maximum characters returned by read_file.",
   "settings.toolOutputLimit.label": "Tool output limit",

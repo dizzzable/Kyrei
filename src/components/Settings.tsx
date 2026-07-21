@@ -994,14 +994,6 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                         onChange={(rules) => setEngineField("permissions.rules", rules, true)}
                       />
                       <NumberField
-                        label={t("settings.commandTimeout.label")}
-                        hint={t("settings.commandTimeout.hint")}
-                        value={Number(getEngineField("commandTimeoutMs", 60000))}
-                        min={5000} max={600000} step={5000}
-                        format={(value) => t("settings.units.secondsShort", { count: Math.round(value / 1000) })}
-                        onChange={(value) => setEngineField("commandTimeoutMs", value)}
-                      />
-                      <NumberField
                         label={t("settings.fileReadLimit.label")}
                         hint={t("settings.fileReadLimit.hint")}
                         value={Number(getEngineField("fileReadMaxChars", 250000))}

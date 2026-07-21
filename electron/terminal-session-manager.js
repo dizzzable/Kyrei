@@ -142,6 +142,37 @@ function publicSession(session) {
   };
 }
 
+function isReusableAgentSession(session) {
+  return (
+    session
+    && session.kind === "agent"
+    && (session.status === "exited" || session.status === "failed")
+    && session.runnerSettled === true
+    && session.terminated === true
+    && !session.closePromise
+  );
+}
+
+function detachChildListeners(child) {
+  if (!child) return;
+  try {
+    child.removeAllListeners?.();
+    child.stdout?.removeAllListeners?.();
+    child.stderr?.removeAllListeners?.();
+    child.stdin?.removeAllListeners?.();
+  } catch {
+    // A process that already exited may reject listener cleanup on some platforms.
+  }
+}
+
+function compareSessionAge(left, right) {
+  const leftKey = `${left.updatedAt ?? ""}\0${left.createdAt ?? ""}\0${left.id}`;
+  const rightKey = `${right.updatedAt ?? ""}\0${right.createdAt ?? ""}\0${right.id}`;
+  if (leftKey < rightKey) return -1;
+  if (leftKey > rightKey) return 1;
+  return 0;
+}
+
 function appendOutput(session, stream, text) {
   if (!text) return;
   session.output.push({ stream, text });
@@ -261,6 +292,90 @@ export class TerminalSessionManager {
     }
   }
 
+  /** Finished agent tabs are reclaimable; running/manual tabs are not. */
+  listReclaimableAgentSessions(rendererId, ownerId = null) {
+    return [...this.sessions.values()]
+      .filter((session) => (
+        session.rendererId === rendererId
+        && isReusableAgentSession(session)
+        && (ownerId == null || session.ownerId === ownerId)
+      ))
+      .sort(compareSessionAge);
+  }
+
+  /**
+   * Free agent tabs = finished (exited/failed) slots ready for the next command.
+   * Prefer the newest free tab for the same owner+actor so sequential
+   * run_command calls share one UI tab instead of stacking dead processes.
+   * Concurrent runs keep their own tabs while status is still "running".
+   */
+  findFreeAgentSession(rendererId, ownerId, actorId) {
+    const matches = this.listReclaimableAgentSessions(rendererId, ownerId)
+      .filter((session) => session.actorId === actorId)
+      .sort((left, right) => compareSessionAge(right, left));
+    return matches[0] ?? null;
+  }
+
+  /** @deprecated use findFreeAgentSession */
+  findReusableAgentSession(rendererId, ownerId, actorId) {
+    return this.findFreeAgentSession(rendererId, ownerId, actorId);
+  }
+
+  /**
+   * After a command finishes, keep a single free tab per actor for reuse and
+   * drop older finished same-actor tabs so capacity stays available for waves
+   * of concurrent commands.
+   */
+  compactFinishedAgentSessions(rendererId, ownerId, actorId, keepLatest = 1) {
+    const finished = this.listReclaimableAgentSessions(rendererId, ownerId)
+      .filter((session) => session.actorId === actorId)
+      .sort((left, right) => compareSessionAge(right, left));
+    const surplus = finished.slice(Math.max(0, keepLatest));
+    for (const session of surplus) this.disposeFinishedAgentSession(session);
+  }
+
+  /** Drop a finished agent tab without waiting on a process that already exited. */
+  disposeFinishedAgentSession(session) {
+    if (!isReusableAgentSession(session)) return false;
+    if (!this.sessions.has(session.id)) return false;
+    detachChildListeners(session.child);
+    this.sessions.delete(session.id);
+    this.emit({
+      rendererId: session.rendererId,
+      type: "closed",
+      sessionId: session.id,
+      ownerId: session.ownerId,
+    });
+    return true;
+  }
+
+  /**
+   * Free capacity by reclaiming the oldest finished agent tabs first.
+   * Same-owner finished agents are preferred; only then other owners on the renderer.
+   */
+  ensureCapacity(rendererId, ownerId) {
+    const ownerLimit = () => (
+      [...this.sessions.values()].filter((session) => (
+        session.rendererId === rendererId && session.ownerId === ownerId
+      )).length >= MAX_TERMINALS_PER_OWNER
+    );
+    const rendererLimit = () => (
+      [...this.sessions.values()].filter((session) => session.rendererId === rendererId)
+        .length >= MAX_TERMINALS_PER_RENDERER
+    );
+
+    while (ownerLimit()) {
+      const candidate = this.listReclaimableAgentSessions(rendererId, ownerId)[0];
+      if (!candidate || !this.disposeFinishedAgentSession(candidate)) break;
+    }
+    while (rendererLimit()) {
+      const sameOwner = this.listReclaimableAgentSessions(rendererId, ownerId)[0];
+      const candidate = sameOwner ?? this.listReclaimableAgentSessions(rendererId)[0];
+      if (!candidate || !this.disposeFinishedAgentSession(candidate)) break;
+    }
+    this.assertCapacity(rendererId, ownerId);
+  }
+
   nextSessionId() {
     const sessionId = textField(this.createId(), "terminal_session_invalid", 128);
     if (this.sessions.has(sessionId)) throw terminalError("terminal_session_collision");
@@ -276,7 +391,7 @@ export class TerminalSessionManager {
     const owner = textField(ownerId, "terminal_owner_invalid", MAX_OWNER_LENGTH);
     const displayTitle = textField(title, "terminal_title_invalid", MAX_TITLE_LENGTH);
     const workingDirectory = cwdField(cwd, this.defaultCwd);
-    this.assertCapacity(renderer, owner);
+    this.ensureCapacity(renderer, owner);
     const sessionId = this.nextSessionId();
     const shell = defaultShellSpec(this.platform, this.environment);
     const child = this.spawnImpl(shell.executable, shell.args, {
@@ -354,7 +469,9 @@ export class TerminalSessionManager {
     toolCallId,
     command,
     cwd,
-    timeoutMs,
+    // timeoutMs is accepted for API compatibility but never kills a live agent
+    // process. Commands run until exit, user cancel (abort), or tab close.
+    timeoutMs: _timeoutMs,
     abortSignal,
     sensitiveValues = [],
   } = {}) {
@@ -365,11 +482,13 @@ export class TerminalSessionManager {
     const callId = textField(toolCallId, "terminal_tool_call_invalid", MAX_OWNER_LENGTH);
     const exactCommand = commandField(command);
     const workingDirectory = cwdField(cwd, this.defaultCwd);
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
-      throw terminalError("terminal_timeout_invalid");
-    }
-    this.assertCapacity(renderer, owner);
-    const sessionId = this.nextSessionId();
+
+    // Claim a free (finished) tab for this actor when one exists. Concurrent
+    // commands that are still running keep their own tabs. Spawn first, then
+    // claim so a failed start keeps prior tab + output.
+    const freeSlot = this.findFreeAgentSession(renderer, owner, actor);
+    if (!freeSlot) this.ensureCapacity(renderer, owner);
+
     let child;
     try {
       child = this.spawnImpl(exactCommand, {
@@ -382,6 +501,24 @@ export class TerminalSessionManager {
       });
     } catch (error) {
       throw new Error(`Command failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    let sessionId;
+    let createdAt;
+    if (
+      freeSlot
+      && this.sessions.get(freeSlot.id) === freeSlot
+      && isReusableAgentSession(freeSlot)
+    ) {
+      detachChildListeners(freeSlot.child);
+      this.sessions.delete(freeSlot.id);
+      sessionId = freeSlot.id;
+      createdAt = freeSlot.createdAt;
+    } else {
+      // Lost the candidate (user closed it, or another claim) — allocate a fresh slot.
+      this.ensureCapacity(renderer, owner);
+      sessionId = this.nextSessionId();
+      createdAt = this.clock();
     }
 
     const now = this.clock();
@@ -409,7 +546,7 @@ export class TerminalSessionManager {
         : [],
       exitCode: null,
       signal: null,
-      createdAt: now,
+      createdAt,
       updatedAt: now,
       child,
       stdoutDecoder: new StringDecoder("utf8"),
@@ -427,7 +564,6 @@ export class TerminalSessionManager {
 
     const result = new Promise((resolvePromise, reject) => {
       const cleanup = () => {
-        clearTimeout(timer);
         abortSignal?.removeEventListener("abort", onAbort);
       };
       const publish = (stream, text) => {
@@ -534,19 +670,23 @@ export class TerminalSessionManager {
 
         let failure = forcedError;
         if (!failure && (session.stopReason === "abort" || session.stopReason === "close")) failure = abortError();
-        if (!failure && session.stopReason === "timeout") failure = new Error("Command timed out");
         if (!failure && session.startError) {
           failure = new Error(`Command failed to start: ${session.startError.message ?? String(session.startError)}`);
         }
         if (!failure && session.exitCode !== 0) {
           failure = new Error(`Command exited with code ${session.exitCode}\n${boundedText(clean, 2_000)}`);
         }
+        // Timeout is never a stop reason for agent shells — only abort/close/start failure.
         session.status = session.startError || session.stopReason || forcedError ? "failed" : "exited";
         this.emit({
           rendererId: renderer,
           type: session.status === "failed" ? "failed" : "exited",
           session: publicSession(session),
         });
+        // Keep one free tab per actor for the next command; reclaim older finished ones.
+        if (session.status === "exited" || session.status === "failed") {
+          this.compactFinishedAgentSessions(renderer, owner, actor, 1);
+        }
         if (failure) reject(failure);
         else resolvePromise(`(exit code: ${session.exitCode})\n${clean}`.trim());
       };
@@ -557,8 +697,6 @@ export class TerminalSessionManager {
         void this.stopProcess(session).catch((error) => finish(error));
       };
       const onAbort = () => requestStop("abort");
-      const timer = setTimeout(() => requestStop("timeout"), timeoutMs);
-      timer.unref?.();
       abortSignal?.addEventListener("abort", onAbort, { once: true });
 
       child.stdout?.on("data", (value) => receive(

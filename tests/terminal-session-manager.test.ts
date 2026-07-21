@@ -74,6 +74,265 @@ describe("desktop terminal session manager", () => {
     expect(() => manager.write(2, "private-terminal", "pwd\n")).toThrow("terminal_session_not_found");
   });
 
+  it("keeps the finished agent tab when a reuse spawn fails synchronously", async () => {
+    const firstChild = childProcess();
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => firstChild)
+      .mockImplementationOnce(() => {
+        throw new Error("simulated spawn failure");
+      });
+    const manager = new TerminalSessionManager({
+      spawnImpl,
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => "agent-keep",
+    });
+
+    const first = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "tool-1",
+      command: "echo first",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    firstChild.stdout.emit("data", Buffer.from("prior output\n"));
+    firstChild.emit("exit", 0, null);
+    firstChild.emit("close", 0, null);
+    await first;
+
+    await expect(manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "tool-2",
+      command: "echo second",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    })).rejects.toThrow("Command failed to start: simulated spawn failure");
+
+    expect(manager.list(1, "chat")).toHaveLength(1);
+    expect(manager.list(1, "chat")[0]).toMatchObject({
+      id: "agent-keep",
+      kind: "agent",
+      actorId: "main",
+      toolCallId: "tool-1",
+      status: "exited",
+      output: [{ stream: "stdout", text: "prior output\n" }],
+    });
+  });
+
+  it("reuses a finished agent terminal for the next sequential command of the same actor", async () => {
+    const firstChild = childProcess();
+    const secondChild = childProcess();
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => firstChild)
+      .mockImplementationOnce(() => secondChild);
+    const events: Array<Record<string, unknown>> = [];
+    const manager = new TerminalSessionManager({
+      spawnImpl,
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => "must-not-create-second-id",
+      clock: (() => {
+        let tick = 0;
+        return () => `2026-07-14T00:00:0${tick++}.000Z`;
+      })(),
+    });
+    manager.onEvent((event: Record<string, unknown>) => events.push(event));
+
+    const first = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "tool-1",
+      command: "npm test",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    firstChild.stdout.emit("data", Buffer.from("first\n"));
+    firstChild.emit("exit", 0, null);
+    firstChild.emit("close", 0, null);
+    await first;
+
+    const second = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "tool-2",
+      command: "npm run build",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+
+    expect(spawnImpl).toHaveBeenCalledTimes(2);
+    expect(manager.list(1, "chat")).toHaveLength(1);
+    expect(manager.list(1, "chat")[0]).toMatchObject({
+      id: expect.any(String),
+      kind: "agent",
+      actorId: "main",
+      toolCallId: "tool-2",
+      status: "running",
+      output: [],
+    });
+    const reusedId = manager.list(1, "chat")[0].id;
+
+    secondChild.stdout.emit("data", Buffer.from("second\n"));
+    secondChild.emit("exit", 0, null);
+    secondChild.emit("close", 0, null);
+    await second;
+
+    expect(manager.list(1, "chat")).toHaveLength(1);
+    expect(manager.list(1, "chat")[0]).toMatchObject({
+      id: reusedId,
+      toolCallId: "tool-2",
+      status: "exited",
+      output: [{ stream: "stdout", text: "second\n" }],
+    });
+    expect(events.filter((event) => event.type === "closed")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "created")).toHaveLength(2);
+  });
+
+  it("keeps concurrent agent commands on separate tabs and reclaims finished ones for capacity", async () => {
+    let nextId = 0;
+    const queue: ReturnType<typeof childProcess>[] = [];
+    const spawnImpl = vi.fn(() => queue.shift() ?? childProcess());
+    const manager = new TerminalSessionManager({
+      spawnImpl,
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => `agent-${++nextId}`,
+    });
+
+    const firstChild = childProcess();
+    const secondChild = childProcess();
+    queue.push(firstChild, secondChild);
+    const first = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "parallel-0",
+      command: "cmd-0",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    const second = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "parallel-1",
+      command: "cmd-1",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    expect(manager.list(1, "chat")).toHaveLength(2);
+    expect(manager.list(1, "chat").every((session) => session.status === "running")).toBe(true);
+
+    firstChild.emit("exit", 0, null);
+    firstChild.emit("close", 0, null);
+    secondChild.emit("exit", 0, null);
+    secondChild.emit("close", 0, null);
+    await Promise.all([first, second]);
+    // Same-actor free pool compacts to one finished tab after concurrent waves.
+    expect(manager.list(1, "chat")).toHaveLength(1);
+
+    // Fill the owner limit with finished agent tabs for distinct actors, then force reclaim.
+    for (let index = 1; index < MAX_TERMINALS_PER_OWNER; index += 1) {
+      const child = childProcess();
+      queue.push(child);
+      const pending = manager.runAgentCommand({
+        rendererId: 1,
+        ownerId: "chat",
+        actorId: `worker-${index}`,
+        toolCallId: `fill-${index}`,
+        command: `fill-${index}`,
+        cwd: "/work",
+        timeoutMs: 60_000,
+      });
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      await pending;
+    }
+    expect(manager.list(1, "chat")).toHaveLength(MAX_TERMINALS_PER_OWNER);
+
+    const nextChild = childProcess();
+    queue.push(nextChild);
+    const next = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "fresh-actor",
+      toolCallId: "after-full",
+      command: "echo ok",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    expect(manager.list(1, "chat").length).toBeLessThanOrEqual(MAX_TERMINALS_PER_OWNER);
+    expect(manager.list(1, "chat").some((session) => session.actorId === "fresh-actor")).toBe(true);
+    nextChild.emit("exit", 0, null);
+    nextChild.emit("close", 0, null);
+    await next;
+  });
+
+  it("does not reuse a finished agent tab across different actors or owners", async () => {
+    let nextId = 0;
+    const queue: ReturnType<typeof childProcess>[] = [];
+    const manager = new TerminalSessionManager({
+      spawnImpl: () => queue.shift() ?? childProcess(),
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => `agent-${++nextId}`,
+    });
+
+    const firstChild = childProcess();
+    queue.push(firstChild);
+    const first = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat-a",
+      actorId: "main",
+      toolCallId: "a1",
+      command: "pwd",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    firstChild.emit("exit", 0, null);
+    firstChild.emit("close", 0, null);
+    await first;
+
+    const subChild = childProcess();
+    queue.push(subChild);
+    const sub = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat-a",
+      actorId: "subagent-1",
+      toolCallId: "s1",
+      command: "pwd",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    expect(manager.list(1, "chat-a")).toHaveLength(2);
+    subChild.emit("exit", 0, null);
+    subChild.emit("close", 0, null);
+    await sub;
+
+    const otherOwnerChild = childProcess();
+    queue.push(otherOwnerChild);
+    const other = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat-b",
+      actorId: "main",
+      toolCallId: "b1",
+      command: "pwd",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    expect(manager.list(1, "chat-a")).toHaveLength(2);
+    expect(manager.list(1, "chat-b")).toHaveLength(1);
+    otherOwnerChild.emit("exit", 0, null);
+    otherOwnerChild.emit("close", 0, null);
+    await other;
+  });
+
   it("runs an agent command exactly once and streams redacted stdout/stderr before close", async () => {
     const child = childProcess();
     const spawnImpl = vi.fn(() => child);
@@ -183,7 +442,7 @@ describe("desktop terminal session manager", () => {
     expect(manager.list(1, "chat")).toEqual([]);
   });
 
-  it("uses the same process lifecycle for timeout", async () => {
+  it("never kills a live agent command on wall-clock timeout", async () => {
     vi.useFakeTimers();
     try {
       const child = childProcess();
@@ -202,15 +461,64 @@ describe("desktop terminal session manager", () => {
         cwd: "/work",
         timeoutMs: 10,
       });
-      const rejected = expect(pending).rejects.toThrow("Command timed out");
-      await vi.advanceTimersByTimeAsync(10);
-      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-      child.emit("exit", null, "SIGTERM");
-      child.emit("close", null, "SIGTERM");
-      await rejected;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(child.kill).not.toHaveBeenCalled();
+      expect(manager.list(1, "chat")[0]).toMatchObject({ status: "running" });
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      await expect(pending).resolves.toContain("(exit code: 0)");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reuses free finished tabs and keeps only one free tab per actor after waves", async () => {
+    let nextId = 0;
+    const queue: ReturnType<typeof childProcess>[] = [];
+    const manager = new TerminalSessionManager({
+      spawnImpl: () => queue.shift() ?? childProcess(),
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => `wave-${++nextId}`,
+    });
+
+    const children = [childProcess(), childProcess(), childProcess()];
+    queue.push(...children);
+    const pending = children.map((child, index) => manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: `wave-${index}`,
+      command: `cmd-${index}`,
+      cwd: "/work",
+      timeoutMs: 60_000,
+    }));
+    expect(manager.list(1, "chat")).toHaveLength(3);
+    for (const child of children) {
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+    }
+    await Promise.all(pending);
+    // Compact keeps a single free tab for the next sequential command.
+    expect(manager.list(1, "chat")).toHaveLength(1);
+    expect(manager.list(1, "chat")[0]).toMatchObject({ kind: "agent", actorId: "main", status: "exited" });
+
+    const nextChild = childProcess();
+    queue.push(nextChild);
+    const next = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "reuse-free",
+      command: "next",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    expect(manager.list(1, "chat")).toHaveLength(1);
+    expect(manager.list(1, "chat")[0].status).toBe("running");
+    nextChild.emit("exit", 0, null);
+    nextChild.emit("close", 0, null);
+    await next;
   });
 
   it("uses the same process lifecycle for an AbortSignal", async () => {
@@ -335,6 +643,40 @@ describe("desktop terminal session manager", () => {
     }
     expect(() => manager.create({ rendererId: 1, ownerId: "chat-c", title: "Renderer full" }))
       .toThrow("terminal_renderer_limit");
+  });
+
+  it("reclaims finished agent tabs so a manual terminal can still be opened", async () => {
+    let nextId = 0;
+    const queue: ReturnType<typeof childProcess>[] = [];
+    const manager = new TerminalSessionManager({
+      spawnImpl: () => queue.shift() ?? childProcess(),
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => `slot-${++nextId}`,
+    });
+
+    for (let index = 0; index < MAX_TERMINALS_PER_OWNER; index += 1) {
+      const child = childProcess();
+      queue.push(child);
+      const pending = manager.runAgentCommand({
+        rendererId: 1,
+        ownerId: "chat",
+        actorId: `actor-${index}`,
+        toolCallId: `tool-${index}`,
+        command: `cmd-${index}`,
+        cwd: "/work",
+        timeoutMs: 60_000,
+      });
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      await pending;
+    }
+    expect(manager.list(1, "chat")).toHaveLength(MAX_TERMINALS_PER_OWNER);
+
+    const manual = manager.create({ rendererId: 1, ownerId: "chat", title: "Manual" });
+    expect(manual.kind).toBe("manual");
+    expect(manager.list(1, "chat").length).toBeLessThanOrEqual(MAX_TERMINALS_PER_OWNER);
+    expect(manager.list(1, "chat").some((session) => session.kind === "manual")).toBe(true);
   });
 
   it("isolates a failing event listener from process output collection", () => {

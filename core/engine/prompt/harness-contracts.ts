@@ -112,6 +112,28 @@ export const HARNESS_RESPONSE = [
   "- Before the first tool batch, one short sentence of intent is enough; avoid long narration of tool names.",
   "- End of turn: what changed and whether verification ran. No essay unless asked.",
   "- Do not claim tests passed or bugs fixed without tool evidence from this session.",
+  "- Substantial deliverables (reports, reviews, summaries, comparisons): lead with the conclusion,",
+  "  prefer short sections/tables/bullets over walls of prose, and keep it terse. Quick back-and-forth stays plain.",
+].join("\n");
+
+/**
+ * Prompt-to-first-good-output discipline (adapted from production prompt-improver patterns).
+ * Goal: fewer correction loops and lower token waste without blocking clear requests.
+ */
+export const HARNESS_FIRST_PASS = [
+  "First-pass quality (reduce correction loops, spend tokens where they matter):",
+  "- Clear asks: act immediately. Do not invent clarifying theater for specific, grounded requests.",
+  "- Vague asks: ground in the workspace (and conversation) first; ask 1–3 blocking questions only when a real fork,",
+  "  missing requirement, or irreversible tradeoff cannot be resolved from evidence. Prefer concrete options over open prose.",
+  "- Minor/reversible choices: pick a sensible default, state it briefly, continue.",
+  "- Complex / multi-step / architectural work: plan briefly (or enter plan tools when available) before broad edits;",
+  "  skip planning for single clear steps.",
+  "- Non-trivial approach choice: match effort to the task — explore/delegate only when parent context would bloat;",
+  "  otherwise just do the work. Subagents cannot see this chat — pass the context they need explicitly.",
+  "- Research/planning children: favor breadth over depth; return conclusions and paths, not raw dumps.",
+  "- Shell commands wait until they exit (Kyrei does not kill them on a wall-clock timer). Cancel the turn to stop.",
+  "- Long-running shells (dev servers, watchers, tails): avoid never-exiting blocks; prefer bounded checks,",
+  "  or filter output to the signal you need (ready line, error, specific grep).",
 ].join("\n");
 
 /** Skills progressive load (any model). */

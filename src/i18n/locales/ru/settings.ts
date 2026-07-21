@@ -569,7 +569,7 @@ export const ruSettings = {
   "settings.options.search": "Только поиск",
   "settings.options.read": "Поиск и чтение",
   "settings.commandTimeout.label": "Тайм-аут команды",
-  "settings.commandTimeout.hint": "Максимальное время одной команды терминала.",
+  "settings.commandTimeout.hint": "Устаревшее поле для совместимости. Агентские shell-команды больше не убиваются по wall-clock таймеру — они ждут завершения, либо Stop хода / закрытие вкладки терминала.",
   "settings.fileReadLimit.label": "Лимит чтения файла",
   "settings.fileReadLimit.hint": "Максимум символов, возвращаемых read_file.",
   "settings.toolOutputLimit.label": "Лимит вывода инструмента",

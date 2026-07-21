@@ -87,10 +87,15 @@ export function terminalViewReducer(state: TerminalViewState, action: TerminalVi
     return { ...state, sessions: replaceSession(state.sessions, appendChunk(target, event)) };
   }
   if (event.session.ownerId !== state.ownerId) return state;
+  // Focus agent tabs when a command starts (including in-place reuse of the same id)
+  // so the user sees the live process without hunting through finished tabs.
+  const focusAgentRun = event.type === "created"
+    && event.session.kind === "agent"
+    && event.session.status === "running";
   return {
     ...state,
     sessions: replaceSession(state.sessions, event.session),
-    activeId: state.activeId ?? event.session.id,
+    activeId: focusAgentRun ? event.session.id : (state.activeId ?? event.session.id),
   };
 }
 

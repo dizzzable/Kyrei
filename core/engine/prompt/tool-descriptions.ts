@@ -27,7 +27,9 @@ export const TOOL_DESCRIPTIONS = {
 
   run_command:
     "Run a shell command in the workspace root; returns combined stdout/stderr. " +
-    "Use for install/build/test/git — not to read or edit files (use dedicated tools).",
+    "Use for install/build/test/git — not to read or edit files (use dedicated tools). " +
+    "Commands wait until they finish (no wall-clock kill); the user cancels the turn to stop them. " +
+    "For dev servers/watchers/tails, prefer bounded checks and filter to the signal you need rather than blocking forever.",
 
   grep_search:
     "Search file contents with ripgrep (regex, smart-case). Returns path:line:text. Prefer over shell grep.",

@@ -14,6 +14,7 @@ import { codingModePrompt, normalizeCodingMode, type CodingMode } from "../codin
 import {
   HARNESS_CARE,
   HARNESS_EDITING,
+  HARNESS_FIRST_PASS,
   HARNESS_KARPATHY,
   HARNESS_MCP,
   HARNESS_NAVIGATION,
@@ -27,7 +28,7 @@ import {
 import { TOOL_DESCRIPTIONS, type ToolName } from "./tool-descriptions.js";
 
 /** Bump on ANY change to the produced prompt text. */
-export const PROMPT_VERSION = "1.34.0";
+export const PROMPT_VERSION = "1.35.1";
 
 /**
  * Prompt changelog (newest first). Keep entries short and factual.
@@ -35,6 +36,8 @@ export const PROMPT_VERSION = "1.34.0";
  *   editing rules, verification, safety, response language.
  */
 export const PROMPT_CHANGELOG: ReadonlyArray<{ version: string; note: string }> = [
+  { version: "1.35.1", note: "run_command waits until process exit (no wall-clock kill); cancel the turn to stop." },
+  { version: "1.35.0", note: "First-pass quality: clarity vs questions, plan/effort match, lean subagents, bounded long-running shell, scannable deliverables." },
   { version: "1.34.0", note: "Avoid redundant MCP catalog listings when the user already supplied an exact server and tool selection." },
   { version: "1.33.0", note: "Treat an explicit request to invoke an available named tool as a mandatory runtime action before final prose." },
   { version: "1.32.0", note: "Require an actual result before claiming a named available tool or requested check was performed." },
@@ -223,7 +226,8 @@ const OPENVIKING_TOOL_POLICY =
 
 const DELEGATION_POLICY =
   `- delegate_read — ${TOOL_DESCRIPTIONS.delegate_read}\n` +
-  "For one focused web query or one source, use web_search/web_fetch directly in the parent. Delegate only two or more independent research goals that benefit from isolated context or parallelism. delegate_read creates temporary read-only subagents; it is distinct from configured Team roles and never selects accounts, providers, or models. Keep dependent work in the parent, and verify child summaries before relying on them.";
+  "For one focused web query or one source, use web_search/web_fetch directly in the parent. Delegate only two or more independent research goals that benefit from isolated context or parallelism. delegate_read creates temporary read-only subagents; it is distinct from configured Team roles and never selects accounts, providers, or models. " +
+  "Children cannot see this conversation — pass file paths, errors, and prior decisions explicitly. Prefer conclusion-first summaries over raw dumps. Keep dependent work in the parent, and verify child summaries before relying on them.";
 
 const CORE_TOOL_NAMES = [
   "list_dir",
@@ -554,6 +558,7 @@ export function buildSystemPromptParts(o: SystemPromptInput): SystemPromptParts 
     TOOL_EXECUTION_CONTRACT,
     HARNESS_KARPATHY,
     HARNESS_CARE,
+    HARNESS_FIRST_PASS,
     resolvedCoreToolPolicy(manifest),
     resolvedToolPolicy(manifest, WEB_TOOL_POLICY, WEB_TOOL_NAMES),
     resolvedToolPolicy(manifest, PROJECT_INTEL_POLICY, PROJECT_INTEL_TOOL_NAMES),

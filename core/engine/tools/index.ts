@@ -221,7 +221,12 @@ async function terminateProcessTree(child: ChildProcess): Promise<void> {
   }
 }
 
-function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<string> {
+/**
+ * Fallback shell runner when no desktop commandRunner is wired.
+ * Never kills on wall-clock timeout: long builds/tests must finish unless the
+ * user cancels the turn (abortSignal) or the process exits on its own.
+ */
+function runCommand(command: string, cwd: string, _timeoutMs: number, abortSignal?: AbortSignal): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     if (abortSignal?.aborted) {
       reject(abortError());
@@ -236,9 +241,8 @@ function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal
     });
     let out = "";
     let settled = false;
-    let stoppedBy: "abort" | "timeout" | null = null;
+    let stoppedBy: "abort" | null = null;
     const cleanup = () => {
-      clearTimeout(timer);
       abortSignal?.removeEventListener("abort", onAbort);
     };
     const fail = (error: Error) => {
@@ -253,14 +257,13 @@ function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal
       cleanup();
       resolvePromise(value);
     };
-    const stop = (reason: "abort" | "timeout") => {
+    const stop = (reason: "abort") => {
       if (settled || stoppedBy) return;
       stoppedBy = reason;
       void terminateProcessTree(child).then(() => {
-        fail(reason === "abort" ? abortError() : new Error("Command timed out"));
+        fail(abortError());
       });
     };
-    const timer = setTimeout(() => stop("timeout"), timeoutMs);
     const onAbort = () => stop("abort");
     abortSignal?.addEventListener("abort", onAbort, { once: true });
     if (abortSignal?.aborted) stop("abort");
@@ -269,7 +272,6 @@ function runCommand(command: string, cwd: string, timeoutMs: number, abortSignal
     child.on("error", (error) => fail(new Error(`Command failed to start: ${error.message}`)));
     child.on("close", (code) => {
       if (stoppedBy === "abort") return fail(abortError());
-      if (stoppedBy === "timeout") return fail(new Error("Command timed out"));
       if (code !== 0) return fail(new Error(`Command exited with code ${code}\n${clip(out, 2_000)}`));
       succeed(`(код выхода: ${code})\n${out}`.trim());
     });
