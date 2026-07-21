@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { startGateway } from "../core/gateway.js";
+import { PROMPT_VERSION } from "../core/engine/prompt/system.js";
 
 let dataDir = "";
 let server: { port: number; token: string; close(): void | Promise<void> } | null = null;
@@ -43,7 +44,7 @@ describe("effective prompt inspector", () => {
 
     expect(response.status).toBe(200);
     expect(body.kind).toBe("baseline");
-    expect(body.version).toBe("1.34.0");
+    expect(body.version).toBe(PROMPT_VERSION);
     expect(body.stable).toContain("You are Kyrei");
     expect(body.chars).toBeGreaterThan(1_000);
     expect(body.availableTools).toContain("read_file");

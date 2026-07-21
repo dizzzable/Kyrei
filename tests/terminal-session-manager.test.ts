@@ -74,6 +74,129 @@ describe("desktop terminal session manager", () => {
     expect(() => manager.write(2, "private-terminal", "pwd\n")).toThrow("terminal_session_not_found");
   });
 
+  it("restores prior free tab output when a reused spawn fails asynchronously", async () => {
+    const firstChild = childProcess();
+    const brokenChild = childProcess();
+    const spawnImpl = vi.fn()
+      .mockImplementationOnce(() => firstChild)
+      .mockImplementationOnce(() => brokenChild);
+    const manager = new TerminalSessionManager({
+      spawnImpl,
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => "agent-async-fail",
+    });
+
+    const first = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "tool-1",
+      command: "echo first",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    firstChild.stdout.emit("data", Buffer.from("prior output\n"));
+    firstChild.emit("exit", 0, null);
+    firstChild.emit("close", 0, null);
+    await first;
+
+    const second = manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "main",
+      toolCallId: "tool-2",
+      command: "missing-binary",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    brokenChild.emit("error", new Error("spawn ENOENT"));
+    brokenChild.emit("close", -2, null);
+    await expect(second).rejects.toThrow("Command failed to start: spawn ENOENT");
+
+    expect(manager.list(1, "chat")).toHaveLength(1);
+    expect(manager.list(1, "chat")[0]).toMatchObject({
+      id: "agent-async-fail",
+      toolCallId: "tool-1",
+      status: "exited",
+      output: [{ stream: "stdout", text: "prior output\n" }],
+    });
+  });
+
+  it("kills an orphan child without unhandled errors when capacity cannot be freed", async () => {
+    let nextId = 0;
+    const manager = new TerminalSessionManager({
+      spawnImpl: () => childProcess(),
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => `hard-${++nextId}`,
+    });
+    for (let index = 0; index < MAX_TERMINALS_PER_OWNER; index += 1) {
+      manager.create({ rendererId: 1, ownerId: "chat", title: `Manual ${index}` });
+    }
+    const orphan = childProcess();
+    const spawnImpl = vi.fn(() => orphan);
+    (manager as { spawnImpl: typeof spawnImpl }).spawnImpl = spawnImpl;
+    await expect(manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "blocked",
+      toolCallId: "blocked",
+      command: "echo blocked",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    })).rejects.toThrow("terminal_owner_limit");
+    expect(orphan.kill).toHaveBeenCalled();
+    orphan.emit("error", new Error("spawn ENOENT after capacity reject"));
+    expect(manager.list(1, "chat")).toHaveLength(MAX_TERMINALS_PER_OWNER);
+    expect(manager.list(1, "chat").every((session) => session.kind === "manual")).toBe(true);
+  });
+
+  it("does not reclaim finished tabs when a new-slot spawn fails before the process starts", async () => {
+    let nextId = 0;
+    const queue: ReturnType<typeof childProcess>[] = [];
+    const spawnImpl = vi.fn(() => queue.shift() ?? childProcess());
+    const manager = new TerminalSessionManager({
+      spawnImpl,
+      platform: "linux",
+      defaultCwd: "/home/user",
+      createId: () => `cap-${++nextId}`,
+    });
+
+    for (let index = 0; index < MAX_TERMINALS_PER_OWNER; index += 1) {
+      const child = childProcess();
+      queue.push(child);
+      const pending = manager.runAgentCommand({
+        rendererId: 1,
+        ownerId: "chat",
+        actorId: `actor-${index}`,
+        toolCallId: `tool-${index}`,
+        command: `cmd-${index}`,
+        cwd: "/work",
+        timeoutMs: 60_000,
+      });
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      await pending;
+    }
+    expect(manager.list(1, "chat")).toHaveLength(MAX_TERMINALS_PER_OWNER);
+
+    spawnImpl.mockImplementationOnce(() => {
+      throw new Error("spawn refused");
+    });
+    await expect(manager.runAgentCommand({
+      rendererId: 1,
+      ownerId: "chat",
+      actorId: "new-actor",
+      toolCallId: "new",
+      command: "echo no",
+      cwd: "/work",
+      timeoutMs: 60_000,
+    })).rejects.toThrow("Command failed to start: spawn refused");
+
+    expect(manager.list(1, "chat")).toHaveLength(MAX_TERMINALS_PER_OWNER);
+  });
+
   it("keeps the finished agent tab when a reuse spawn fails synchronously", async () => {
     const firstChild = childProcess();
     const spawnImpl = vi.fn()

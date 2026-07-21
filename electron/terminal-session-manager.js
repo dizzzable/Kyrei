@@ -166,11 +166,56 @@ function detachChildListeners(child) {
 }
 
 function compareSessionAge(left, right) {
+  // Prefer explicit monotonic generation when present so compaction is stable
+  // even when many commands finish within the same clock millisecond.
+  const leftGen = Number.isSafeInteger(left.generation) ? left.generation : -1;
+  const rightGen = Number.isSafeInteger(right.generation) ? right.generation : -1;
+  if (leftGen !== rightGen) return leftGen < rightGen ? -1 : 1;
   const leftKey = `${left.updatedAt ?? ""}\0${left.createdAt ?? ""}\0${left.id}`;
   const rightKey = `${right.updatedAt ?? ""}\0${right.createdAt ?? ""}\0${right.id}`;
   if (leftKey < rightKey) return -1;
   if (leftKey > rightKey) return 1;
   return 0;
+}
+
+function cloneFinishedAgentSession(session) {
+  return {
+    id: session.id,
+    rendererId: session.rendererId,
+    ownerId: session.ownerId,
+    kind: "agent",
+    actorId: session.actorId,
+    toolCallId: session.toolCallId,
+    title: session.title,
+    cwd: session.cwd,
+    status: session.status,
+    output: session.output.map((chunk) => ({ stream: chunk.stream, text: chunk.text })),
+    outputChars: session.outputChars,
+    exitCode: session.exitCode,
+    signal: session.signal,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    generation: session.generation ?? 0,
+    child: session.child,
+    stdoutDecoder: session.stdoutDecoder,
+    stderrDecoder: session.stderrDecoder,
+    terminated: true,
+    closePromise: null,
+    stopPromise: null,
+    stopReason: session.stopReason,
+    startError: null,
+    runnerSettled: true,
+    acceptingOutput: false,
+    finishAgent: null,
+    streamState: {
+      stdout: { pending: "", overflowed: false },
+      stderr: { pending: "", overflowed: false },
+    },
+    resultRaw: "",
+    resultTruncated: false,
+    liveOutputChars: 0,
+    sensitiveValues: [],
+  };
 }
 
 function appendOutput(session, stream, text) {
@@ -258,6 +303,7 @@ export class TerminalSessionManager {
     this.defaultCwd = defaultCwd;
     this.sessions = new Map();
     this.listeners = new Set();
+    this.nextAgentGeneration = 1;
   }
 
   onEvent(listener) {
@@ -352,8 +398,10 @@ export class TerminalSessionManager {
   /**
    * Free capacity by reclaiming the oldest finished agent tabs first.
    * Same-owner finished agents are preferred; only then other owners on the renderer.
+   * Returns clones of reclaimed sessions so a later failed start can restore them.
    */
   ensureCapacity(rendererId, ownerId) {
+    const reclaimed = [];
     const ownerLimit = () => (
       [...this.sessions.values()].filter((session) => (
         session.rendererId === rendererId && session.ownerId === ownerId
@@ -366,14 +414,45 @@ export class TerminalSessionManager {
 
     while (ownerLimit()) {
       const candidate = this.listReclaimableAgentSessions(rendererId, ownerId)[0];
-      if (!candidate || !this.disposeFinishedAgentSession(candidate)) break;
+      if (!candidate) break;
+      const backup = cloneFinishedAgentSession(candidate);
+      if (!this.disposeFinishedAgentSession(candidate)) break;
+      reclaimed.push(backup);
     }
     while (rendererLimit()) {
       const sameOwner = this.listReclaimableAgentSessions(rendererId, ownerId)[0];
       const candidate = sameOwner ?? this.listReclaimableAgentSessions(rendererId)[0];
-      if (!candidate || !this.disposeFinishedAgentSession(candidate)) break;
+      if (!candidate) break;
+      const backup = cloneFinishedAgentSession(candidate);
+      if (!this.disposeFinishedAgentSession(candidate)) break;
+      reclaimed.push(backup);
     }
     this.assertCapacity(rendererId, ownerId);
+    return reclaimed;
+  }
+
+  restoreReclaimedSessions(backups) {
+    if (!Array.isArray(backups) || backups.length === 0) return;
+    for (const backup of backups) {
+      if (!backup?.id || this.sessions.has(backup.id)) continue;
+      this.sessions.set(backup.id, backup);
+      this.emit({
+        rendererId: backup.rendererId,
+        type: "exited",
+        session: publicSession(backup),
+      });
+    }
+  }
+
+  async killOrphanChild(child) {
+    if (!child) return;
+    // Swallow async spawn errors so an unattached orphan cannot crash Electron.
+    try { child.once?.("error", () => {}); } catch { /* ignore */ }
+    try {
+      await this.terminateImpl({ child, kind: "agent" }, true, this.platform);
+    } catch {
+      try { child.kill?.("SIGKILL"); } catch { /* already dead */ }
+    }
   }
 
   nextSessionId() {
@@ -483,11 +562,10 @@ export class TerminalSessionManager {
     const exactCommand = commandField(command);
     const workingDirectory = cwdField(cwd, this.defaultCwd);
 
-    // Claim a free (finished) tab for this actor when one exists. Concurrent
-    // commands that are still running keep their own tabs. Spawn first, then
-    // claim so a failed start keeps prior tab + output.
+    // Prefer a free (finished) tab for this actor. Concurrent running commands
+    // keep their own tabs. Spawn first; only then claim capacity / free slots so
+    // a failed start does not destroy prior tabs or their output.
     const freeSlot = this.findFreeAgentSession(renderer, owner, actor);
-    if (!freeSlot) this.ensureCapacity(renderer, owner);
 
     let child;
     try {
@@ -505,23 +583,33 @@ export class TerminalSessionManager {
 
     let sessionId;
     let createdAt;
+    let freeBackup = null;
+    let reclaimedBackups = [];
     if (
       freeSlot
       && this.sessions.get(freeSlot.id) === freeSlot
       && isReusableAgentSession(freeSlot)
     ) {
+      freeBackup = cloneFinishedAgentSession(freeSlot);
       detachChildListeners(freeSlot.child);
       this.sessions.delete(freeSlot.id);
       sessionId = freeSlot.id;
       createdAt = freeSlot.createdAt;
     } else {
-      // Lost the candidate (user closed it, or another claim) — allocate a fresh slot.
-      this.ensureCapacity(renderer, owner);
+      // Need a new slot — reclaim finished tabs only after spawn returned a child.
+      // If capacity cannot be freed, kill the orphan process so it is not leaked.
+      try {
+        reclaimedBackups = this.ensureCapacity(renderer, owner);
+      } catch (error) {
+        void this.killOrphanChild(child);
+        throw error;
+      }
       sessionId = this.nextSessionId();
       createdAt = this.clock();
     }
 
     const now = this.clock();
+    const generation = this.nextAgentGeneration++;
     const session = {
       id: sessionId,
       rendererId: renderer,
@@ -548,6 +636,7 @@ export class TerminalSessionManager {
       signal: null,
       createdAt,
       updatedAt: now,
+      generation,
       child,
       stdoutDecoder: new StringDecoder("utf8"),
       stderrDecoder: new StringDecoder("utf8"),
@@ -559,6 +648,8 @@ export class TerminalSessionManager {
       runnerSettled: false,
       acceptingOutput: true,
       finishAgent: null,
+      freeBackup,
+      reclaimedBackups,
     };
     this.sessions.set(session.id, session);
 
@@ -676,6 +767,43 @@ export class TerminalSessionManager {
         if (!failure && session.exitCode !== 0) {
           failure = new Error(`Command exited with code ${session.exitCode}\n${boundedText(clean, 2_000)}`);
         }
+
+        // Async spawn failure (ENOENT/EACCES after ChildProcess is returned): restore
+        // any free/reclaimed tabs so prior output is not lost to an empty failed tab.
+        if (
+          session.startError
+          && !session.stopReason
+          && session.liveOutputChars === 0
+          && this.sessions.get(session.id) === session
+        ) {
+          detachChildListeners(session.child);
+          this.sessions.delete(session.id);
+          const restoredFree = session.freeBackup;
+          session.freeBackup = null;
+          if (restoredFree) {
+            // Same tab id: replace empty failed run with the prior finished state.
+            this.sessions.set(restoredFree.id, restoredFree);
+            this.emit({
+              rendererId: renderer,
+              type: "exited",
+              session: publicSession(restoredFree),
+            });
+          } else {
+            this.emit({
+              rendererId: renderer,
+              type: "closed",
+              sessionId: session.id,
+              ownerId: session.ownerId,
+            });
+          }
+          this.restoreReclaimedSessions(session.reclaimedBackups);
+          session.reclaimedBackups = [];
+          reject(failure ?? new Error(`Command failed to start: ${session.startError.message ?? String(session.startError)}`));
+          return;
+        }
+
+        session.freeBackup = null;
+        session.reclaimedBackups = [];
         // Timeout is never a stop reason for agent shells — only abort/close/start failure.
         session.status = session.startError || session.stopReason || forcedError ? "failed" : "exited";
         this.emit({
