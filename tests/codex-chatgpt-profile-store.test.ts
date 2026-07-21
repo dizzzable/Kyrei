@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,7 +24,8 @@ describe("Codex ChatGPT profile store", () => {
     const store = new CodexChatgptProfileStore({ homeRoot: root, connectorFactory });
 
     const home = await store.ensureProfile("owner-plus");
-    expect(home).toBe(join(root, "owner-plus"));
+    // macOS often resolves /var/folders → /private/var/folders via realpath.
+    expect(home).toBe(join(await realpath(root), "owner-plus"));
     await expect(readFile(join(home, "config.toml"), "utf8"))
       .resolves.toBe('cli_auth_credentials_store = "file"\n');
 
