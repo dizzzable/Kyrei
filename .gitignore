@@ -5,6 +5,7 @@ core/engine/.dist/
 tests/eval/out/
 .playwright-cli/
 output/
+tmp/
 .jez/
 
 # Local signing material must never enter a release.
