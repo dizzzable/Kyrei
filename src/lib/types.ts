@@ -308,7 +308,6 @@ export interface SubagentRun {
   };
   actions?: {
     retry: boolean;
-    resume: boolean;
     cancel: boolean;
   };
 }
@@ -616,26 +615,11 @@ export interface ExperimentalConfig {
   features: Partial<Record<ExperimentalFeatureId, boolean>>;
 }
 
-/** Transport hygiene for expensive API seats (Capacity → Subscription shield). */
-export type SubscriptionShieldMode = "off" | "standard" | "stealth";
-
-export interface SubscriptionShieldConfig {
-  enabled: boolean;
-  mode: SubscriptionShieldMode;
-  minIntervalMs?: number;
-  connectTimeoutMs?: number;
-  headerTimeoutMs?: number;
-  inactivityTimeoutMs?: number;
-  maxConnectionsPerOrigin?: number;
-}
-
 export interface CapacityConfig {
   enabled: boolean;
   strategy: CapacityStrategy;
   preferSpare: boolean;
   crossProviderFamily: boolean;
-  /** Default ON: pacing + soft TLS/header protection for paid keys. */
-  subscriptionShield?: SubscriptionShieldConfig;
 }
 export type ProviderAccountStatus = "ready" | "cooldown" | "auth-required" | "disabled";
 
@@ -1439,5 +1423,9 @@ export interface GatewayEvent {
     role_id?: string;
     depth?: number;
     parent_tool_call_id?: string;
+    profile_id?: string;
+    workflow?: "supervisor" | "consensus";
+    completed_tasks?: number;
+    failed_tasks?: number;
   };
 }

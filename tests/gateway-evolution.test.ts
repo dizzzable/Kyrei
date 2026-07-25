@@ -79,11 +79,48 @@ describe("gateway evolution control plane", () => {
     expect(evaluating.status).toBe(409);
     expect(await evaluating.json()).toMatchObject({ code: "evolution_evaluation_disabled" });
 
+    // Default promotionMode is "manual" → the executor runs and refuses to
+    // overwrite the reserved built-in profile kyrei-main (never mutates blindly).
+    const promoted = await request(`/api/evolution/candidates/${created.candidate.id}/transition`, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: 1, status: "promoted", evidence: { receipts: ["fake"] } }),
+    });
+    expect(promoted.status).toBe(409);
+    expect(await promoted.json()).toMatchObject({ code: "executor_reserved_profile" });
+  });
+
+  it("keeps promotion unavailable when promotionMode is off", async () => {
+    // Merge into the full engine — a bare {engine:{evolution}} PUT would wipe
+    // promptProfiles and break team-role assignments (boundary replaces engine).
+    const cfg = await (await request("/api/config")).json() as { engine?: Record<string, unknown> };
+    const engine = { ...(cfg.engine ?? {}), evolution: { promotionMode: "off" } };
+    const put = await request("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ engine }),
+    });
+    expect(put.status).toBe(200);
+
+    const create = await request("/api/evolution/candidates", {
+      method: "POST",
+      body: JSON.stringify({
+        target: { kind: "skill", id: "skill:testing" },
+        title: "Any candidate",
+        summary: "Proposal only",
+        proposal: {},
+      }),
+    });
+    const created = await create.json() as { candidate: { id: string } };
     const promoted = await request(`/api/evolution/candidates/${created.candidate.id}/transition`, {
       method: "POST",
       body: JSON.stringify({ expectedRevision: 1, status: "promoted", evidence: { receipts: ["fake"] } }),
     });
     expect(promoted.status).toBe(409);
     expect(await promoted.json()).toMatchObject({ code: "evolution_apply_unavailable" });
+  });
+
+  it("refuses the evaluation sweep when evaluation is disabled", async () => {
+    const evaluate = await request("/api/evolution/evaluate", { method: "POST" });
+    expect(evaluate.status).toBe(409);
+    expect(await evaluate.json()).toMatchObject({ code: "evolution_evaluation_disabled" });
   });
 });

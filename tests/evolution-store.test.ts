@@ -81,4 +81,56 @@ describe("EvolutionStore", () => {
       proposal: {},
     })).rejects.toThrow("evolution_target_not_allowlisted");
   });
+
+  describe("gc(retentionDays)", () => {
+    const seed = (store: EvolutionStore, id: string, kind = "reliability-hint") => store.create({
+      id,
+      target: { kind, id: `t:${id}` },
+      title: `Candidate ${id}`,
+      summary: `Summary for ${id}`,
+      proposal: { note: id },
+    });
+
+    it("prunes terminal candidates older than the window, keeps live ones", async () => {
+      let now = Date.parse("2026-01-01T00:00:00.000Z");
+      const { dataDir, store } = await fixture({ now: () => now });
+      // Old + terminal (rejected) → dropped.
+      const oldTerminal = await seed(store, "evo_oldterminal");
+      now += 1_000;
+      await store.transition(oldTerminal.id, { expectedRevision: 1, status: "rejected" });
+      // Old + non-terminal (pending) → kept regardless of age.
+      const oldPending = await seed(store, "evo_oldpending");
+      // Advance far past retention (200 days).
+      now += 200 * 86_400_000;
+      // Fresh + terminal → kept (within window).
+      const freshTerminal = await seed(store, "evo_freshterminal");
+      now += 1_000;
+      await store.transition(freshTerminal.id, { expectedRevision: 1, status: "rejected" });
+
+      const result = await store.gc(180);
+      expect(result.pruned).toBe(1);
+
+      const remaining = (await store.list({ limit: 500 })).map((c) => c.id).sort();
+      expect(remaining).toEqual(["evo_freshterminal", "evo_oldpending"].sort());
+      expect(await store.get(oldTerminal.id)).toBeNull();
+
+      // Journal is still readable from a fresh store after rewrite.
+      const reloaded = new EvolutionStore({ dataDir });
+      expect(await reloaded.get(oldPending.id)).toMatchObject({ id: oldPending.id, status: "pending" });
+      expect(await reloaded.get(oldTerminal.id)).toBeNull();
+    });
+
+    it("is a no-op when nothing qualifies (file untouched)", async () => {
+      let now = Date.parse("2026-01-01T00:00:00.000Z");
+      const { dataDir, store } = await fixture({ now: () => now });
+      await seed(store, "evo_keepalive1");
+      now += 1_000;
+      await store.flush();
+      const before = await readFile(join(dataDir, "evolution", "events.jsonl"), "utf8");
+      const result = await store.gc(180);
+      expect(result.pruned).toBe(0);
+      const after = await readFile(join(dataDir, "evolution", "events.jsonl"), "utf8");
+      expect(after).toBe(before);
+    });
+  });
 });

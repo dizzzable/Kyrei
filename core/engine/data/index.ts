@@ -202,11 +202,13 @@ export function createFileStores(baseDir: string): Stores {
     },
   };
   const cosine = (a: Float32Array, b: Float32Array): number => {
-    const n = Math.min(a.length, b.length);
+    // Mismatched dimensions (e.g. after an embed-mode switch) can't be compared
+    // meaningfully — treat as no similarity rather than truncating to a wrong score.
+    if (a.length !== b.length) return 0;
     let dot = 0;
     let na = 0;
     let nb = 0;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < a.length; i++) {
       dot += a[i]! * b[i]!;
       na += a[i]! * a[i]!;
       nb += b[i]! * b[i]!;
@@ -233,7 +235,8 @@ export function createFileStores(baseDir: string): Stores {
     },
     async query(embedding, opts) {
       const hits: VectorHit[] = vecRows
-        .filter((r) => !opts.ownerType || r.ownerType === opts.ownerType)
+        .filter((r) => (!opts.ownerType || r.ownerType === opts.ownerType)
+          && (!opts.model || r.model === opts.model))
         .map((r) => ({ ownerType: r.ownerType, ownerId: r.ownerId, chunkIndex: r.chunkIndex, distance: 1 - cosine(embedding, r.embedding) }));
       hits.sort((a, b) => a.distance - b.distance);
       return hits.slice(0, opts.k);

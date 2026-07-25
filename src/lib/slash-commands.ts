@@ -11,6 +11,22 @@
  *   - `picker`      → opens an overlay picker (`/model`)
  *   - `exec`        → runs on the backend and renders inline output
  *   - `unavailable` → a known command with no UI surface; shows a reason
+ *
+ * SCOPE NOTE (what is live vs. scaffolding):
+ * The live Composer path uses only `getSlashCommands` (palette), `parseSlash`,
+ * and `resolveSlashCommand` (dispatch) — the current registry contains only
+ * `action` and (hidden) `picker` commands. The remaining surface is intentional
+ * scaffolding for a *future* backend-provided command source and is NOT yet
+ * wired into any component:
+ *   - the `exec` and `unavailable` surface kinds (no registry entry uses them),
+ *   - the "extension command" concept (`isSlashExtensionCommand`), and
+ *   - helpers `isSlashCommand` / `isSlashSuggestion` / `isPickerCommand` /
+ *     `isModelPickerCommand` / `slashUnavailableMessage` / `slashCommandTakesArgs` /
+ *     `canonicalSlashCommand` / `slashDescription`.
+ * These are unit-tested and safe to build on, but until a backend command
+ * source and popover/dispatch wiring exist, an unknown `/foo` is sent to the
+ * model as a normal chat message (it is not executed). Do not assume these
+ * helpers affect runtime behaviour without wiring them into Composer first.
  */
 
 import type { Translator } from "@/i18n/types";

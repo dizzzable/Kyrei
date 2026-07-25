@@ -149,6 +149,11 @@ const LtmConfigSchema = z.object({
 const OpenVikingConfigSchema = z.object({
   enabled: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.openviking.enabled),
   baseURL: z.string().trim().url().optional(),
+  // Optional API key (sent as X-API-Key) and remote opt-in for self-hosted
+  // servers. Without allowRemote a non-loopback baseURL is rejected by the
+  // client, so a remote/authenticated OpenViking needs both fields.
+  apiKey: z.string().trim().min(1).max(4_096).optional(),
+  allowRemote: z.boolean().optional(),
 });
 
 const MemoryIndexEmbedSchema = z.object({
@@ -186,6 +191,13 @@ const MemoryCuratorConfigSchema = z.object({
   useLlm: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.curator.useLlm),
   modelSource: z.enum(["worker", "session", "default"]).default(
     DEFAULT_ENGINE_CONFIG.memory.curator.modelSource,
+  ),
+  autoOnIdle: z.boolean().default(DEFAULT_ENGINE_CONFIG.memory.curator.autoOnIdle),
+  idleMs: z.number().int().min(60_000).max(3_600_000).default(
+    DEFAULT_ENGINE_CONFIG.memory.curator.idleMs,
+  ),
+  autoApplyMode: z.enum(["propose", "apply_safe", "apply_all"]).default(
+    DEFAULT_ENGINE_CONFIG.memory.curator.autoApplyMode,
   ),
 });
 

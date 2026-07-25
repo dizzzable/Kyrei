@@ -212,6 +212,12 @@ export async function createTeamRoleExecutors(
               ...(options.config.memory.openviking?.baseURL
                 ? { baseURL: options.config.memory.openviking.baseURL }
                 : {}),
+              ...(options.config.memory.openviking?.apiKey
+                ? { apiKey: options.config.memory.openviking.apiKey }
+                : {}),
+              ...(options.config.memory.openviking?.allowRemote
+                ? { allowRemote: true }
+                : {}),
             },
             { maxModelOutputChars: options.config.maxToolOutput },
           )

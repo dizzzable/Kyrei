@@ -10,7 +10,7 @@
  * cover policy/tools and only the project slice invalidates.
  */
 
-import type { ModelMessage } from "ai";
+import type { ModelMessage, ToolSet } from "ai";
 import type { ProviderProtocol } from "../types.js";
 import type { ProviderOptionsMap } from "../provider/build.js";
 
@@ -122,6 +122,63 @@ export function mergeProviderOptions(
     out[key] = { ...(out[key] ?? {}), ...value };
   }
   return out;
+}
+
+/**
+ * Wave B3 — cache the tool-schema block on Anthropic.
+ *
+ * Tool JSON schemas are large and constant for the whole session, yet they are
+ * re-sent on every provider step. Anthropic caches by longest prefix, so a
+ * single `cache_control` breakpoint on the LAST tool covers the entire tools
+ * block. No-op for other protocols (they rely on automatic prefix caching).
+ *
+ * The tool objects in `tools` are shared references across fallback candidates,
+ * so we clone the last tool (and its providerOptions) instead of mutating it —
+ * a mutation would leak an Anthropic breakpoint onto non-Anthropic candidates.
+ */
+export function applyToolCacheBreakpoint(
+  tools: ToolSet | undefined,
+  protocol?: ProviderProtocol | string,
+): ToolSet | undefined {
+  if (!tools || !isAnthropic(protocol)) return tools;
+  const keys = Object.keys(tools);
+  if (keys.length === 0) return tools;
+  const lastKey = keys[keys.length - 1]!;
+  const lastTool = tools[lastKey] as { providerOptions?: ProviderOptionsMap };
+  const cachedTool = {
+    ...lastTool,
+    providerOptions: mergeProviderOptions(lastTool.providerOptions, ANTHROPIC_CACHE),
+  };
+  return { ...tools, [lastKey]: cachedTool } as ToolSet;
+}
+
+/**
+ * Wave B3 — cache the conversation-history prefix on Anthropic.
+ *
+ * Within a single turn the multi-step tool loop re-sends the same growing
+ * history on every step. A breakpoint at the end of the last input message
+ * caches that prefix so each tool step reuses it. Between turns the anchor
+ * shifts forward — that is fine; caching is best-effort with no miss penalty.
+ *
+ * Clones the last message instead of mutating it (the array/messages may be
+ * shared) and merges providerOptions so existing keys (thinking/reasoning)
+ * survive. For the last content part with no own cache_control, the Anthropic
+ * provider falls back to `message.providerOptions`, so a message-level
+ * breakpoint lands cleanly at the end of that message.
+ */
+export function applyHistoryCacheBreakpoint(
+  messages: ModelMessage[],
+  protocol?: ProviderProtocol | string,
+): ModelMessage[] {
+  if (!isAnthropic(protocol) || messages.length === 0) return messages;
+  const last = messages[messages.length - 1] as ModelMessage & {
+    providerOptions?: ProviderOptionsMap;
+  };
+  const cached = {
+    ...last,
+    providerOptions: mergeProviderOptions(last.providerOptions, ANTHROPIC_CACHE),
+  } as ModelMessage;
+  return [...messages.slice(0, -1), cached];
 }
 
 /** Human-readable routing note for docs / settings (Wave B3 companion). */

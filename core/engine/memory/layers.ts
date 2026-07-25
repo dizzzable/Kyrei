@@ -35,7 +35,12 @@ async function readAlwaysSteering(workspace: string): Promise<string[]> {
   for (const n of names.sort()) {
     const body = await readIfExists(join(dir, n));
     if (body == null) continue;
-    // Include only 'always' (default) steering — skip explicit fileMatch/manual.
+    // Only `inclusion: always` (the default) is honored. Kiro's other modes
+    // (fileMatch/manual/auto) need a "file currently being edited" target to
+    // match against, but Kyrei assembles system context once per turn, upfront —
+    // before the agent has chosen which files to touch — so that target does not
+    // exist here. A steering file with a non-`always` inclusion is intentionally
+    // skipped (not conditionally included). See blueprint note on this scope cut.
     const fm = body.match(/^---\n([\s\S]*?)\n---/);
     const inclusion = fm?.[1]?.match(/inclusion:\s*(\w+)/)?.[1] ?? "always";
     if (inclusion === "always") out.push(body);

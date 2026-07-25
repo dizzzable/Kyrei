@@ -9,6 +9,10 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(resolveEngineConfig().warnings).toHaveLength(0);
   });
 
+  it("enables LLM compaction summary by default", () => {
+    expect(resolveEngineConfig({}).config.compression.summaryUseLlm).toBe(true);
+  });
+
   it("merges a partial config over defaults", () => {
     const { config } = resolveEngineConfig({ maxSteps: 20, fallbackChain: ["small"] });
     expect(config.maxSteps).toBe(20);
@@ -169,6 +173,25 @@ describe("resolveEngineConfig (task 2.6)", () => {
       maxParallel: 4,
     });
     expect(warnings.some((warning) => warning.includes("max_concurrent_children"))).toBe(true);
+  });
+
+  it("preserves OpenViking apiKey and allowRemote so a remote/authed server is reachable", () => {
+    const { config } = resolveEngineConfig({
+      memory: {
+        openviking: {
+          enabled: true,
+          baseURL: "https://viking.example.test",
+          apiKey: "ov-secret-key",
+          allowRemote: true,
+        },
+      },
+    });
+    expect(config.memory.openviking).toEqual({
+      enabled: true,
+      baseURL: "https://viking.example.test",
+      apiKey: "ov-secret-key",
+      allowRemote: true,
+    });
   });
 
   it("validates optional GBrain settings without enabling them by default", () => {

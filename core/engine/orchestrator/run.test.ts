@@ -65,14 +65,6 @@ vi.mock("../provider/registry.js", () => ({
   },
 }));
 
-vi.mock("../provider/keys.js", () => ({
-  KeyPool: class {
-    isMulti() {
-      return false;
-    }
-  },
-}));
-
 vi.mock("../provider/open-stream.js", () => ({
   openStream: openStreamMock,
   streamAttemptsFromError: () => [],
@@ -159,6 +151,8 @@ vi.mock("../prompt/cache-packing.js", () => ({
     for (const [key, value] of Object.entries(extra)) merged[key] = { ...(merged[key] ?? {}), ...value };
     return merged;
   },
+  applyToolCacheBreakpoint: (tools: unknown) => tools,
+  applyHistoryCacheBreakpoint: (messages: unknown) => messages,
 }));
 
 vi.mock("./stop-conditions.js", () => ({

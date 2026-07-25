@@ -123,6 +123,52 @@ describe("prepare-step handoff + LTM checkpoint", () => {
     ).toBe(true);
   });
 
+  it("calls the summary model deterministically (temperature 0) when summaryUseLlm is on", async () => {
+    const cfg = {
+      ...DEFAULT_ENGINE_CONFIG,
+      contextBudget: { softPct: 0.75, hardPct: 0.9 },
+      compression: {
+        ...DEFAULT_ENGINE_CONFIG.compression,
+        enabled: true,
+        summaryEnabled: true,
+        summaryUseLlm: true,
+        summaryMinMessages: 4,
+        protectFirstN: 1,
+        protectLastN: 2,
+        summaryCooldownoffMs: 0,
+      },
+      maxToolOutput: 12_000,
+    };
+    const ccr = {
+      put: async () => "sha256:" + "c".repeat(64),
+      get: async () => null,
+      has: async () => false,
+      gc: async () => ({ removed: 0, freedBytes: 0 }),
+    } as unknown as CcrStore;
+    const calls: Array<Record<string, unknown>> = [];
+    const generateText = (async (args: Record<string, unknown>) => {
+      calls.push(args);
+      return { text: "Deterministic LLM summary long enough to pass the length gate for the test." };
+    }) as unknown as typeof import("ai").generateText;
+    const prepare = makePrepareStep(cfg, {
+      model: "mock",
+      window: 1000,
+      ccr,
+      workspace: ws,
+      sessionId: "sess-temp0",
+      summaryModel: "mock-worker" as unknown as import("ai").LanguageModel,
+      generateText,
+    });
+    const messages = Array.from({ length: 14 }, (_, i) => ({
+      role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: `turn ${i} enough text for middle summary windows to open`,
+    }));
+    await prepare({ messages, steps: [{ usage: { inputTokens: 950, totalTokens: 980 } }] });
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]?.temperature).toBe(0);
+    expect(calls[0]?.maxOutputTokens).toBe(1_200);
+  });
+
   it("compacts a 700k-character restored transcript before it reaches the provider", async () => {
     const cfg = {
       ...DEFAULT_ENGINE_CONFIG,

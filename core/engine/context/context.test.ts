@@ -120,6 +120,28 @@ describe("CCR (Property 6: reversible compression)", () => {
     expect(result.metadata).toMatchObject({ offset: 500, nextOffset: 1500, totalChars: 20_000 });
     expect(result.output.length).toBeLessThan(1_300);
   });
+
+  it("gc() prunes shards over the total-size cap while keeping the newest recallable", async () => {
+    const store = createCcrStore(dir);
+    const hashes: string[] = [];
+    const payloads: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      // Incompressible random content so gzipped shards actually exceed the cap
+      // (repeated chars would compress to near-zero and never trip the limit).
+      const body = `payload ${i} ` + Array.from({ length: 4_000 }, () => Math.random().toString(36).slice(2, 3)).join("");
+      payloads.push(body);
+      hashes.push(await store.put(body));
+      // Space out mtimes so sort-by-newest is deterministic across shards.
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    // Cap well below total so gc must remove the oldest shards.
+    const { removed, freedBytes } = await store.gc({ maxTotalBytes: 4_000 });
+    expect(removed).toBeGreaterThan(0);
+    expect(freedBytes).toBeGreaterThan(0);
+    // Newest survives and stays retrievable; the oldest was pruned.
+    expect(await store.get(hashes.at(-1)!)).toBe(payloads.at(-1)!);
+    expect(await store.get(hashes[0]!)).toBe(null);
+  });
 });
 
 describe("stage B middle summary", () => {
@@ -251,5 +273,73 @@ describe("stage B middle summary", () => {
     expect(result.middleCcrHash).toMatch(/^sha256:/);
     expect(await store.get(result.middleCcrHash!)).toBeTruthy();
     expect(result.messages.length).toBeLessThan(msgs.length);
+  });
+
+  it("summarizeMiddleTurns uses the LLM result when llmSummarize returns text", async () => {
+    const store = createCcrStore(dir);
+    const msgs = Array.from({ length: 14 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `message body ${i} with enough text for distill path`,
+    })) as ModelMessage[];
+    let received = "";
+    const result = await summarizeMiddleTurns(msgs, {
+      ccr: store,
+      protect: { protectFirstN: 1, protectLastN: 3, summaryMinMessages: 10 },
+      llmSummarize: async (middleText) => {
+        received = middleText;
+        return "LLM distilled summary with plenty of characters to pass the length gate.";
+      },
+    });
+    expect(result.via).toBe("llm");
+    expect(String((result.messages.find((m) => (m as { _kyreiCompressedSummary?: boolean })._kyreiCompressedSummary) as { content: string } | undefined)?.content ?? ""))
+      .toContain("LLM distilled summary");
+    expect(received.length).toBeGreaterThan(0);
+  });
+
+  it("summarizeMiddleTurns falls back to heuristic when llmSummarize returns null", async () => {
+    const store = createCcrStore(dir);
+    const msgs = Array.from({ length: 14 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `message body ${i} with enough text for distill path`,
+    })) as ModelMessage[];
+    const result = await summarizeMiddleTurns(msgs, {
+      ccr: store,
+      protect: { protectFirstN: 1, protectLastN: 3, summaryMinMessages: 10 },
+      llmSummarize: async () => null,
+    });
+    expect(result.via).toBe("heuristic");
+    expect(result.summarized).toBe(true);
+  });
+
+  it("tags reasoning parts so the summarizer input distinguishes thoughts from facts", async () => {
+    const store = createCcrStore(dir);
+    const msgs: ModelMessage[] = [
+      { role: "user", content: "start" },
+      ...Array.from({ length: 10 }, (_, i) => ({
+        role: (i % 2 === 0 ? "assistant" : "user") as "assistant" | "user",
+        content:
+          i === 4
+            ? ([
+                { type: "reasoning", text: "maybe the bug is in the parser" },
+                { type: "text", text: "The fix is in the parser." },
+              ] as unknown as ModelMessage["content"])
+            : `filler middle turn ${i} with enough text for the distill path`,
+      })),
+      { role: "user", content: "end-1" },
+      { role: "assistant", content: "end-2" },
+      { role: "user", content: "end-3" },
+    ] as ModelMessage[];
+    let captured = "";
+    await summarizeMiddleTurns(msgs, {
+      ccr: store,
+      protect: { protectFirstN: 1, protectLastN: 3, summaryMinMessages: 10 },
+      llmSummarize: async (middleText) => {
+        captured = middleText;
+        return "distilled summary long enough to pass the length gate for the test.";
+      },
+    });
+    expect(captured).toContain("[reasoning] maybe the bug is in the parser");
+    // The settled statement is present without the reasoning tag.
+    expect(captured).toContain("The fix is in the parser.");
   });
 });

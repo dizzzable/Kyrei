@@ -15,47 +15,19 @@ import type { MemoryDoc } from "../data/ports.js";
 import { sanitizeEnv } from "../security/secrets.js";
 import { redact } from "../security/secrets.js";
 
-export type GBrainMode = "off" | "read" | "read-write";
-export type GBrainProvider = "builtin" | "external-cli";
-
-export interface GBrainConfig {
-  provider: GBrainProvider;
-  mode: GBrainMode;
-  /** Used only by the explicit `external-cli` compatibility provider. */
-  command?: string;
-  source?: string;
-  timeoutMs: number;
-  maxOutputBytes: number;
-}
-
-export interface GBrainRunOptions {
-  stdin?: string;
-  signal?: AbortSignal;
-  timeoutMs: number;
-  maxOutputBytes: number;
-}
-
-export type GBrainRunner = (
-  command: string,
-  args: string[],
-  options: GBrainRunOptions,
-) => Promise<string>;
-
-export interface GBrainClientOptions extends GBrainConfig {
-  runner?: GBrainRunner;
-  signal?: AbortSignal;
-  /** Gateway-owned local directory for the built-in provider. */
-  dataDir?: string;
-  sensitiveValues?: readonly string[];
-}
-
-export interface GBrainClient {
-  search(query: string, limit?: number): Promise<unknown>;
-  getPage(slug: string): Promise<unknown>;
-  think(question: string, options?: { anchor?: string; rounds?: number }): Promise<unknown>;
-  capture(content: string, options?: { slug?: string; type?: string }): Promise<unknown>;
-  doctor(): Promise<unknown>;
-}
+// Type declarations live in the leaf module `./gbrain-types.ts` so `../types.ts`
+// can import them without creating a types↔implementation↔data-layer cycle.
+// Re-exported here so existing importers of `memory/gbrain.js` are unaffected.
+export type {
+  GBrainMode,
+  GBrainProvider,
+  GBrainConfig,
+  GBrainRunOptions,
+  GBrainRunner,
+  GBrainClientOptions,
+  GBrainClient,
+} from "./gbrain-types.js";
+import type { GBrainRunner, GBrainClientOptions, GBrainClient } from "./gbrain-types.js";
 
 const DEFAULT_MAX_OUTPUT = 200_000;
 const DEFAULT_MODEL_OUTPUT = 12_000;

@@ -13,12 +13,11 @@ export function AgentsPanel({ runs, now }: { runs: readonly SubagentRun[]; now: 
   const [actionError, setActionError] = useState<string | null>(null);
   const sorted = [...runs].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 24);
 
-  const runAction = async (run: SubagentRun, action: "retry" | "resume" | "cancel") => {
+  const runAction = async (run: SubagentRun, action: "retry" | "cancel") => {
     setActing(`${run.id}:${action}`);
     setActionError(null);
     try {
       if (action === "retry") await gateway.retryAgent(run.id);
-      else if (action === "resume") await gateway.resumeAgent(run.id);
       else await gateway.cancelAgent(run.id);
       window.dispatchEvent(new CustomEvent("kyrei:status-refresh"));
     } catch {
@@ -68,10 +67,9 @@ export function AgentsPanel({ runs, now }: { runs: readonly SubagentRun[]; now: 
                         {run.currentTool || run.summary || run.error}
                       </p>
                     )}
-                    {(run.actions?.retry || run.actions?.resume || run.actions?.cancel) ? (
+                    {(run.actions?.retry || run.actions?.cancel) ? (
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {run.actions.retry ? <ActionButton disabled={acting !== null} onClick={() => void runAction(run, "retry")}><RotateCcw className="size-3" />{t("shell.status.agentRetry")}</ActionButton> : null}
-                        {run.actions.resume ? <ActionButton disabled={acting !== null} onClick={() => void runAction(run, "resume")}><RotateCcw className="size-3" />{t("shell.status.agentResume")}</ActionButton> : null}
                         {run.actions.cancel ? <ActionButton disabled={acting !== null} onClick={() => void runAction(run, "cancel")}><Square className="size-3" />{t("shell.status.agentCancel")}</ActionButton> : null}
                       </div>
                     ) : null}

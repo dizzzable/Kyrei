@@ -101,6 +101,22 @@ describe("layers precedence", () => {
     expect(ctx.indexOf("AGENTS.md")).toBeLessThan(ctx.indexOf("MEMORY.md"));
     expect(ctx).toContain("steering-правило");
   });
+  it("includes only inclusion:always steering and skips fileMatch/manual/auto", async () => {
+    await mkdir(join(ws, ".kyrei", "steering"), { recursive: true });
+    await writeFile(join(ws, ".kyrei", "steering", "always.md"), "---\ninclusion: always\n---\nalways-rule", "utf8");
+    await writeFile(join(ws, ".kyrei", "steering", "bare.md"), "bare-default-rule", "utf8");
+    await writeFile(join(ws, ".kyrei", "steering", "match.md"), "---\ninclusion: fileMatch\nfileMatchPattern: 'src/**'\n---\nmatch-rule", "utf8");
+    await writeFile(join(ws, ".kyrei", "steering", "manual.md"), "---\ninclusion: manual\n---\nmanual-rule", "utf8");
+
+    const ctx = await assembleSystemContext({ workspace: ws });
+
+    // Explicit `always` and bare (default-always) files are included…
+    expect(ctx).toContain("always-rule");
+    expect(ctx).toContain("bare-default-rule");
+    // …but non-`always` modes are intentionally skipped (no per-turn file target).
+    expect(ctx).not.toContain("match-rule");
+    expect(ctx).not.toContain("manual-rule");
+  });
   it("does not import a neighbouring Kiro steering directory as Kyrei policy", async () => {
     await mkdir(join(ws, ".kiro", "steering"), { recursive: true });
     await writeFile(join(ws, ".kiro", "steering", "foreign.md"), "foreign-kiro-rule", "utf8");

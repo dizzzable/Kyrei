@@ -43,6 +43,17 @@ export function codingModeAssignmentRole(
 }
 
 /**
+ * Suggested reasoning effort when the operator picks a mode (UI prefill).
+ * Mirrors core/engine/coding-mode.ts suggestedReasoningEffort — audit-heavy
+ * modes want the strongest thinking; auto stays medium.
+ */
+export function suggestedReasoningEffort(mode: CodingMode): "medium" | "high" | "xhigh" {
+  if (mode === "polish" || mode === "deepreep") return "xhigh";
+  if (mode === "plan" || mode === "build") return "high";
+  return "medium";
+}
+
+/**
  * Detect a mode switch declared by the model (auto phase selection).
  * Last match wins. Mirrors core/engine/coding-mode.ts.
  */

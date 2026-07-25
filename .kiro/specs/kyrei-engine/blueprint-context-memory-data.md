@@ -856,7 +856,7 @@ export interface LtmBridge {
 Порядок применения инструкций (от высшего приоритета к низшему), собирается в system-prompt:
 1. **Runtime `EngineConfig`** (permissions/roles) — жёсткие ограничения, не переопределяемы.
 2. **`<workspace>/AGENTS.md`** — проектные инструкции агенту (высший «мягкий» слой).
-3. **`.kiro/steering/**`** с `inclusion: always` → затем `fileMatch` (по совпадению пути).
+3. **`.kyrei/steering/*.md`** с `inclusion: always`. (Реализовано только `always`. Режимы `fileMatch`/`manual`/`auto` из Kiro НЕ поддержаны: Kyrei собирает system-context один раз в начале хода — до выбора редактируемых файлов, — поэтому цели для сопоставления пути в этот момент нет. Файлы с не-`always` inclusion намеренно пропускаются.)
 4. **`<workspace>/.kyrei/memory/MEMORY.md`** — семантическая память проекта.
 5. **`<userData>/kyrei/memory/GLOBAL.md`** — глобальные предпочтения (низший).
 
@@ -873,7 +873,7 @@ export async function assembleSystemContext(workspace: string): Promise<string> 
   return layers.map((l, i) => `<<layer:${LAYER_NAMES[i]}>>\n${l}`).join('\n\n');
 }
 ```
-При конфликте инструкций выигрывает более высокий слой; в system-prompt каждый блок помечается источником, чтобы модель разрешала конфликты детерминированно. Вложенные `AGENTS.md` (в подкаталогах) применяются к путям под ними (ближайший к файлу — приоритетнее), по аналогии со steering `fileMatch`.
+При конфликте инструкций выигрывает более высокий слой; в system-prompt каждый блок помечается источником, чтобы модель разрешала конфликты детерминированно. (Примечание: реализован только корневой `<workspace>/AGENTS.md`. Вложенные `AGENTS.md` в подкаталогах и path-based выбор по аналогии со steering `fileMatch` НЕ поддержаны — по той же причине, что и steering-режимы: контекст собирается до выбора редактируемого файла.)
 
 ### 5.6 Handoff — схема, триггер, reseed
 

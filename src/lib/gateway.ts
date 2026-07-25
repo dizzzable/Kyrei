@@ -303,7 +303,6 @@ export const gateway = {
 
   getStatus: () => json<GatewayStatus>("/api/status"),
   retryAgent: (id: string) => json<{ ok: true; status: string }>(`/api/agents/${encodeURIComponent(id)}/retry`, { method: "POST", body: "{}" }),
-  resumeAgent: (id: string) => json<{ ok: true; status: string }>(`/api/agents/${encodeURIComponent(id)}/resume`, { method: "POST", body: "{}" }),
   cancelAgent: (id: string) => json<{ ok: true; status: string }>(`/api/agents/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" }),
 
   getConfig: () => json<AppConfig>("/api/config"),
@@ -325,6 +324,8 @@ export const gateway = {
   getEvolutionCandidates: () => json<{ config: EvolutionRuntimeConfig; candidates: EvolutionCandidate[] }>("/api/evolution/candidates"),
   transitionEvolutionCandidate: (id: string, body: { expectedRevision: number; status: EvolutionCandidateStatus; reason?: string; evidence?: { receipts?: string[]; tests?: string[]; notes?: string } }) =>
     json<{ candidate: EvolutionCandidate }>(`/api/evolution/candidates/${encodeURIComponent(id)}/transition`, { method: "POST", body: JSON.stringify(body) }),
+  evaluateEvolution: () =>
+    json<{ ok: boolean; reason?: string; evaluated: number; approved: number; rejected: number; spentUsd: number; costTracked: boolean }>("/api/evolution/evaluate", { method: "POST" }),
   importProjectDocuments: (files: Array<{ fileName: string; relativePath?: string; contentBase64: string }>) =>
     json<ProjectDocumentImportResult>("/api/memory/documents/import", {
       method: "POST",

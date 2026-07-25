@@ -108,6 +108,14 @@ export interface SessionCuratorConfig {
    * Recommended: worker.
    */
   modelSource: CuratorModelSource;
+  /**
+   * Gateway-level trigger settings (the curator itself does not use these; they
+   * drive when the gateway invokes curateSession). Optional so the curator can
+   * accept the full engine curator config object without excess-property errors.
+   */
+  autoOnIdle?: boolean;
+  idleMs?: number;
+  autoApplyMode?: CuratorApplyMode;
 }
 
 export const DEFAULT_CURATOR_CONFIG: SessionCuratorConfig = {
@@ -117,6 +125,9 @@ export const DEFAULT_CURATOR_CONFIG: SessionCuratorConfig = {
   maxTranscriptChars: 24_000,
   useLlm: true,
   modelSource: "worker",
+  autoOnIdle: true,
+  idleMs: 420_000,
+  autoApplyMode: "apply_all",
 };
 
 export function curatorProposalDir(workspace: string): string {

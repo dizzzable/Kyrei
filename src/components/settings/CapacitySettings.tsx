@@ -45,15 +45,6 @@ function capacityFromConfig(config: AppConfig | null | undefined): CapacityConfi
     strategy,
     preferSpare: raw?.preferSpare !== false,
     crossProviderFamily: raw?.crossProviderFamily !== false,
-    subscriptionShield: {
-      enabled: false,
-      mode: "off",
-      minIntervalMs: 0,
-      connectTimeoutMs: 0,
-      headerTimeoutMs: 0,
-      inactivityTimeoutMs: 0,
-      maxConnectionsPerOrigin: 4,
-    },
   };
 }
 

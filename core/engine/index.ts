@@ -47,6 +47,9 @@ export {
 export type { GroundedSnippet, SufficiencyResult, CitationCheck, CiteOrRefuseConfig } from "./memory/cite-or-refuse.js";
 export { assembleSystemContext } from "./memory/layers.js";
 export { buildAutomaticRecallContext } from "./memory/auto-recall.js";
+export { createCcrStore } from "./context/ccr.js";
+export type { CcrGcPolicy } from "./context/ccr.js";
+export { createSnapshotStore } from "./apply/snapshot.js";
 export { importProjectDocuments } from "./memory/document-import.js";
 export type { ImportedProjectDocument, ProjectDocumentInput, RejectedProjectDocument } from "./memory/document-import.js";
 export { buildWorkspaceMemoryGraph, getWorkspaceMemoryGraph } from "./memory/graph-view.js";
@@ -278,7 +281,7 @@ export {
   inspectBuiltinGBrainStore,
   runGBrainProcess,
 } from "./memory/gbrain.js";
-export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode, GBrainProvider } from "./memory/gbrain.js";
+export type { GBrainClient, GBrainClientOptions, GBrainConfig, GBrainMode, GBrainProvider } from "./memory/gbrain-types.js";
 export { buildGBrainTools } from "./tools/gbrain.js";
 export { buildPlanningTools } from "./tools/planning.js";
 export { buildOpenVikingTools } from "./tools/openviking.js";

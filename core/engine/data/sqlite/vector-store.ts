@@ -14,11 +14,16 @@ function fromBlob(b: Buffer): Float32Array {
   return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4);
 }
 function cosine(a: Float32Array, b: Float32Array): number {
-  const n = Math.min(a.length, b.length);
+  // Dimension guard: comparing vectors of different lengths (e.g. a 256-dim
+  // lexical embedding against a 384-dim neural one after an embed-mode switch)
+  // is meaningless. Truncating to the shorter length produces a plausible-but-
+  // wrong score, so treat a mismatch as "no similarity" instead. The model
+  // filter in query() should exclude these rows first; this is a backstop.
+  if (a.length !== b.length) return 0;
   let dot = 0;
   let na = 0;
   let nb = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i]! * b[i]!;
     na += a[i]! * a[i]!;
     nb += b[i]! * b[i]!;
@@ -61,11 +66,24 @@ export function createSqliteVectorStore(db: DB): VectorStore {
     },
 
     async query(embedding, opts) {
-      const rows = (
-        opts.ownerType
-          ? db.prepare("SELECT owner_type,owner_id,chunk_index,embedding FROM vectors WHERE owner_type=?").all(opts.ownerType)
-          : db.prepare("SELECT owner_type,owner_id,chunk_index,embedding FROM vectors").all()
-      ) as VecRow[];
+      // Filter by embedding model so vectors from a previous embed mode (with a
+      // different dimension) are excluded, not silently truncated. The schema's
+      // UNIQUE(...,model) lets multiple models coexist per doc; without this
+      // WHERE clause every KNN scan mixed incompatible vectors after a switch.
+      const clauses: string[] = [];
+      const params: string[] = [];
+      if (opts.ownerType) {
+        clauses.push("owner_type=?");
+        params.push(opts.ownerType);
+      }
+      if (opts.model) {
+        clauses.push("model=?");
+        params.push(opts.model);
+      }
+      const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+      const rows = db
+        .prepare(`SELECT owner_type,owner_id,chunk_index,embedding FROM vectors${where}`)
+        .all(...params) as VecRow[];
       const scored: VectorHit[] = rows.map((r) => ({
         ownerType: r.owner_type,
         ownerId: r.owner_id,

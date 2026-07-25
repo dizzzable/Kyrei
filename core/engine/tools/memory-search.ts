@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { MemoryStore, SessionStore, VectorStore } from "../data/ports.js";
 import { createLtmBridge } from "../memory/ltm-bridge.js";
 import { createPlanStore } from "../orchestration/plan.js";
-import { embedText, isZeroVector, splitTextForEmbedding } from "../memory/embed-adapter.js";
+import { embedText, getEmbedAdapter, isZeroVector, splitTextForEmbedding } from "../memory/embed-adapter.js";
 import { TOOL_DESCRIPTIONS } from "../prompt/tool-descriptions.js";
 import { normalizeVaultConfig, searchVaultFiles, type VaultConfig } from "../memory/vault.js";
 import {
@@ -333,6 +333,9 @@ async function searchVectors(
     const knn = await vectors.query(embedding, {
       k: Math.min(64, Math.max(16, limit * 4)),
       ownerType: "memory_doc",
+      // Restrict to the active embedder's vectors so a prior embed mode's
+      // (different-dim) rows are excluded rather than scored via truncation.
+      model: getEmbedAdapter().modelId,
     });
     for (const hit of knn) {
       // distance 0 = identical, 2 = opposite; convert to score.

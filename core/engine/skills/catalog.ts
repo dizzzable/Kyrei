@@ -1,21 +1,7 @@
 import type { RuntimeSkill } from "../types.js";
 
-const PROVENANCE_PRIORITY: Record<RuntimeSkill["provenance"], number> = {
-  project: 0,
-  global: 1,
-  kiro: 2,
-  custom: 3,
-};
-
 function normalized(value: string | undefined): string {
   return String(value ?? "").toLocaleLowerCase().trim();
-}
-
-function availabilityRank(skill: RuntimeSkill): number {
-  if (skill.enabled === false) return 3;
-  if (skill.availability === "incompatible" || skill.compatible === false) return 2;
-  if (skill.availability === "unavailable") return 1;
-  return 0;
 }
 
 export function catalogReasonCode(skill: RuntimeSkill | undefined): string {
@@ -26,32 +12,6 @@ export function catalogReasonCode(skill: RuntimeSkill | undefined): string {
   }
   if (skill.availability === "unavailable") return skill.reasonCode || "skill_unavailable";
   return "";
-}
-
-export function prefersCatalogSkill(left: RuntimeSkill, right: RuntimeSkill): boolean {
-  const availability = availabilityRank(left) - availabilityRank(right);
-  if (availability !== 0) return availability < 0;
-  const usage = (right.usage ?? 0) - (left.usage ?? 0);
-  if (usage !== 0) return usage < 0;
-  const provenance = (PROVENANCE_PRIORITY[left.provenance] ?? 99) - (PROVENANCE_PRIORITY[right.provenance] ?? 99);
-  if (provenance !== 0) return provenance < 0;
-  const path = normalized(left.relativePath).localeCompare(normalized(right.relativePath));
-  if (path !== 0) return path < 0;
-  return normalized(left.id).localeCompare(normalized(right.id)) < 0;
-}
-
-export function dedupeCatalogForAuto(skills: readonly RuntimeSkill[]): RuntimeSkill[] {
-  const byName = new Map<string, RuntimeSkill>();
-  for (const skill of skills) {
-    const key = normalized(skill.name);
-    if (!key) continue;
-    const current = byName.get(key);
-    if (!current || prefersCatalogSkill(skill, current)) byName.set(key, skill);
-  }
-  return [...byName.values()].sort((left, right) =>
-    (left.usage ?? 0) === (right.usage ?? 0)
-      ? normalized(left.name).localeCompare(normalized(right.name)) || normalized(left.id).localeCompare(normalized(right.id))
-      : (right.usage ?? 0) - (left.usage ?? 0));
 }
 
 export function searchCatalog(skills: readonly RuntimeSkill[], query: string): RuntimeSkill[] {

@@ -203,6 +203,9 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
                 model: summaryModel,
                 maxRetries: 0,
                 maxOutputTokens: 1_200,
+                // Deterministic: the summary is a reference memory artifact, so
+                // suppress creative drift / invented facts.
+                temperature: 0,
                 messages: [
                   {
                     role: "system",

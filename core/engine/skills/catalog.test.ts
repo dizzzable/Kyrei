@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   catalogReasonCode,
-  dedupeCatalogForAuto,
   renderCatalogStatus,
   searchCatalog,
   summarizeRequirements,
@@ -18,16 +17,6 @@ const skill = (overrides: Partial<RuntimeSkill> = {}): RuntimeSkill => ({
 });
 
 describe("skill catalog helpers", () => {
-  it("prefers the best available duplicate for automatic selection", () => {
-    const deduped = dedupeCatalogForAuto([
-      skill({ id: "skill_global", name: "duplicate", provenance: "global", usage: 1 }),
-      skill({ id: "skill_project", name: "duplicate", provenance: "project", usage: 1 }),
-      skill({ id: "skill_disabled", name: "duplicate", provenance: "project", enabled: false }),
-    ]);
-    expect(deduped).toHaveLength(1);
-    expect(deduped[0]?.id).toBe("skill_project");
-  });
-
   it("surfaces disabled and incompatible reason codes", () => {
     expect(catalogReasonCode(skill({ enabled: false, reasonCode: "skill_disabled" }))).toBe("skill_disabled");
     expect(catalogReasonCode(skill({ availability: "incompatible", reasonCode: "platform_mismatch" }))).toBe("platform_mismatch");

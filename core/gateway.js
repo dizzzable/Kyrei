@@ -76,6 +76,10 @@ import {
   normalizeSkillsSleepConfig,
   runSkillSleep,
 } from "./skills-sleep.js";
+import { harvestCandidatesFromTrajectory } from "./evolution-harvest.js";
+import { evaluatePendingCandidates } from "./evolution-eval.js";
+import { EvolutionExecutorStore } from "./evolution-executor-store.js";
+import { buildPromotionReceipt, classifyExecution } from "./evolution-executor.js";
 import {
   listSkillPacks,
   enableSkillPack,
@@ -3197,6 +3201,7 @@ export async function startGateway({
   const agentRunStore = new AgentRunStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
   const recoveredAgentRuns = await agentRunStore.recoverRecoverable().catch(() => []);
   const evolutionStore = new EvolutionStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
+  const evolutionExecutorStore = new EvolutionExecutorStore({ dataDir, getSensitiveValues: runtimeSensitiveValues });
   const currentEvolutionConfig = () => {
     const source = isPlainRecord(config.engine?.evolution) ? config.engine.evolution : {};
     return {
@@ -4471,6 +4476,10 @@ export async function startGateway({
       try {
         const curator = await runSessionCurator(sessionId, { abortSignal: controller.signal });
         if (curator?.ok) {
+          // Share the idle-curator guard marker: stamp curatedAtSeq so a later
+          // idle tick does not re-distill the same (now archived) session.
+          const fresh = store.getSession(sessionId);
+          if (fresh) store.upsertSession({ ...fresh, curatedAtSeq: store.getMessages(sessionId).length });
           emitTo(sessionId, {
             type: "session.curated",
             payload: {
@@ -4487,6 +4496,390 @@ export async function startGateway({
         clearTimeout(timer);
       }
     })();
+  };
+
+  /** Per-session idle-curation timers (auto-distill a session after it goes quiet). */
+  const idleCuratorTimers = new Map();
+  /** Hard deadline for the idle curator's own provider call. */
+  const IDLE_CURATOR_TIMEOUT_MS = 25_000;
+  const DEFAULT_IDLE_CURATOR_MS = 420_000;
+
+  const curatorConfig = () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const memory = isPlainRecord(engine.memory) ? engine.memory : {};
+    return isPlainRecord(memory.curator) ? memory.curator : {};
+  };
+
+  /**
+   * Prune the workspace CCR shard store and snapshot store back under their
+   * age/size caps. These stores grow on every compaction/apply and had no
+   * caller enforcing their configured limits, so `.kyrei/ccr` and
+   * `.kyrei/snapshots` accumulated unbounded. Runs on the idle-curator tick
+   * (same hook, same fail-open contract) so it never blocks a live turn.
+   * Original content stays retrievable until it ages/caps out — this is
+   * bounded retention, not data loss.
+   */
+  const runWorkspaceContextGc = async (workspace) => {
+    const root = typeof workspace === "string" && workspace.trim()
+      ? workspace.trim()
+      : (typeof config.workspace === "string" ? config.workspace.trim() : "");
+    if (!root) return;
+    try {
+      const engineModule = await getEngine();
+      if (typeof engineModule.createCcrStore === "function") {
+        const ccr = engineModule.createCcrStore(join(root, ".kyrei", "ccr"));
+        await ccr.gc().catch(() => {});
+      }
+      if (typeof engineModule.createSnapshotStore === "function") {
+        const snapshots = engineModule.createSnapshotStore(root);
+        await snapshots.gc().catch(() => {});
+      }
+    } catch {
+      /* fail-open: context GC is best-effort maintenance */
+    }
+  };
+
+  /**
+   * Proposal-first evolution harvest. On an at-rest session, distill the turn
+   * trajectory into observation-only candidates (repeated tool failures / heal
+   * handoffs) and journal them to the evolution store for later human review.
+   * Never mutates config/skills/prompts. Gated by `harvestEnabled`, deduped by
+   * proposalDigest, capped by `maxCandidates`. Fail-open — best-effort.
+   */
+  const runEvolutionHarvest = async (sessionId, messages) => {
+    if (!sessionId || !Array.isArray(messages) || !messages.length) return;
+    const evolutionConfig = currentEvolutionConfig();
+    if (evolutionConfig.harvestEnabled !== true) return;
+    try {
+      // The session-level `status` field is unused by the lifecycle; the real
+      // terminal state lives on the last assistant message's `turnStatus`.
+      let status = "";
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i];
+        if (msg?.role === "assistant" && typeof msg.turnStatus === "string" && msg.turnStatus) {
+          status = msg.turnStatus;
+          break;
+        }
+      }
+      const trajectory = digestMessagesToTrajectory(messages, { sessionId, status });
+      const existing = await evolutionStore.list({ status: "pending", limit: evolutionConfig.maxCandidates });
+      if (existing.length >= evolutionConfig.maxCandidates) return;
+      const seen = new Set(existing.map((candidate) => candidate.proposalDigest).filter(Boolean));
+      const drafts = harvestCandidatesFromTrajectory(trajectory, seen, { maxPerTurn: 3 });
+      let created = 0;
+      for (const draft of drafts) {
+        if (existing.length + created >= evolutionConfig.maxCandidates) break;
+        try {
+          await evolutionStore.create(draft);
+          created += 1;
+        } catch {
+          /* fail-open per candidate: dedup collisions / validation are non-fatal */
+        }
+      }
+      if (created > 0) {
+        emitTo(sessionId, {
+          type: "evolution.harvested",
+          payload: { session_id: sessionId, created, trigger: "idle" },
+        });
+      }
+    } catch {
+      /* fail-open: evolution harvest is best-effort maintenance */
+    }
+  };
+
+  const EVAL_TIMEOUT_MS = 25_000;
+
+  /**
+   * Evolution evaluation sweep (step B). Scores `pending` candidates with the
+   * cheap `worker` model, writes verifier receipts, and transitions each
+   * pending→evaluating→approved/rejected. Proposal-first: NEVER applies a
+   * change (promotion stays out of scope / HTTP-blocked). Gated by
+   * `evaluationEnabled`, bounded by `maxEvaluationCostUsd`, revision-guarded,
+   * fail-open per candidate. `generateText`/`buildModel` are injectable for
+   * tests so this never hits a real provider under test.
+   */
+  const runEvolutionEvaluation = async (deps = {}) => {
+    const evolutionConfig = currentEvolutionConfig();
+    if (evolutionConfig.evaluationEnabled !== true) {
+      return { ok: false, reason: "disabled", evaluated: 0, approved: 0, rejected: 0, spentUsd: 0, costTracked: false };
+    }
+    let mod;
+    try {
+      mod = await getEngine();
+    } catch {
+      return { ok: false, reason: "engine_unavailable", evaluated: 0, approved: 0, rejected: 0, spentUsd: 0, costTracked: false };
+    }
+    const buildModel = deps.buildModel ?? mod?.buildModel;
+    if (typeof buildModel !== "function") {
+      return { ok: false, reason: "no_model", evaluated: 0, approved: 0, rejected: 0, spentUsd: 0, costTracked: false };
+    }
+    // Resolve the cheap worker model, falling back to the default target.
+    let target = workerRuntimeTarget(undefined);
+    if (!target) {
+      try {
+        target = privateRuntimeTargetsForConfig(config, secrets, config.activeProviderId, config.activeModelId, { fallbackToDefault: true })[0];
+      } catch {
+        target = undefined;
+      }
+    }
+    if (!target) {
+      return { ok: false, reason: "no_model", evaluated: 0, approved: 0, rejected: 0, spentUsd: 0, costTracked: false };
+    }
+    let generateTextFn = deps.generateText;
+    if (typeof generateTextFn !== "function") {
+      try {
+        const ai = await import("ai");
+        generateTextFn = ai.generateText;
+      } catch {
+        return { ok: false, reason: "no_model", evaluated: 0, approved: 0, rejected: 0, spentUsd: 0, costTracked: false };
+      }
+    }
+    let model;
+    try {
+      model = buildModel({
+        protocol: target.protocol,
+        baseURL: target.baseURL,
+        apiKey: typeof target.apiKey === "string" ? target.apiKey : "",
+        credentials: target.credentials ?? {},
+        model: target.model,
+        ...(target.headers ? { headers: target.headers } : {}),
+      });
+    } catch {
+      return { ok: false, reason: "no_model", evaluated: 0, approved: 0, rejected: 0, spentUsd: 0, costTracked: false };
+    }
+    // Cost lookup from the static model registry (unregistered → {0,0}).
+    let costEntry = { inputPerM: 0, outputPerM: 0 };
+    try {
+      const models = typeof mod?.listModels === "function" ? mod.listModels() : [];
+      const found = models.find((entry) => entry.id === target.model);
+      if (found?.cost) costEntry = found.cost;
+    } catch {
+      /* cost stays zero → reported as untracked */
+    }
+    return runEvolutionEvaluationSweep({ model, generateTextFn, costEntry, evolutionConfig, targetModel: target.model });
+  };
+
+  /** Inner sweep: iterate pending candidates, score, transition. Pure of resolution. */
+  const runEvolutionEvaluationSweep = ({ model, generateTextFn, costEntry, evolutionConfig, targetModel }) =>
+    evaluatePendingCandidates(evolutionStore, {
+      generateText: generateTextFn,
+      model,
+      costEntry,
+      maxCandidates: evolutionConfig.maxCandidates,
+      ceiling: evolutionConfig.maxEvaluationCostUsd,
+      targetModel,
+      abortMs: EVAL_TIMEOUT_MS,
+      // Audit only tracked spend; the ledger drops zero-cost/zero-token noise.
+      onSpend: (costUsd) => {
+        if (costUsd > 0) {
+          try {
+            void usageLedger.record({ kind: "other", costUsd });
+          } catch { /* audit is best-effort */ }
+        }
+      },
+    });
+
+  /** Read the current prompt-profiles array from live config. */
+  const currentPromptProfiles = () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    return Array.isArray(engine.promptProfiles) ? engine.promptProfiles : [];
+  };
+
+  /** Upsert one prompt profile's systemPrompt via the config boundary validator. */
+  const writePromptProfile = async ({ profileId, systemPrompt, name }) => mutateConfig(async () => {
+    const engine = isPlainRecord(config.engine) ? config.engine : {};
+    const profiles = Array.isArray(engine.promptProfiles) ? engine.promptProfiles : [];
+    const existing = profiles.find((profile) => profile?.id === profileId);
+    const nextProfile = existing
+      ? { ...existing, systemPrompt }
+      : { id: profileId, name: name || profileId, description: "", systemPrompt };
+    const nextProfiles = existing
+      ? profiles.map((profile) => (profile?.id === profileId ? nextProfile : profile))
+      : [...profiles, nextProfile];
+    const nextEngine = validateEngineConfigBoundary({ ...engine, promptProfiles: nextProfiles });
+    const nextConfig = { ...config, engine: nextEngine };
+    await saveConfig(nextConfig, secrets);
+    config = nextConfig;
+  });
+
+  /**
+   * Deterministic promotion executor. Given an approved candidate, capture prior
+   * state (two-phase: begin BEFORE mutation, commit after), mutate the real
+   * artifact, and return receipt strings for the store transition. NEVER mutates
+   * blindly: reserved profiles, stale/contentless skill drafts, and unsupported
+   * kinds are refused (caller fails the candidate). Fail-open leaves the artifact
+   * either untouched (pre-mutation error) or fully applied — the begin/commit
+   * journal lets a later pass detect+recover an interrupted apply.
+   * @returns {Promise<{ ok: true, receipts: string[] } | { ok: false, code: string }>}
+   */
+  const runPromotionExecutor = async (candidate) => {
+    const plan = classifyExecution(candidate, {
+      existingProfileIds: currentPromptProfiles().map((profile) => profile?.id).filter(Boolean),
+    });
+    if (plan.action === "unsupported" || plan.action === "reject_stale") {
+      return { ok: false, code: plan.reason || "executor_unsupported" };
+    }
+    try {
+      if (plan.action === "skill_update") {
+        const before = await skillsStore.get(plan.skillId);
+        const receiptId = await evolutionExecutorStore.begin({
+          candidateId: candidate.id,
+          kind: "skill_update",
+          targetRef: plan.skillId,
+          priorState: { existed: true, content: typeof before?.content === "string" ? before.content : "" },
+        });
+        await skillsStore.update(plan.skillId, { content: plan.content, ...(plan.description ? { description: plan.description } : {}) });
+        await evolutionExecutorStore.commit(candidate.id);
+        return { ok: true, receipts: [buildPromotionReceipt({ action: plan.action, targetRef: plan.skillId, execReceiptId: receiptId })] };
+      }
+      if (plan.action === "skill_create") {
+        const receiptId = await evolutionExecutorStore.begin({
+          candidateId: candidate.id,
+          kind: "skill_create",
+          targetRef: plan.name,
+          priorState: { existed: false },
+        });
+        const created = await skillsStore.create({ name: plan.name, content: plan.content, ...(plan.description ? { description: plan.description } : {}) });
+        await evolutionExecutorStore.commit(candidate.id);
+        return { ok: true, receipts: [buildPromotionReceipt({ action: plan.action, targetRef: created.id, execReceiptId: receiptId })] };
+      }
+      if (plan.action === "profile_update" || plan.action === "profile_create") {
+        const before = currentPromptProfiles().find((profile) => profile?.id === plan.profileId);
+        const receiptId = await evolutionExecutorStore.begin({
+          candidateId: candidate.id,
+          kind: plan.action,
+          targetRef: plan.profileId,
+          priorState: {
+            existed: Boolean(before),
+            ...(before && typeof before.systemPrompt === "string" ? { content: before.systemPrompt } : {}),
+          },
+        });
+        await writePromptProfile({ profileId: plan.profileId, systemPrompt: plan.systemPrompt, name: plan.name });
+        await evolutionExecutorStore.commit(candidate.id);
+        return { ok: true, receipts: [buildPromotionReceipt({ action: plan.action, targetRef: plan.profileId, execReceiptId: receiptId })] };
+      }
+      return { ok: false, code: "executor_unsupported" };
+    } catch {
+      return { ok: false, code: "executor_apply_failed" };
+    }
+  };
+
+  /** Restore the artifact a promotion mutated, from the captured prior state. */
+  const rollbackPromotion = async (candidate) => {
+    const prior = await evolutionExecutorStore.getPrior(candidate.id);
+    if (!prior) return { ok: true, receipts: [] }; // nothing captured → state-only rollback
+    try {
+      if (prior.kind === "skill_update" && prior.priorState?.existed && typeof prior.priorState.content === "string") {
+        await skillsStore.update(prior.targetRef, { content: prior.priorState.content });
+      } else if (prior.kind === "skill_create") {
+        // Rollback of a create = delete the skill we made (best-effort by id lookup).
+        const made = (await skillsStore.list().catch(() => [])).find((skill) => skill.name === prior.targetRef);
+        if (made) await skillsStore.delete(made.id).catch(() => {});
+      } else if (prior.kind === "profile_update" && prior.priorState?.existed && typeof prior.priorState.content === "string") {
+        await writePromptProfile({ profileId: prior.targetRef, systemPrompt: prior.priorState.content });
+      } else if (prior.kind === "profile_create") {
+        await mutateConfig(async () => {
+          const engine = isPlainRecord(config.engine) ? config.engine : {};
+          const profiles = currentPromptProfiles().filter((profile) => profile?.id !== prior.targetRef);
+          const nextEngine = validateEngineConfigBoundary({ ...engine, promptProfiles: profiles });
+          const nextConfig = { ...config, engine: nextEngine };
+          await saveConfig(nextConfig, secrets);
+          config = nextConfig;
+        });
+      }
+      return { ok: true, receipts: [`rolled-back:${prior.kind}:${String(prior.targetRef).slice(0, 100)}`] };
+    } catch {
+      return { ok: false, code: "rollback_failed" };
+    }
+  };
+
+  /** Cancel any pending idle-curation timer for a session (new activity / shutdown). */
+  const clearIdleCurator = (sessionId) => {
+    const timer = idleCuratorTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      idleCuratorTimers.delete(sessionId);
+    }
+  };
+
+  /**
+   * (Re)arm the idle-curation timer for a session. Fires once after `idleMs` of
+   * quiet, then auto-distills the session (fail-open, background). A `curatedAtSeq`
+   * marker on the session record guards against re-distilling an unchanged session
+   * (the curator has no idempotency guard of its own, so this lives here).
+   */
+  const scheduleIdleCurator = (sessionId) => {
+    if (!sessionId) return;
+    const cfg = curatorConfig();
+    if (cfg.enabled === false || cfg.autoOnIdle === false) {
+      clearIdleCurator(sessionId);
+      return;
+    }
+    // Schema enforces a 60s minimum for app-set configs; here we only reject
+    // non-positive/garbage values (and honor small values so tests stay fast).
+    const idleMs = Number.isFinite(cfg.idleMs) && cfg.idleMs > 0 ? cfg.idleMs : DEFAULT_IDLE_CURATOR_MS;
+    clearIdleCurator(sessionId);
+    const timer = setTimeout(() => {
+      idleCuratorTimers.delete(sessionId);
+      void (async () => {
+        const session = store.getSession(sessionId);
+        if (!session) return;
+        // Guard: skip if nothing new since the last (auto) curation.
+        // Capture the message array once — harvest (in `finally`) reuses it.
+        const messages = store.getMessages(sessionId);
+        const count = messages.length;
+        const curatedAtSeq = Number.isFinite(session.curatedAtSeq) ? session.curatedAtSeq : 0;
+        if (count <= curatedAtSeq) return;
+        const controller = new AbortController();
+        const deadline = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {
+            /* ignore */
+          }
+        }, IDLE_CURATOR_TIMEOUT_MS);
+        try {
+          const applyModeOverride = cfg.autoApplyMode === "propose"
+            || cfg.autoApplyMode === "apply_safe"
+            || cfg.autoApplyMode === "apply_all"
+            ? cfg.autoApplyMode
+            : undefined;
+          const curator = await runSessionCurator(sessionId, {
+            abortSignal: controller.signal,
+            ...(applyModeOverride ? { applyModeOverride } : {}),
+          });
+          if (curator?.ok) {
+            // Stamp the guard marker so a later idle tick with no new messages is a no-op.
+            const fresh = store.getSession(sessionId);
+            if (fresh) store.upsertSession({ ...fresh, curatedAtSeq: count });
+            emitTo(sessionId, {
+              type: "session.curated",
+              payload: {
+                session_id: sessionId,
+                applied: curator.applied,
+                via: curator.via,
+                summary: curator.summary,
+                trigger: "idle",
+              },
+            });
+          }
+        } catch {
+          /* fail-open: idle curation is best-effort */
+        } finally {
+          clearTimeout(deadline);
+          // Idle is also the right moment to prune the workspace context stores
+          // back under their caps — independent of whether curation ran.
+          await runWorkspaceContextGc(session.workspace);
+          // At rest is also when we harvest observation-only evolution
+          // candidates and prune the journal back under its retention window.
+          await runEvolutionHarvest(sessionId, messages).catch(() => {});
+          await evolutionStore.gc(currentEvolutionConfig().retentionDays).catch(() => {});
+        }
+      })();
+    }, idleMs);
+    // Do not keep the event loop alive solely for idle curation.
+    if (typeof timer.unref === "function") timer.unref();
+    idleCuratorTimers.set(sessionId, timer);
   };
 
   /** Batch-curate many sessions (e.g. all archived). Sequential, fail-open per id. */
@@ -4673,7 +5066,6 @@ export async function startGateway({
         && !hasPendingFileReview(run.sessionId)
         && !store.hasUnconsumedApprovals(run.sessionId)
       ),
-      resume: false,
       cancel: Boolean(activeTurn && ["queued", "running", "recovering"].includes(run.status)),
     };
   }
@@ -4989,6 +5381,17 @@ export async function startGateway({
           payload: { ...terminalPayload, text: finalText, status: terminalStatus },
         });
       }
+      // Arm idle auto-curation once a turn concludes and the session is at rest.
+      // Skip statuses where we are actively waiting on the user (not idle) or the
+      // turn failed to persist (nothing durable to distill).
+      if (
+        !turn.persistenceFailed
+        && terminalStatus !== "awaiting_approval"
+        && terminalStatus !== "awaiting_file_review"
+        && terminalStatus !== "error"
+      ) {
+        scheduleIdleCurator(turn.sessionId);
+      }
       return store.getMessage(turn.sessionId, turn.draftId);
     })();
     turn.finalizePromise = operation;
@@ -5033,6 +5436,9 @@ export async function startGateway({
   }
 
   function beginActiveTurn(sessionId) {
+    // New activity: cancel any pending idle auto-curation so the quiet window
+    // is measured from the end of this turn, not the previous one.
+    clearIdleCurator(sessionId);
     const controller = new AbortController();
     const turn = {
       sessionId,
@@ -7237,9 +7643,15 @@ export async function startGateway({
         if (!run) return sendJson(res, 404, { code: "agent_not_found", error: "agent_not_found" });
         const action = agentMatch[2] || "";
         if (action === "/resume") {
+          // Resume-from-checkpoint is not implemented: the checkpoint manifest is
+          // persisted but no runtime consumes it to skip completed work. For
+          // session-backed agents, /retry already re-runs on the session (which
+          // retains full context), so it is the supported recovery path. We keep
+          // reporting recoverable/manifest so clients can surface retry eligibility.
           return sendJson(res, 409, {
             code: "agent_resume_unavailable",
             error: "agent_resume_unavailable",
+            hint: "use_retry",
             recoverable: run.recoverable === true,
             checkpoint_manifest: run.checkpointManifest,
           });
@@ -8037,13 +8449,51 @@ export async function startGateway({
         if (["evaluating", "approved"].includes(nextStatus) && evolutionConfig.evaluationEnabled !== true) {
           return sendJson(res, 409, { code: "evolution_evaluation_disabled", error: "evolution_evaluation_disabled" });
         }
+        // Promotion path: the deterministic executor mutates a real artifact and
+        // records reversible prior state. Mode-gated; the store's receipt guard
+        // still applies. `off` keeps promotion unavailable.
         if (["canary", "promoted", "rolled-back"].includes(nextStatus)) {
-          // Promotion is intentionally unavailable until a verified config/workspace
-          // action receipt can be registered by the deterministic executor.
-          return sendJson(res, 409, { code: "evolution_apply_unavailable", error: "evolution_apply_unavailable" });
+          if (evolutionConfig.promotionMode === "off") {
+            return sendJson(res, 409, { code: "evolution_apply_unavailable", error: "evolution_apply_unavailable" });
+          }
+          const current = await evolutionStore.get(id);
+          if (!current) return sendJson(res, 404, { code: "evolution_candidate_not_found", error: "evolution_candidate_not_found" });
+          if (nextStatus === "rolled-back") {
+            const undo = await rollbackPromotion(current);
+            if (!undo.ok) return sendJson(res, 409, { code: undo.code, error: undo.code });
+            const candidate = await evolutionStore.transition(id, {
+              ...body,
+              evidence: { ...(body?.evidence ?? {}), receipts: [...(body?.evidence?.receipts ?? []), ...undo.receipts] },
+            });
+            return sendJson(res, 200, { candidate });
+          }
+          // canary / promoted → run the executor, then record its receipts.
+          const applied = await runPromotionExecutor(current);
+          if (!applied.ok) {
+            // Honest failure: mark the candidate failed rather than mutate blindly.
+            await evolutionStore.transition(id, { expectedRevision: current.revision, status: "failed", reason: applied.code }).catch(() => {});
+            return sendJson(res, 409, { code: applied.code, error: applied.code });
+          }
+          const candidate = await evolutionStore.transition(id, {
+            ...body,
+            evidence: { ...(body?.evidence ?? {}), receipts: [...(body?.evidence?.receipts ?? []), ...applied.receipts] },
+          });
+          return sendJson(res, 200, { candidate });
         }
         const candidate = await evolutionStore.transition(id, body);
         return sendJson(res, 200, { candidate });
+      }
+
+      // Manual evaluation sweep: score pending candidates and transition them.
+      // Gated by evaluationEnabled (no force override — evaluation requires the
+      // feature on by design). Promotion stays unavailable regardless.
+      if (path === "/api/evolution/evaluate" && req.method === "POST") {
+        const evolutionConfig = currentEvolutionConfig();
+        if (evolutionConfig.evaluationEnabled !== true) {
+          return sendJson(res, 409, { code: "evolution_evaluation_disabled", error: "evolution_evaluation_disabled" });
+        }
+        const result = await runEvolutionEvaluation();
+        return sendJson(res, 200, result);
       }
 
       if (path === "/api/memory/mcp" && req.method === "GET") {
@@ -11216,6 +11666,7 @@ export async function startGateway({
           if (controllers.has(id) || sessionReservations.has(id)) {
             return sendJson(res, 409, { code: "session_busy", error: "session_busy" });
           }
+          clearIdleCurator(id);
           // A4c: remove engine before JSON when mirror is open so write failures
           // never leave JSON deleted with a live engine row. If mirror never
           // opens (infrastructure), remove JSON only (fail-open, no split-brain).
@@ -11292,6 +11743,9 @@ export async function startGateway({
             }
             const next = store.setSessionArchived(id, body.archived);
             if (!next) return sendJson(res, 404, { code: "session_not_found", error: "session_not_found" });
+            // Archive drives its own curator path below; cancel any pending idle
+            // timer so the same session is not distilled twice back-to-back.
+            if (body.archived === true) clearIdleCurator(id);
             await store.flush();
             const archCommit = await commitSessionToEngine(id);
             if (!archCommit.ok && sessionMirrorEnginePrimary()) {
@@ -11592,6 +12046,9 @@ export async function startGateway({
     gatewayClosing = true;
     shutdownController.abort();
     server.close();
+    // Drop any pending idle auto-curation timers so they cannot fire during teardown.
+    for (const timer of idleCuratorTimers.values()) clearTimeout(timer);
+    idleCuratorTimers.clear();
     for (const controller of pipelineAdvanceControllers.values()) {
       if (!controller.signal.aborted) controller.abort(new Error("gateway_shutdown"));
     }

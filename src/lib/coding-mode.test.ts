@@ -5,7 +5,18 @@ import {
   effectiveCodingModeFromMessages,
   normalizeCodingMode,
   parseCodingModeArg,
+  suggestedReasoningEffort,
 } from "./coding-mode";
+
+describe("suggestedReasoningEffort", () => {
+  it("maps audit-heavy modes to the strongest effort and auto to medium", () => {
+    expect(suggestedReasoningEffort("polish")).toBe("xhigh");
+    expect(suggestedReasoningEffort("deepreep")).toBe("xhigh");
+    expect(suggestedReasoningEffort("plan")).toBe("high");
+    expect(suggestedReasoningEffort("build")).toBe("high");
+    expect(suggestedReasoningEffort("auto")).toBe("medium");
+  });
+});
 
 describe("parseCodingModeArg", () => {
   it("parses aliases", () => {

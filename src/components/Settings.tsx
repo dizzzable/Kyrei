@@ -49,6 +49,7 @@ import { CapacitySettings } from "@/components/settings/CapacitySettings";
 import { ExperimentalSettings } from "@/components/settings/ExperimentalSettings";
 import { PermissionRulesEditor } from "@/components/settings/security/PermissionRulesEditor";
 import { LtmDecisionsPanel } from "@/components/settings/LtmDecisionsPanel";
+import { EvolutionSettings } from "@/components/settings/EvolutionSettings";
 import { KyreiMark } from "@/components/brand/KyreiMark";
 import {
   SETTINGS_SECTIONS,
@@ -2227,13 +2228,28 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                         onChange={(value) => setEngineField("memory.openviking.enabled", value)}
                       />
                       {Boolean(getEngineField("memory.openviking.enabled", false)) && (
-                        <TextField
-                          label={t("settings.projectMemory.openvikingBase.label")}
-                          hint={t("settings.projectMemory.openvikingBase.hint")}
-                          value={String(getEngineField("memory.openviking.baseURL", "http://127.0.0.1:1933"))}
-                          placeholder="http://127.0.0.1:1933"
-                          onChange={(value) => setEngineField("memory.openviking.baseURL", value)}
-                        />
+                        <>
+                          <TextField
+                            label={t("settings.projectMemory.openvikingBase.label")}
+                            hint={t("settings.projectMemory.openvikingBase.hint")}
+                            value={String(getEngineField("memory.openviking.baseURL", "http://127.0.0.1:1933"))}
+                            placeholder="http://127.0.0.1:1933"
+                            onChange={(value) => setEngineField("memory.openviking.baseURL", value)}
+                          />
+                          <TextField
+                            label={t("settings.projectMemory.openvikingKey.label")}
+                            hint={t("settings.projectMemory.openvikingKey.hint")}
+                            value={String(getEngineField("memory.openviking.apiKey", ""))}
+                            placeholder=""
+                            onChange={(value) => setEngineField("memory.openviking.apiKey", value)}
+                          />
+                          <BoolField
+                            label={t("settings.projectMemory.openvikingRemote.label")}
+                            hint={t("settings.projectMemory.openvikingRemote.hint")}
+                            value={Boolean(getEngineField("memory.openviking.allowRemote", false))}
+                            onChange={(value) => setEngineField("memory.openviking.allowRemote", value)}
+                          />
+                        </>
                       )}
                     </div>
                   </section>
@@ -2304,6 +2320,21 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       )}
                     </div>
                   </section>
+                  <EvolutionSettings
+                    config={config}
+                    getCurrentEngine={() => engineRef.current}
+                    onSaved={(next) => {
+                      // Rehydrate engine SoT so inline memory toggles cannot
+                      // clobber the evolution subtree just saved (mirrors usage).
+                      const nextEngine = { ...((next.engine ?? {}) as Record<string, unknown>) };
+                      setEngine(nextEngine);
+                      engineRef.current = nextEngine;
+                      setEngineText(JSON.stringify(nextEngine, null, 2));
+                      pendingEngineSave.current = null;
+                      onSaved(next);
+                      flash();
+                    }}
+                  />
                 </div>
               )}
 

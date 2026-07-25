@@ -29,7 +29,6 @@ import {
 } from "../provider/build.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
-import { KeyPool } from "../provider/keys.js";
 import {
   openStream,
   streamAttemptsFromError,
@@ -88,7 +87,12 @@ import {
 import { collectFileReviewFromParts, canEnterFileReview } from "../reliability/file-review.js";
 import { extractHeuristicHandoff, writeHandoff } from "../memory/handoff.js";
 import { buildSystemPromptParts } from "./system-prompt.js";
-import { mergeProviderOptions, packSystemForCache } from "../prompt/cache-packing.js";
+import {
+  applyHistoryCacheBreakpoint,
+  applyToolCacheBreakpoint,
+  mergeProviderOptions,
+  packSystemForCache,
+} from "../prompt/cache-packing.js";
 import type { ToolName } from "../prompt/tool-descriptions.js";
 import { resolvePersonalityText } from "../personality-catalog.js";
 import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
@@ -503,6 +507,8 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     {
       enabled: Boolean(cfg.memory.openviking?.enabled),
       ...(cfg.memory.openviking?.baseURL ? { baseURL: cfg.memory.openviking.baseURL } : {}),
+      ...(cfg.memory.openviking?.apiKey ? { apiKey: cfg.memory.openviking.apiKey } : {}),
+      ...(cfg.memory.openviking?.allowRemote ? { allowRemote: true } : {}),
     },
     {
       sessionId: opts.sessionId,
@@ -852,7 +858,6 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         },
       }
     : undefined;
-  const keyPool = new KeyPool({ keys: [opts.apiKey] });
   const explicitWorker = delegationEnabled ? opts.workerProvider : undefined;
   const workerEntry = explicitWorker
     ? resolveModel(explicitWorker.model, {
@@ -929,11 +934,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     // Unknown is a real state: without a verified context window Kyrei avoids
     // pretending that a generic 32k budget describes this endpoint.
     const paceKey = target.accountId || opts.providerAccountId || `candidate-${ci}`;
-    const shieldFetch = providerFetchFor(paceKey);
-    const multiKeyFetch = ci === 0 && keyPool.isMulti()
-      ? keyPool.fetchMiddleware(shieldFetch ?? globalThis.fetch.bind(globalThis))
-      : undefined;
-    const modelFetch = multiKeyFetch ?? shieldFetch;
+    const modelFetch = providerFetchFor(paceKey);
     const model = buildModel({
       protocol: target.protocol,
       baseURL: target.baseURL,
@@ -1105,16 +1106,23 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         console.warn("[kyrei context] initial compaction skipped:", error);
       }
     }
+    // Wave B3: anchor a cache breakpoint at the end of the history prefix so the
+    // multi-step tool loop reuses it across steps (Anthropic only; no-op else).
+    const cachedHistory = applyHistoryCacheBreakpoint(historyMessages, target.protocol);
     const streamMessages = packedSystem.systemMessages?.length
-      ? [...packedSystem.systemMessages, ...historyMessages]
-      : historyMessages;
+      ? [...packedSystem.systemMessages, ...cachedHistory]
+      : cachedHistory;
+    // Wave B3: cache the (large, session-stable) tool-schema block on Anthropic.
+    // Clones the last tool, so shared tool refs used by other fallback
+    // candidates are never mutated. No-op for non-Anthropic protocols.
+    const cachedTools = applyToolCacheBreakpoint(callTools, target.protocol);
     const result = streamText({
       model,
       ...(packedSystem.instructions ? { instructions: packedSystem.instructions } : {}),
       messages: streamMessages,
       ...(callTools
         ? {
-            tools: callTools,
+            tools: cachedTools,
             ...(forcedToolName && useForcedToolChoice
               ? { toolChoice: { type: "tool" as const, toolName: forcedToolName } }
               : {}),

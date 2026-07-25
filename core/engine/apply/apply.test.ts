@@ -91,3 +91,24 @@ describe("applyPatch — add/delete/transactional (Property 11)", () => {
     });
   });
 });
+
+describe("snapshot store gc (retention cap)", () => {
+  it("prunes snapshots beyond maxCount, keeping the newest", async () => {
+    await writeFile(join(ws, "f.txt"), "v0\n", "utf8");
+    const snap = createSnapshotStore(ws, { maxCount: 2 });
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      ids.push(await snap.create(["f.txt"]));
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const { removed } = await snap.gc();
+    // 5 created, cap 2 → 3 pruned.
+    expect(removed).toBe(3);
+    const { readdir } = await import("node:fs/promises");
+    const kept = await readdir(join(ws, ".kyrei", "snapshots"));
+    expect(kept).toHaveLength(2);
+    // The two newest survive.
+    expect(kept).toContain(ids.at(-1));
+    expect(kept).not.toContain(ids[0]);
+  });
+});

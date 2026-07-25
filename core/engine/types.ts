@@ -7,7 +7,7 @@
  */
 
 import type { ModelMessage } from "ai";
-import type { GBrainConfig } from "./memory/gbrain.js";
+import type { GBrainConfig } from "./memory/gbrain-types.js";
 
 export interface Usage {
   inputTokens?: number;
@@ -465,7 +465,7 @@ export interface EngineConfig {
     /** Long-term memory bridge: append events/checkpoints to ltm/store/*.jsonl */
     ltm: { enabled: boolean };
     /** OpenViking local service adapter (optional AGPLv3 server, user-managed) */
-    openviking: { enabled: boolean; baseURL?: string };
+    openviking: { enabled: boolean; baseURL?: string; apiKey?: string; allowRemote?: boolean };
     /**
      * Rebuildable FTS/index projection of Tier A files.
      * Default sqlite under `.kyrei/index/`. Postgres optional for team share.
@@ -529,6 +529,12 @@ export interface EngineConfig {
        * session (chat model), or default (active app model).
        */
       modelSource: "worker" | "session" | "default";
+      /** Run curator automatically once a session goes idle (background, fail-open). */
+      autoOnIdle: boolean;
+      /** Idle threshold (ms) before auto-curation fires. 60s–60min. */
+      idleMs: number;
+      /** applyMode used specifically for the automatic idle trigger (kept separate from manual applyMode). */
+      autoApplyMode: "propose" | "apply_safe" | "apply_all";
     };
     /**
      * Wave C3: optional external markdown vault roots (Tolaria-adjacent).
@@ -728,7 +734,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     protectLastN: 6,
     pruneToChars: 500,
     summaryEnabled: true,
-    summaryUseLlm: false,
+    summaryUseLlm: true,
     protectFirstN: 2,
     summaryMinMessages: 12,
     summaryCooldownoffMs: 60_000,
@@ -797,6 +803,9 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
       maxTranscriptChars: 24_000,
       useLlm: true,
       modelSource: "worker",
+      autoOnIdle: true,
+      idleMs: 420_000,
+      autoApplyMode: "apply_all",
     },
     vault: {
       enabled: false,

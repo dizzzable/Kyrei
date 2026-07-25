@@ -12,7 +12,6 @@ import {
   retryAfterMsOf,
 } from "./errors.js";
 import { resolve, isLocalBaseURL, registerModel } from "./registry.js";
-import { KeyPool } from "./keys.js";
 import { openStream, type StreamLike } from "./open-stream.js";
 import { buildModel, buildProviderOptions, hasProviderCredentials } from "./build.js";
 
@@ -401,20 +400,6 @@ describe("registry.resolve", () => {
   it("detects local base URLs", () => {
     expect(isLocalBaseURL("http://localhost:11434/v1")).toBe(true);
     expect(isLocalBaseURL("https://api.openai.com/v1")).toBe(false);
-  });
-});
-
-describe("KeyPool", () => {
-  it("round-robins across multiple keys", () => {
-    const pool = new KeyPool({ keys: ["k1", "k2", "k3"] });
-    expect(pool.isMulti()).toBe(true);
-    // pick is private; exercise via fetchMiddleware indirectly is heavy — assert size/staticKey.
-    expect(pool.size).toBe(3);
-  });
-  it("single key → not multi", () => {
-    const pool = new KeyPool({ keys: ["only"] });
-    expect(pool.isMulti()).toBe(false);
-    expect(pool.staticKey()).toBe("only");
   });
 });
 

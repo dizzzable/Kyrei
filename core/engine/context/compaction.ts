@@ -301,7 +301,12 @@ function messageText(m: ModelMessage): string {
   const chunks: string[] = [];
   for (const part of m.content as unknown as Array<Record<string, unknown>>) {
     if (!part || typeof part !== "object") continue;
-    if (typeof part["text"] === "string") chunks.push(part["text"]);
+    if (typeof part["text"] === "string") {
+      // Tag reasoning so the summarizer distinguishes tentative thinking from
+      // settled statements (both carry a `.text` field). Prevents a summary from
+      // promoting an exploratory thought into a committed fact.
+      chunks.push(part["type"] === "reasoning" ? `[reasoning] ${part["text"]}` : part["text"]);
+    }
     if (part["type"] === "tool-call" && typeof part["toolName"] === "string") {
       chunks.push(`[tool_call ${part["toolName"]}]`);
     }

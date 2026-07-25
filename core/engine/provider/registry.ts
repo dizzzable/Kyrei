@@ -8,6 +8,17 @@ export interface ModelCost {
   inputPerM: number;
   outputPerM: number;
 }
+/**
+ * Coarse, static capability flags for the small curated registry below.
+ *
+ * NOT authoritative and NOT read by any orchestration decision. The real
+ * capability gating (whether to send tools, thinking config, vision input,
+ * etc.) lives in `model-capabilities.js`, which has live-provider provenance
+ * and confidence. `caps` survives only as a display-only fallback: the gateway
+ * `/api/models` handler spreads it first and then overwrites it with
+ * `capabilities.features`, so a stale value here can never change behavior —
+ * do not add runtime branches on `entry.caps.*`.
+ */
 export interface ModelCaps {
   tools: boolean;
   reasoning: boolean;
@@ -20,6 +31,7 @@ export interface ModelEntry {
   baseURL: string;
   limits: ModelLimits;
   cost: ModelCost;
+  /** Display-only fallback metadata — see ModelCaps. Not a gating input. */
   caps: ModelCaps;
 }
 

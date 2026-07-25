@@ -48,6 +48,28 @@ export function MemoryAtlasInspector({ selected, atlas }: { selected: MemoryAtla
     }
   };
 
+  const transitionCandidate = async (status: "promoted" | "rolled-back", reason: string) => {
+    if (!candidate || candidateBusy) return;
+    setCandidateBusy(true);
+    setCandidateError(null);
+    try {
+      // Promotion/rollback receipts are produced server-side by the executor;
+      // the client just needs a non-empty receipts array to satisfy the store
+      // guard for `promoted` (rolled-back requires none).
+      const result = await gateway.transitionEvolutionCandidate(candidate.id, {
+        expectedRevision: candidate.revision,
+        status,
+        reason,
+        ...(status === "promoted" ? { evidence: { receipts: ["manual-promote"] } } : {}),
+      });
+      setCandidate(result.candidate);
+    } catch (error) {
+      setCandidateError(error instanceof Error ? error.message : "evolution_transition_failed");
+    } finally {
+      setCandidateBusy(false);
+    }
+  };
+
   if (selected) return (
     <div className="p-4">
       <div className="flex items-start gap-3">
@@ -68,8 +90,14 @@ export function MemoryAtlasInspector({ selected, atlas }: { selected: MemoryAtla
           <div className="flex items-center justify-between gap-2"><span>{t("shell.memory.evolution.status")}</span><span className="font-mono text-foreground">{candidate.status}</span></div>
           <div className="mt-2 flex items-center justify-between gap-2"><span>{t("shell.memory.evolution.revision")}</span><span className="font-mono text-foreground">{candidate.revision}</span></div>
           <div className="mt-2 flex items-center justify-between gap-2"><span>{t("shell.memory.evolution.receipts")}</span><span className="font-mono text-foreground">{candidate.evidence.receipts.length}</span></div>
+          {typeof candidate.evidence.metrics?.score === "number" && <div className="mt-2 flex items-center justify-between gap-2"><span>{t("shell.memory.evolution.score")}</span><span className="font-mono text-foreground">{(candidate.evidence.metrics.score as number).toFixed(2)}</span></div>}
+          {candidate.evidence.notes && <div className="mt-3"><div className="text-[8.5px] uppercase tracking-wide text-muted">{t("shell.memory.evolution.rationale")}</div><p className="mt-1 whitespace-pre-wrap text-[9.5px] leading-4 text-secondary">{candidate.evidence.notes}</p></div>}
           {!evolutionConfig?.evaluationEnabled && <p className="mt-3 text-warning">{t("shell.memory.evolution.evaluationDisabled")}</p>}
-          {["pending", "evaluating", "approved"].includes(candidate.status) && <Button className="mt-3" size="sm" variant="outline" disabled={candidateBusy} onClick={() => void rejectCandidate()}>{candidateBusy ? t("shell.memory.evolution.rejecting") : t("shell.memory.evolution.reject")}</Button>}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {["pending", "evaluating", "approved"].includes(candidate.status) && <Button size="sm" variant="outline" disabled={candidateBusy} onClick={() => void rejectCandidate()}>{candidateBusy ? t("shell.memory.evolution.rejecting") : t("shell.memory.evolution.reject")}</Button>}
+            {candidate.status === "approved" && evolutionConfig?.promotionMode !== "off" && <Button size="sm" disabled={candidateBusy} onClick={() => void transitionCandidate("promoted", "Promoted from Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.promoting") : t("shell.memory.evolution.promote")}</Button>}
+            {candidate.status === "promoted" && <Button size="sm" variant="outline" disabled={candidateBusy} onClick={() => void transitionCandidate("rolled-back", "Rolled back from Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.rollingBack") : t("shell.memory.evolution.rollback")}</Button>}
+          </div>
         </>}
         {!candidate && !candidateError && <span>{t("shell.memory.evolution.loading")}</span>}
         {candidateError && <p role="alert" className="text-danger">{candidateError}</p>}

@@ -113,6 +113,20 @@ export function skillsCuratorDir(dataDir) {
 }
 
 /**
+ * Curator proposal envelopes are written by the heuristic/LLM curator as
+ * `proposal-*.json` and by Skill Sleep as `sleep-*.json`. Both are the same
+ * envelope shape and both must be listable/applicable, so the review surface
+ * accepts either prefix.
+ * @param {string} fileName
+ */
+function isCuratorProposalFile(fileName) {
+  return (
+    (fileName.startsWith("proposal-") || fileName.startsWith("sleep-"))
+    && fileName.endsWith(".json")
+  );
+}
+
+/**
  * @param {string} s
  * @param {number} max
  */
@@ -597,7 +611,7 @@ export async function listSkillsCuratorProposals(dataDir, opts = {}) {
     throw error;
   }
   const files = names
-    .filter((n) => n.startsWith("proposal-") && n.endsWith(".json"))
+    .filter(isCuratorProposalFile)
     .sort()
     .reverse()
     .slice(0, limit);
@@ -641,7 +655,7 @@ export async function applyStoredSkillsCuratorProposal(
 ) {
   const mode = "apply_safe";
   const fileName = basename(String(fileNameOrPath || ""));
-  if (!fileName || !fileName.startsWith("proposal-") || !fileName.endsWith(".json") || fileName.includes("..")) {
+  if (!fileName || !isCuratorProposalFile(fileName) || fileName.includes("..")) {
     return { ok: false, error: "invalid_file", applied: [], errors: [] };
   }
   const path = join(skillsCuratorDir(dataDir), fileName);

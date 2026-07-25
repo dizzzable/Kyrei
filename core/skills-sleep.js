@@ -103,19 +103,37 @@ export function digestMessagesToTrajectory(messages, meta = {}) {
       if (!part || typeof part !== "object") continue;
       const p = /** @type {Record<string, unknown>} */ (part);
       if (typeof p.text === "string") textBits.push(p.text);
-      if (p.type === "tool-call" && typeof p.toolName === "string") {
-        tools.push(p.toolName);
-        if (p.toolName === "read_skill" || p.toolName === "search_skills") {
-          const input = p.input && typeof p.input === "object"
-            ? /** @type {Record<string, unknown>} */ (p.input)
-            : {};
+      // Two persisted part shapes exist. The engine/AI-SDK shape uses
+      // `type:"tool-call"`/`"tool-error"` with `toolName`/`input`. The gateway
+      // session store folds tool activity into a single `type:"tool"` part with
+      // `name`/`args`, plus `error` (failure) or `result` (success) co-located
+      // on the same object. Recognize both so digests are non-empty against
+      // real gateway session messages, not just SDK-shaped transcripts.
+      const isToolCall = p.type === "tool-call" || p.type === "tool";
+      const toolName = typeof p.toolName === "string"
+        ? p.toolName
+        : typeof p.name === "string"
+          ? p.name
+          : "";
+      if (isToolCall && toolName) {
+        tools.push(toolName);
+        if (toolName === "read_skill" || toolName === "search_skills") {
+          const rawInput = p.input && typeof p.input === "object"
+            ? p.input
+            : p.args && typeof p.args === "object"
+              ? p.args
+              : {};
+          const input = /** @type {Record<string, unknown>} */ (rawInput);
           if (typeof input.id === "string") skillNames.push(input.id);
           if (typeof input.name === "string") skillNames.push(input.name);
           if (typeof input.query === "string") notes.push(`skill_query:${input.query}`);
         }
       }
-      if (p.type === "tool-error") {
-        const name = typeof p.toolName === "string" ? p.toolName : "tool";
+      // Failure: explicit `tool-error` part, or a `tool` part carrying an error.
+      const hasToolError = p.type === "tool-error"
+        || (p.type === "tool" && p.error !== undefined && p.error !== null);
+      if (hasToolError) {
+        const name = toolName || "tool";
         const err = typeof p.error === "string" ? p.error : "error";
         failures.push(clip(`${name}: ${err}`, 200));
       }

@@ -125,7 +125,7 @@ export interface VectorStore {
       contentHash: string;
     }>,
   ): Promise<void>;
-  query(embedding: Float32Array, opts: { k: number; ownerType?: string }): Promise<VectorHit[]>;
+  query(embedding: Float32Array, opts: { k: number; ownerType?: string; model?: string }): Promise<VectorHit[]>;
   deleteByOwner(ownerType: string, ownerId: string): Promise<void>;
   hybridSearch(query: { text: string; embedding: Float32Array }, opts: { k: number }): Promise<VectorHit[]>;
 }

@@ -47,6 +47,11 @@ function sessionContract(name: string, make: () => SessionStore) {
 
       const found = await s.searchMessages("kyrei", { sessionId: "s1" });
       expect(found.length).toBeGreaterThanOrEqual(1);
+
+      // Multi-word query whose terms are non-adjacent ("отлично" ... "работает"
+      // straddle "kyrei"): AND-of-terms must match; a phrase query would not.
+      const multi = await s.searchMessages("отлично работает", { sessionId: "s1" });
+      expect(multi.length).toBeGreaterThanOrEqual(1);
     });
 
     it("clearMessages and deleteSession", async () => {
@@ -154,6 +159,26 @@ describe("SQLite MemoryStore + FTS", () => {
     await mem.removeDoc("d1");
     expect(await mem.getDoc("d1")).toBe(null);
   });
+
+  it("recalls on multi-word queries whose terms are not adjacent (AND-of-terms, not phrase)", async () => {
+    const { db } = openDb(":memory:");
+    const mem = createSqliteMemoryStore(db);
+    await mem.upsertDoc({
+      id: "d2",
+      scope: "project",
+      kind: "memory",
+      path: "/ws/.kyrei/memory/MEMORY.md",
+      body: "We prefer a local durable sqlite memory store with fts5 and vector cosine dedupe",
+      contentHash: "h2",
+      updatedAt: nowIso(),
+      title: "MEMORY",
+    });
+    // Terms present but NOT adjacent — a phrase query would return zero rows.
+    expect((await mem.search("durable memory store")).length).toBeGreaterThanOrEqual(1);
+    expect((await mem.search("vector dedupe")).length).toBeGreaterThanOrEqual(1);
+    // A term absent from the doc must still exclude it (AND semantics hold).
+    expect((await mem.search("durable postgres")).length).toBe(0);
+  });
 });
 
 describe("SQLite VectorStore (brute-force cosine)", () => {
@@ -169,6 +194,24 @@ describe("SQLite VectorStore (brute-force cosine)", () => {
     await vec.deleteByOwner("doc", "a");
     const after = await vec.query(new Float32Array([0.9, 0.1, 0]), { k: 2 });
     expect(after.map((h) => h.ownerId)).not.toContain("a");
+  });
+
+  it("filters by embedding model and never scores mismatched-dimension rows", async () => {
+    const { db } = openDb(":memory:");
+    const vec = createSqliteVectorStore(db);
+    // Simulate an embed-mode switch: old 3-dim lexical rows + new 4-dim rows.
+    await vec.upsert([
+      { ownerType: "memory_doc", ownerId: "old", chunkIndex: 0, model: "lexical-256", embedding: new Float32Array([1, 0, 0]), contentHash: "o" },
+      { ownerType: "memory_doc", ownerId: "new", chunkIndex: 0, model: "http-384", embedding: new Float32Array([1, 0, 0, 0]), contentHash: "n" },
+    ]);
+    // Querying with the new model + a 4-dim vector must return only the new row.
+    const scoped = await vec.query(new Float32Array([0.9, 0.1, 0, 0]), { k: 5, model: "http-384" });
+    expect(scoped.map((h) => h.ownerId)).toEqual(["new"]);
+    // Without a model filter, the mismatched-dim old row is still safe: the
+    // dimension guard scores it 0 similarity (distance 1), never a bogus hit.
+    const unscoped = await vec.query(new Float32Array([0.9, 0.1, 0, 0]), { k: 5 });
+    const oldHit = unscoped.find((h) => h.ownerId === "old");
+    expect(oldHit?.distance).toBe(1);
   });
 });
 

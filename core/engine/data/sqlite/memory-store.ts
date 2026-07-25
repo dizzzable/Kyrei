@@ -2,8 +2,13 @@ import type { MemoryStore, MemoryDoc } from "../ports.js";
 import type { DB } from "./open.js";
 
 function ftsQuery(q: string): string {
-  const cleaned = q.replace(/["*]/g, " ").trim();
-  return cleaned ? `"${cleaned}"` : '""';
+  // FTS5: a double-quoted string is a PHRASE query (tokens must be adjacent in
+  // order), so wrapping the whole query in one pair of quotes silently returns
+  // zero rows for any multi-word natural-language search. Tokenize instead and
+  // quote each term individually — FTS5 ANDs top-level terms by default, and the
+  // per-token quoting still neutralizes FTS operator characters (injection-safe).
+  const terms = q.replace(/["*]/g, " ").trim().split(/\s+/).filter(Boolean);
+  return terms.length ? terms.map((t) => `"${t}"`).join(" ") : '""';
 }
 
 interface DocRow {

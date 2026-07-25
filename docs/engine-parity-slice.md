@@ -67,8 +67,8 @@ Why this slice first:
 
 When `workspace` is present, inject the already-implemented layered project context into the live system prompt:
 
-1. `AGENTS.md`
-2. `.kiro/steering/*.md` with `inclusion: always`
+1. `AGENTS.md` (root only)
+2. `.kyrei/steering/*.md` with `inclusion: always` (other Kiro modes — fileMatch/manual/auto — are not supported; see blueprint)
 3. `.kyrei/memory/MEMORY.md`
 4. optional global layer later, but **not required for the first slice**
 

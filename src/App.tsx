@@ -39,7 +39,7 @@ import { actionForCombo } from "@/store/keybinds";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
 import { executableModelParams } from "@/lib/model-capabilities";
 import { getStored, setStored } from "@/lib/persist";
-import { detectCodingModeSwitch, parseCodingModeArg, type CodingMode } from "@/lib/coding-mode";
+import { detectCodingModeSwitch, parseCodingModeArg, suggestedReasoningEffort, type CodingMode } from "@/lib/coding-mode";
 import { getSlashCommands } from "@/lib/slash-commands";
 import { cancelSpeech, speak } from "@/lib/speech";
 import {
@@ -533,6 +533,54 @@ export function App() {
               currentTool: payload.current_tool ?? previous?.currentTool,
               summary: payload.summary ?? previous?.summary,
               error: payload.error ?? previous?.error,
+            };
+            return [next, ...current.filter((run) => run.id !== id)].slice(0, 200);
+          });
+          break;
+        }
+        case "team.start":
+        case "team.complete": {
+          // Surface the team run itself (the parent container) alongside its
+          // member subagent.* runs, so a multi-model team task shows overall
+          // lifecycle (running → completed/partial/failed) instead of only the
+          // individual member rows.
+          const id = payload.run_id;
+          if (!id) break;
+          const now = Date.now();
+          const completed = payload.completed_tasks ?? 0;
+          const failed = payload.failed_tasks ?? 0;
+          const total = payload.task_count;
+          setAgentRuns((current) => {
+            const previous = current.find((run) => run.id === id);
+            const status: SubagentRun["status"] = event.type === "team.start"
+              ? "running"
+              : payload.status === "completed"
+                ? "completed"
+                : payload.status === "partial"
+                  ? "partial"
+                  : payload.status === "interrupted"
+                    ? "interrupted"
+                    : payload.status === "recovering"
+                      ? "recovering"
+                      : "failed";
+            const workflow = payload.workflow ?? previous?.model;
+            const progress = event.type === "team.complete"
+              ? `${completed} done${failed ? `, ${failed} failed` : ""}${total ? ` of ${total}` : ""}`
+              : total
+                ? `${total} task(s) queued`
+                : "team run started";
+            const next: SubagentRun = {
+              id,
+              parentId: previous?.parentId,
+              sessionId: currentId,
+              goal: previous?.goal ?? `Team run (${payload.profile_id ?? workflow ?? "team"})`,
+              model: workflow,
+              status,
+              startedAt: previous?.startedAt ?? now,
+              updatedAt: now,
+              filesRead: previous?.filesRead ?? [],
+              filesWritten: previous?.filesWritten ?? [],
+              summary: progress,
             };
             return [next, ...current.filter((run) => run.id !== id)].slice(0, 200);
           });
@@ -1050,7 +1098,14 @@ export function App() {
       : undefined;
 
     // Prefer session-scoped mode so each chat can differ; still update engine as default for new sessions.
-    const engine = { ...(config.engine ?? {}), codingMode: mode };
+    const engine: Record<string, unknown> = { ...(config.engine ?? {}), codingMode: mode };
+    // Prefill the mode's suggested reasoning effort, but never override an effort
+    // the user set deliberately — only fill when it's currently unset/off. This
+    // makes Polish/Deepreep actually think harder without a surprise downgrade.
+    const currentEffort = String((config.engine as { defaultReasoningEffort?: string } | undefined)?.defaultReasoningEffort ?? "").trim();
+    if (!currentEffort || currentEffort === "off" || currentEffort === "none") {
+      engine.defaultReasoningEffort = suggestedReasoningEffort(mode);
+    }
     setConfig({ ...config, engine });
     if (currentId) {
       setSessions((list) => list.map((s) => (s.id === currentId ? { ...s, codingMode: mode } : s)));

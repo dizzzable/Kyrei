@@ -8,6 +8,7 @@ import {
   runSkillSleep,
   normalizeSkillsSleepConfig,
 } from "../core/skills-sleep.js";
+import { listSkillsCuratorProposals } from "../core/skills-curator.js";
 
 describe("skills sleep (Wave C1)", () => {
   let dataDir: string;
@@ -48,6 +49,47 @@ describe("skills sleep (Wave C1)", () => {
     expect(dig.failures.some((f) => f.includes("run_command"))).toBe(true);
     expect(dig.skillNames).toContain("security-checklist");
     expect(dig.skillIds).toContain("skill_aaa");
+  });
+
+  it("digests the gateway-persisted part shape (type:'tool' with name/args/error)", () => {
+    // The gateway session store folds tool activity into a single `type:"tool"`
+    // part with `name`/`args`, plus `error` on failure — not the SDK-shaped
+    // `tool-call`/`tool-error` parts. Both shapes must yield non-empty signals.
+    const dig = digestMessagesToTrajectory(
+      [
+        { role: "user", content: "Build the project" },
+        {
+          role: "assistant",
+          parts: [
+            { type: "tool", name: "read_skill", args: { id: "build-guide" }, result: "ok" },
+            { type: "tool", name: "run_command", args: { command: "npm run build" }, error: "exit 2" },
+          ],
+        },
+      ],
+      { sessionId: "s2", status: "error" },
+    );
+    expect(dig.tools).toContain("run_command");
+    expect(dig.tools).toContain("read_skill");
+    expect(dig.failures.some((f) => f.startsWith("run_command:"))).toBe(true);
+    expect(dig.skillNames).toContain("build-guide");
+    expect(dig.success).toBe(false);
+  });
+
+  it("keeps recognizing the legacy SDK part shape after the gateway-shape fix", () => {
+    const dig = digestMessagesToTrajectory(
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolName: "grep", input: {} },
+            { type: "tool-error", toolName: "grep", error: "no match" },
+          ],
+        },
+      ],
+      {},
+    );
+    expect(dig.tools).toContain("grep");
+    expect(dig.failures.some((f) => f.startsWith("grep:"))).toBe(true);
   });
 
   it("proposes recovery patches when failures cluster on a skill", () => {
@@ -133,5 +175,35 @@ describe("skills sleep (Wave C1)", () => {
     expect(body.via).toBe("skill_sleep");
     expect(body.applyMode).toBe("propose");
     expect(body.status).toBe("pending");
+  });
+
+  it("surfaces the written sleep envelope through the curator proposals listing", async () => {
+    // Regression: sleep-*.json was written but the curator only matched
+    // proposal-*.json, so Skill Sleep output was never listable/applicable.
+    const result = await runSkillSleep({
+      dataDir,
+      trajectories: [
+        { skillIds: ["skill_aaaaaaaaaaaaaaaaaaaaaaaa"], failures: ["x", "y"], success: false },
+        { skillIds: ["skill_aaaaaaaaaaaaaaaaaaaaaaaa"], failures: ["x"], success: false },
+      ],
+      skills: [
+        {
+          id: "skill_aaaaaaaaaaaaaaaaaaaaaaaa",
+          name: "demo",
+          description: "A reasonably long description for matching.",
+          owned: true,
+          enabled: true,
+          content: "---\nname: demo\n---\n\n# Demo\n",
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.fileName).toMatch(/^sleep-/);
+
+    const listed = await listSkillsCuratorProposals(dataDir);
+    const row = listed.find((r) => r.fileName === result.fileName);
+    expect(row).toBeTruthy();
+    expect(row?.via).toBe("skill_sleep");
+    expect(row?.status).toBe("pending");
   });
 });

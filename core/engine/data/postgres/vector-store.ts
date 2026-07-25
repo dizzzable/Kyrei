@@ -7,11 +7,13 @@ import type { VectorStore, VectorHit } from "../ports.js";
 import type { PgPool } from "./pool.js";
 
 function cosine(a: Float32Array, b: Float32Array): number {
-  const n = Math.min(a.length, b.length);
+  // Different-length vectors (e.g. after an embed-mode switch) are not
+  // comparable — treat as no similarity instead of truncating to a wrong score.
+  if (a.length !== b.length) return 0;
   let dot = 0;
   let na = 0;
   let nb = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i]! * b[i]!;
     na += a[i]! * a[i]!;
     nb += b[i]! * b[i]!;
@@ -73,15 +75,29 @@ export function createPostgresVectorStore(pool: PgPool, vecOk: boolean): VectorS
     },
 
     async query(embedding, opts) {
+      // Filter by embedding model so a prior embed mode's (different-dim) rows
+      // are excluded. For pgvector the <=> operator errors on dimension
+      // mismatch, so this filter is required for correctness, not just ranking.
+      const buildWhere = (start: number) => {
+        const clauses: string[] = [];
+        const params: Array<string> = [];
+        if (opts.ownerType) {
+          clauses.push(`owner_type=$${start + params.length}`);
+          params.push(opts.ownerType);
+        }
+        if (opts.model) {
+          clauses.push(`model=$${start + params.length}`);
+          params.push(opts.model);
+        }
+        return { where: clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "", params };
+      };
       if (vecOk) {
         // Use pgvector's <=> operator for cosine distance
         const embStr = `[${Array.from(embedding).join(",")}]`;
-        const sql = opts.ownerType
-          ? `SELECT owner_type,owner_id,chunk_index,embedding <=> $1::vector AS distance
-             FROM vectors WHERE owner_type=$2 ORDER BY distance LIMIT $3`
-          : `SELECT owner_type,owner_id,chunk_index,embedding <=> $1::vector AS distance
-             FROM vectors ORDER BY distance LIMIT $2`;
-        const params = opts.ownerType ? [embStr, opts.ownerType, opts.k] : [embStr, opts.k];
+        const { where, params: filterParams } = buildWhere(2);
+        const sql = `SELECT owner_type,owner_id,chunk_index,embedding <=> $1::vector AS distance
+             FROM vectors${where} ORDER BY distance LIMIT $${2 + filterParams.length}`;
+        const params = [embStr, ...filterParams, opts.k];
         const res = await pool.query<{
           owner_type: string;
           owner_id: string;
@@ -96,10 +112,8 @@ export function createPostgresVectorStore(pool: PgPool, vecOk: boolean): VectorS
         }));
       } else {
         // Fallback: brute-force cosine in JS
-        const sql = opts.ownerType
-          ? "SELECT owner_type,owner_id,chunk_index,embedding FROM vectors WHERE owner_type=$1"
-          : "SELECT owner_type,owner_id,chunk_index,embedding FROM vectors";
-        const params = opts.ownerType ? [opts.ownerType] : [];
+        const { where, params } = buildWhere(1);
+        const sql = `SELECT owner_type,owner_id,chunk_index,embedding FROM vectors${where}`;
         const res = await pool.query<VecRow>(sql, params);
         const scored: VectorHit[] = res.rows.map((r) => ({
           ownerType: r.owner_type,

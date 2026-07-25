@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { redactSensitiveValue } from "./secret-redaction.js";
@@ -253,6 +253,63 @@ export class EvolutionStore {
       evidence: row.evidence,
       ...(row.reason ? { reason: row.reason } : {}),
     };
+  }
+
+  /**
+   * Age-based retention. Drops the event rows of TERMINAL candidates
+   * (rejected/promoted/rolled-back/failed) whose last update is older than
+   * `retentionDays`; every non-terminal candidate (pending/evaluating/…) is
+   * kept regardless of age so no in-flight proposal is ever lost. A no-op when
+   * nothing qualifies, so it never rewrites the journal needlessly.
+   *
+   * Runs on the shared `this.tail` queue so it cannot interleave with an
+   * in-flight append, and rewrites `events.jsonl` atomically (temp + rename).
+   */
+  async gc(retentionDays) {
+    const days = Math.floor(Number(retentionDays));
+    if (!Number.isFinite(days) || days <= 0) return { pruned: 0, kept: 0 };
+    const previous = this.tail;
+    const next = previous.then(async () => {
+      let raw;
+      try {
+        raw = await readFile(this.path, "utf8");
+      } catch (error) {
+        if (error?.code === "ENOENT") return { pruned: 0, kept: 0 };
+        throw error;
+      }
+      const rows = [];
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const row = JSON.parse(line);
+          if (row && typeof row === "object") rows.push(row);
+        } catch {
+          // A crash-truncated tail must not hide earlier valid events.
+        }
+      }
+      const candidates = projectionFromRows(rows);
+      const cutoff = this.now() - days * 86_400_000;
+      const dropIds = new Set();
+      for (const [id, candidate] of candidates) {
+        if (!TERMINAL.has(candidate.status)) continue;
+        const updatedAt = Date.parse(candidate.updatedAt);
+        if (Number.isFinite(updatedAt) && updatedAt < cutoff) dropIds.add(id);
+      }
+      if (!dropIds.size) return { pruned: 0, kept: candidates.size };
+      const retained = rows.filter((row) => !dropIds.has(row?.candidateId));
+      const body = retained.map((row) => JSON.stringify(row)).join("\n");
+      await mkdir(this.dir, { recursive: true });
+      const temp = `${this.path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+      try {
+        await writeFile(temp, body ? `${body}\n` : "", { encoding: "utf8", mode: 0o600 });
+        await rename(temp, this.path);
+      } finally {
+        await rm(temp, { force: true }).catch(() => {});
+      }
+      return { pruned: dropIds.size, kept: candidates.size - dropIds.size };
+    });
+    this.tail = next.catch(() => undefined);
+    return next;
   }
 
   async flush() {
