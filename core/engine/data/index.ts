@@ -8,6 +8,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { normalizeRelevance } from "./ports.js";
 import type { SessionStore, MemoryStore, VectorStore, MemoryDoc, VectorHit } from "./ports.js";
 import { createFileSessionStore } from "./file/session-store.js";
 import { openDb } from "./sqlite/open.js";
@@ -191,10 +192,27 @@ export function createFileStores(baseDir: string): Stores {
       );
     },
     async search(query, opts) {
-      const q = query.toLowerCase();
-      return [...docs.values()]
-        .filter((d) => (!opts?.scope || d.scope === opts.scope) && (d.title ?? "").concat(" ", d.body).toLowerCase().includes(q))
+      // Substring-contains ranked nothing and required the whole query to
+      // appear verbatim. Score by how many query terms a doc matches (title
+      // weighted) so this backend orders like the FTS ones.
+      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!terms.length) return [];
+      const scored = [...docs.values()]
+        .filter((d) => !opts?.scope || d.scope === opts.scope)
+        .map((doc) => {
+          const title = (doc.title ?? "").toLowerCase();
+          const body = doc.body.toLowerCase();
+          let score = 0;
+          for (const term of terms) {
+            if (title.includes(term)) score += 2;
+            else if (body.includes(term)) score += 1;
+          }
+          return { doc, score, matched: terms.filter((t) => title.includes(t) || body.includes(t)).length };
+        })
+        .filter((row) => (opts?.match === "any" ? row.score > 0 : row.matched === terms.length))
+        .sort((a, b) => b.score - a.score)
         .slice(0, opts?.limit ?? 20);
+      return normalizeRelevance(scored, (r) => r.score).map((r) => ({ ...r.doc, relevance: r.relevance }));
     },
     async removeDoc(id) {
       docs.delete(id);

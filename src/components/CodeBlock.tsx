@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { getHighlighter, normalizeLang, shikiTheme } from "@/lib/highlighter";
+import { HIGHLIGHT_SKIP, highlightDelayMs } from "@/lib/highlight-schedule";
 import { useThemeId } from "@/lib/theme";
 import { useI18n } from "@/i18n";
 
@@ -15,13 +16,58 @@ export function CodeBlock({ code, lang }: CodeBlockProps) {
   const theme = useThemeId();
   const { t } = useI18n();
 
+  // What is currently painted, so an append can be coalesced instead of
+  // re-tokenizing the whole block on every streamed token.
+  const rendered = useRef<{ code: string; style: string; at: number } | null>(null);
+
   useEffect(() => {
+    const style = `${normalizeLang(lang)}|${shikiTheme(theme)}`;
+    const painted = rendered.current;
+    const delay = highlightDelayMs({
+      previous: painted?.code ?? null,
+      next: code,
+      styleChanged: painted !== null && painted.style !== style,
+      ...(painted ? { sinceLastPaintMs: Date.now() - painted.at } : {}),
+    });
+    if (delay === HIGHLIGHT_SKIP) return undefined;
+
     let alive = true;
-    getHighlighter()
-      .then(hl => hl.codeToHtml(code, { lang: normalizeLang(lang), theme: shikiTheme(theme) }))
-      .then(out => { if (alive) setHtml(out); })
-      .catch(() => { if (alive) setHtml(""); });
-    return () => { alive = false; };
+    const run = () => {
+      getHighlighter()
+        .then(hl => {
+          // Gate BEFORE tokenizing: without this every superseded run still
+          // did the full Shiki pass, so N queued prefixes all executed on the
+          // main thread once the highlighter resolved — the O(L²) freeze this
+          // module exists to remove.
+          if (!alive) return null;
+          return hl.codeToHtml(code, { lang: normalizeLang(lang), theme: shikiTheme(theme) });
+        })
+        .then(out => {
+          if (!alive || out === null) return;
+          rendered.current = { code, style, at: Date.now() };
+          setHtml(out);
+        })
+        // Fall back to the plain <pre>, which always shows the FULL current
+        // source. Keeping the last good render instead would leave a silently
+        // truncated prefix on screen with no indication anything was wrong.
+        .catch(() => {
+          if (!alive) return;
+          rendered.current = null;
+          setHtml("");
+        });
+    };
+
+    if (delay === 0) {
+      run();
+      return () => { alive = false; };
+    }
+    // Trailing edge: each new token cancels the pending run and re-arms, so the
+    // block always settles on the latest source, never on a stale prefix.
+    const timer = setTimeout(run, delay);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
   }, [code, lang, theme]);
 
   const copy = () => {

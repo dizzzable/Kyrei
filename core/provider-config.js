@@ -139,8 +139,18 @@ function validateProviderAccountModelIds(source, providerModels) {
   return modelIds;
 }
 
-/** Ensure every provider has one immutable primary member for legacy credentials. */
-export function normalizeProviderAccountPool(value, providerModels) {
+/**
+ * Ensure every provider has one immutable primary member for legacy credentials.
+ *
+ * @param {unknown} value
+ * @param {unknown} providerModels models this provider offers; stale per-account
+ *   `modelIds` pinned to a deleted model are dropped against this list.
+ * @param {{ defaultStrategy?: string }} [options] workspace-wide Capacity
+ *   strategy, applied only when this pool set none of its own. This is the
+ *   function the GATEWAY imports — the identically named one in
+ *   `provider-account-pool.js` is not on that path.
+ */
+export function normalizeProviderAccountPool(value, providerModels, options = {}) {
   const source = object(value);
   const rows = Array.isArray(source.members)
     ? source.members
@@ -158,7 +168,7 @@ export function normalizeProviderAccountPool(value, providerModels) {
     seen.add(member.id);
     members.push(member);
   }
-  const normalized = normalizeAccountPoolMetadata({ ...source, members });
+  const normalized = normalizeAccountPoolMetadata({ ...source, members }, options);
   const knownModelIds = providerModelIdSet(providerModels);
   return {
     ...normalized,

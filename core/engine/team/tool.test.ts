@@ -213,6 +213,43 @@ describe("buildTeamDelegateTool", () => {
     }
   });
 
+  it("aborts a wedged role once max runtime is exceeded", async () => {
+    // Regression: maxRuntimeMs only emitted a progress event and never called
+    // controller.abort(), so the documented hard ceiling capped nothing and a
+    // wedged provider stream held the run open until the user cancelled.
+    // The idle threshold stays advisory on purpose — only this one is fatal.
+    vi.useFakeTimers();
+    try {
+      const researcher = role("researcher");
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      let observedAbort = false;
+      const tools = buildTeamDelegateTool({
+        spec: spec([researcher], { timeoutMs: 1_000, idleTimeoutMs: 1_000, maxRuntimeMs: 5_000 }),
+        emit: (event) => events.push(event as never),
+        executors: [{
+          role: researcher,
+          run: async (context) => {
+            context.signal?.addEventListener("abort", () => { observedAbort = true; }, { once: true });
+            // Never settles on its own — only an abort can end this.
+            await new Promise(() => {});
+            return artifact(context.task.id);
+          },
+        }],
+      });
+      const team = tools.team_delegate as unknown as {
+        execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+      };
+
+      const pending = team.execute({ tasks: [{ id: "wedged", goal: "Wedged" }] }, { toolCallId: "wedged" });
+      await vi.advanceTimersByTimeAsync(6_000);
+      const output = JSON.parse(await pending.catch((error: Error) => JSON.stringify({ error: error.message })));
+      expect(observedAbort).toBe(true);
+      expect(JSON.stringify(output)).toMatch(/timed out|team_task_max_runtime/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a queued task healthy while another task exceeds the idle threshold", async () => {
     vi.useFakeTimers();
     try {

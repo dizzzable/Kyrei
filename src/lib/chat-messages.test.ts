@@ -8,6 +8,7 @@ import {
   hasLegacyHealHandoff,
   messageText,
   redactLegacyHealHandoff,
+  settleRunningToolParts,
   startReasoning,
   toolComplete,
   toolStart,
@@ -126,6 +127,47 @@ describe("legacy heal handoff redaction", () => {
   it("leaves normal assistant text untouched", () => {
     expect(hasLegacyHealHandoff("Normal answer")).toBe(false);
     expect(redactLegacyHealHandoff("Normal answer")).toBe("Normal answer");
+  });
+});
+
+describe("settleRunningToolParts", () => {
+  // Regression: the gateway only rewrites running tool parts when a turn ends
+  // `interrupted`. Every other terminal status persists `running: true`, the
+  // row is no longer `pending` so the store refuses to repair it, and the
+  // renderer showed a live spinner that survived a session switch and a
+  // restart.
+  it("clears running and records why, on a finished turn", () => {
+    const parts: MessagePart[] = [
+      { type: "text", text: "working on it" },
+      { type: "tool", toolCallId: "c1", name: "run_command", running: true },
+    ];
+    const settled = tools(settleRunningToolParts(parts));
+    expect(settled[0]).toMatchObject({ running: false, error: "tool_interrupted" });
+  });
+
+  it("keeps an existing error rather than masking it", () => {
+    const parts: MessagePart[] = [
+      { type: "tool", toolCallId: "c1", name: "run_command", running: true, error: "exit 1" },
+    ];
+    expect(tools(settleRunningToolParts(parts))[0]).toMatchObject({ running: false, error: "exit 1" });
+  });
+
+  it("leaves already-settled parts alone and preserves reference equality", () => {
+    const parts: MessagePart[] = [
+      { type: "text", text: "done" },
+      { type: "tool", toolCallId: "c1", name: "read_file", running: false, result: "ok" },
+    ];
+    // Same array back, so callers can skip a re-render.
+    expect(settleRunningToolParts(parts)).toBe(parts);
+  });
+
+  it("does not touch non-tool parts", () => {
+    const parts: MessagePart[] = [
+      { type: "reasoning", id: "r1", text: "thinking" },
+      { type: "tool", toolCallId: "c1", name: "read_file", running: true },
+    ];
+    const settled = settleRunningToolParts(parts);
+    expect(settled[0]).toEqual(parts[0]);
   });
 });
 

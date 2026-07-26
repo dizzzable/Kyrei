@@ -21,8 +21,30 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await server?.close();
-  await rm(dataDir, { recursive: true, force: true });
+  try {
+    await server?.close();
+  } catch {
+    /* ignore close races after aborted pipeline work */
+  }
+  // Windows and macOS both report ENOTEMPTY/EBUSY while SQLite and FTS handles
+  // drain after close. Retry with backoff rather than failing the suite on a
+  // leftover temp dir — same pattern as tests/gateway-pipeline.test.ts.
+  if (!dataDir) return;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await rm(dataDir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+      if (attempt === 7) {
+        if (code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM") return;
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  }
 });
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

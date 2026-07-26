@@ -34,28 +34,12 @@ export const MODEL_FAMILIES = Object.freeze([
 ]);
 
 /**
- * Subscription shield — transport hygiene for paid seats (see engine subscription-shield).
- * Retained solely to neutralize old saved values during configuration migration.
- * @param {unknown} raw
- */
-export function normalizeSubscriptionShieldConfig(raw) {
-  void raw;
-  return {
-    enabled: false,
-    mode: "off",
-    minIntervalMs: 0,
-    connectTimeoutMs: 0,
-    headerTimeoutMs: 0,
-    inactivityTimeoutMs: 0,
-    maxConnectionsPerOrigin: 4,
-  };
-}
-
-/**
  * @param {unknown} raw
  */
 export function normalizeCapacityConfig(raw) {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const source = /** @type {{ enabled?: boolean, strategy?: string, preferSpare?: boolean, crossProviderFamily?: boolean }} */ (
+    raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
+  );
   const strategy = CAPACITY_STRATEGIES.includes(source.strategy) ? source.strategy : "spare-first";
   return {
     enabled: source.enabled !== false,
@@ -64,9 +48,48 @@ export function normalizeCapacityConfig(raw) {
     preferSpare: source.preferSpare !== false,
     /** Search other providers for same model family after local accounts exhaust. */
     crossProviderFamily: source.crossProviderFamily !== false,
-    /** Transport + pacing protection for expensive subscription seats. */
-    subscriptionShield: normalizeSubscriptionShieldConfig(source.subscriptionShield),
+    // Any legacy `subscriptionShield` block is dropped here: the transport layer
+    // it configured was removed in v0.7.7 and provider SDKs own their own
+    // streaming lifecycle. Normalizing it away keeps it out of the saved config.
   };
+}
+
+/**
+ * Translate the workspace-wide Capacity strategy into a provider account-pool
+ * strategy.
+ *
+ * The pool is the only layer that can honour these: it holds per-account
+ * inflight counts, `lastUsedAt`, weight, priority and cooldown. The runtime
+ * targets this router orders carry none of that, which is why the strategy
+ * could never mean anything here — `least-used` sorted every candidate by the
+ * same missing field and left the order untouched.
+ *
+ * Mappings follow the shipped hint text: "spare-first" is *burn the active
+ * account and keep a reserve", i.e. fill-first, and "priority" is documented as
+ * "same as fill-first for pools". With `preferSpare` off the user is asking for
+ * no cold reserve at all, so load is spread instead.
+ *
+ * @param {{ strategy?: string, preferSpare?: boolean }} [capacity]
+ * @returns {"balanced" | "round-robin" | "fill-first" | "least-used"}
+ */
+export function poolStrategyForCapacity(capacity) {
+  const source = capacity && typeof capacity === "object" ? capacity : {};
+  switch (source.strategy) {
+    case "spare-first":
+    case "fill-first":
+    case "priority":
+      // `preferSpare` only means anything against a reserve-keeping strategy —
+      // "keep at least one key cold". Checking it before the switch threw away
+      // an explicitly chosen round-robin or least-used, which it says nothing
+      // about.
+      return source.preferSpare === false ? "balanced" : "fill-first";
+    case "round-robin":
+      return "round-robin";
+    case "least-used":
+      return "least-used";
+    default:
+      return "balanced";
+  }
 }
 
 export function familyIdForModel(modelId) {
@@ -121,27 +144,23 @@ export function orderCapacityCandidates(options) {
     return dedupeRuntimeTargets([...primary, ...fallbacks]);
   }
 
-  // spare-first / fill-first: keep primary order (pool already ordered that way)
-  // least-used: sort by lastUsed if present on target metadata
-  let orderedPrimary = primary;
-  if (capacity.strategy === "least-used") {
-    orderedPrimary = [...primary].sort((a, b) => {
-      const la = Number(a.lastUsedAt) || 0;
-      const lb = Number(b.lastUsedAt) || 0;
-      return la - lb;
-    });
-  } else if (capacity.strategy === "round-robin") {
-    // Pool router already RR-ordered; keep as-is
-    orderedPrimary = primary;
-  }
-
-  // Family backups after all same-provider accounts; then explicit fallbacks
-  return dedupeRuntimeTargets([...orderedPrimary, ...family, ...fallbacks]);
+  // `primary` arrives already ordered by the provider's account pool, which is
+  // the only layer holding the per-account state (inflight, lastUsedAt, weight,
+  // priority, cooldown) that a strategy needs. Runtime targets carry none of
+  // it, so re-sorting here cannot implement any strategy — an earlier
+  // `least-used` branch sorted every candidate by an absent `lastUsedAt`, read
+  // it as 0, and left the order exactly as it found it.
+  //
+  // `capacity.strategy` reaches the pool as its default instead; see
+  // poolStrategyForCapacity. What is left for this layer is the chain order:
+  // every account on the primary provider, then same-family models elsewhere,
+  // then the explicit fallbacks.
+  return dedupeRuntimeTargets([...primary, ...family, ...fallbacks]);
 }
 
 /**
  * Find sibling models on other providers that share a family with primaryModelId.
- * @param {object} config gateway config
+ * @param {{ providers?: Array<{ id?: string, enabled?: boolean, models?: Array<{ id?: string }> }> }} config gateway config
  * @param {string} primaryProviderId
  * @param {string} primaryModelId
  * @returns {Array<{ providerId: string, modelId: string }>}

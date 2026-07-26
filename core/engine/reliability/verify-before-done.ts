@@ -48,12 +48,23 @@ export function turnHadFileMutations(parts: readonly ToolLikePart[]): boolean {
     if (!MUTATE_TOOLS.has(p.name ?? "")) return false;
     if (p.error) return false;
     const r = typeof p.result === "string" ? p.result : "";
-    // Apply/write failures often still return a string without throwing.
-    if (/Правка отклонена|denied|failed|error/i.test(r) && !/post-edit-verify/i.test(r)) {
-      // Still count as mutation if file was written: "Файл обновлён" / "created"
-      if (/Файл (создан|обновлён)|file (created|updated)|Applied \d+ file/i.test(r)) return true;
-      return false;
-    }
+    // Success is recognised POSITIVELY, from the exact strings the tools emit,
+    // and anchored to the start of the result. The previous version searched
+    // the whole result for `denied|failed|error` and then tried to recover with
+    // a phrase test — so `Updated src/components/AppErrorBoundary.tsx` tripped
+    // on the FILENAME, failed the recovery test (which required the literal
+    // word "file"), and the verify gate was skipped for a real edit. It also
+    // counted a patch that never applied, because the new malformed-patch
+    // message contains none of those words.
+    // write_file: `Created <rel> (N chars)` / `Updated <rel>`.
+    if (/^(?:Created|Updated|Wrote|Deleted|Moved) \S/m.test(r)) return true;
+    // edit_file: one `A`/`M`/`D` diff header per file, e.g. `M  src/a.ts (+3 −1)`.
+    if (/^[AMD] {2}\S/m.test(r)) return true;
+    if (/^Applied \d+ file/m.test(r)) return true;
+    // Explicit refusals: nothing was written.
+    if (/^Edit rejected \[|could not parse the patch|was denied because/m.test(r)) return false;
+    // Anything else (an empty result, an unrecognised shape) is treated as a
+    // mutation so the gate errs toward verifying rather than skipping.
     return true;
   });
 }

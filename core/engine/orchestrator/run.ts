@@ -90,9 +90,12 @@ import { buildSystemPromptParts } from "./system-prompt.js";
 import {
   applyHistoryCacheBreakpoint,
   applyToolCacheBreakpoint,
+  isAnthropicProtocol,
+  joinSystemParts,
   mergeProviderOptions,
   packSystemForCache,
 } from "../prompt/cache-packing.js";
+import { estimateRequestBaseline } from "../context/tokens.js";
 import type { ToolName } from "../prompt/tool-descriptions.js";
 import { resolvePersonalityText } from "../personality-catalog.js";
 import { buildStopWhen, type GuardStopReason } from "./stop-conditions.js";
@@ -439,8 +442,8 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
 
   // Provider SDKs own their native streaming lifecycle. Kyrei must not install
   // a second timeout/abort layer: long reasoning is valid and ends only on a
-  // real transport failure, failover, or explicit user cancellation. Legacy
-  // Subscription Shield settings are deliberately ignored here.
+  // real transport failure, failover, or explicit user cancellation. This is
+  // why the fetch wrapper is the identity and no timeout is threaded through.
   const identifyEngine = false;
   const providerFetchFor = (_accountId?: string, baseFetch?: typeof fetch): typeof fetch | undefined => baseFetch;
 
@@ -879,8 +882,8 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
   const turnParams = resolveTurnModelParams(opts.modelParams, cfg.defaultReasoningEffort);
   const explicitWorkerProviderOptions = explicitWorker
     ? (explicitWorker.reasoningTransport
-      ? buildProviderOptions(explicitWorker.protocol, turnParams, explicitWorker.reasoningTransport)
-      : buildProviderOptions(explicitWorker.protocol, turnParams))
+      ? buildProviderOptions(explicitWorker.protocol, turnParams, explicitWorker.reasoningTransport, explicitWorker.model)
+      : buildProviderOptions(explicitWorker.protocol, turnParams, undefined, explicitWorker.model))
     : undefined;
   const primaryContextWindowOverride = boundedModelOverride(
     opts.modelParams?.contextWindowOverride,
@@ -918,8 +921,8 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     const { entry, target, credentials } = candidate;
     const providerOptions = mergeProviderOptions(
       target.reasoningTransport
-        ? buildProviderOptions(target.protocol, turnParams, target.reasoningTransport)
-        : buildProviderOptions(target.protocol, turnParams),
+        ? buildProviderOptions(target.protocol, turnParams, target.reasoningTransport, target.model)
+        : buildProviderOptions(target.protocol, turnParams, undefined, target.model),
       sessionPromptCacheOptions(target.protocol, opts.sessionId, entry.id),
     );
     // Manual limits are scoped to the selected primary model. A fallback can
@@ -963,10 +966,23 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     const compactionWindow = contextWindow !== undefined
       ? inputContextWindow(contextWindow, maxOutputTokens)
       : undefined;
+    // Tool schemas never appear in `messages` on any protocol, so they are
+    // always missing from the estimate. The system prompt is protocol-dependent:
+    // Anthropic packs it AS system messages spliced into `messages` (see
+    // packSystemForCache below), where estimateMessages already counts it —
+    // adding it here too would double-count and force premature compaction.
+    // Everywhere else it travels via `instructions` and must be added.
+    const systemIsInMessages = isAnthropicProtocol(target.protocol);
+    const baselineTokens = await estimateRequestBaseline({
+      model: entry.id,
+      ...(systemParts && !systemIsInMessages ? { system: joinSystemParts(systemParts) } : {}),
+      toolSchemas: tools,
+    });
     const compactionPrepareStep = ccr && compactionWindow !== undefined
       ? makePrepareStep(cfg, {
           model: entry.id,
           window: compactionWindow,
+          baselineTokens,
           ccr,
           workspace: opts.workspace,
           sessionId: opts.sessionId,
@@ -1129,7 +1145,14 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
             stopWhen,
           }
         : {}),
-      ...(callTools && workspaceReady
+      // Gated on `callTools` alone, NOT on `workspaceReady`: MCP tools are
+      // wired without a workspace, and their default policy is `ask`. Tying the
+      // approval callback to the workspace meant a workspace-less session with
+      // globally configured MCP servers executed `mcp_call` with no prompt at
+      // all. MCP approval never reads the workspace (it keys on
+      // `mcp_call:<serverId>:<tool>`), and every workspace-dependent branch
+      // either returns "not applicable" or fails closed.
+      ...(callTools
         ? {
             toolApproval: async ({ toolCall, messages }: {
               toolCall: { toolCallId: string; toolName: string; input: unknown };
@@ -1151,7 +1174,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
               const evaluation = await evaluateToolApproval({
                 toolName: toolCall.toolName,
                 args: toolCall.input,
-                workspace: opts.workspace!,
+                workspace: opts.workspace ?? "",
                 config: cfg,
               });
               if (!evaluation || evaluation.decision === "allow") return "not-applicable" as const;

@@ -49,7 +49,10 @@ describe("pipeline mission controls", () => {
     expect(pipelineRunControls(mission("paused"))).toEqual(["resume", "cancel"]);
     expect(pipelineRunControls(mission("interrupted"))).toEqual(["resume", "cancel"]);
     expect(pipelineRunControls(mission("budget_paused"))).toEqual(["cancel"]);
-    expect(pipelineRunControls(mission("blocked"))).toEqual(["cancel"]);
+    // Blocked is recoverable: the usual causes are the runner's per-advance
+    // transition budget and a momentarily unavailable engine export, so a
+    // mission must not be destroyed by one of them.
+    expect(pipelineRunControls(mission("blocked"))).toEqual(["resume", "cancel"]);
   });
 
   it("only exposes approval actions when the durable approval stage is waiting", () => {

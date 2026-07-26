@@ -150,6 +150,33 @@ export function mergeSessionsPreferEngine(jsonSessions, engineSessions) {
 }
 
 /**
+ * Part types the engine mirror can represent. Anything else — notably `image`
+ * and `file` — is dropped by `toEngineParts`, so a message carrying them must
+ * keep the JSON copy of its parts.
+ */
+const MIRRORED_PART_TYPES = new Set(["text", "reasoning", "tool", "approval"]);
+
+/**
+ * Engine wins on the fields it mirrors; JSON backfills the rest.
+ *
+ * The mirror serializes a fixed field allowlist (`mirrorSessionMessages` in
+ * gateway.js) and a closed union of part types, so `imageAttachments`,
+ * `attachments`, `errorCode`, `usage` and `modelId` never make the round trip.
+ * Returning the engine row wholesale therefore deleted a user's pasted
+ * screenshots from the conversation on reload — on the DEFAULT configuration,
+ * since enginePrimary is on by default.
+ */
+function mergeMessagePreferEngine(engineMessage, jsonMessage) {
+  if (!jsonMessage) return engineMessage;
+  const merged = { ...jsonMessage, ...engineMessage };
+  const jsonParts = Array.isArray(jsonMessage.parts) ? jsonMessage.parts : null;
+  if (jsonParts?.some((part) => part && !MIRRORED_PART_TYPES.has(part.type))) {
+    merged.parts = jsonParts;
+  }
+  return merged;
+}
+
+/**
  * Prefer engine messages when they are at least as long as JSON (mirror caught up).
  * Otherwise keep JSON (authoritative for in-flight turns / approvals).
  *
@@ -160,6 +187,15 @@ export function preferMessagesForPrimary(jsonMessages, engineMessages) {
   const json = Array.isArray(jsonMessages) ? jsonMessages : [];
   const eng = Array.isArray(engineMessages) ? engineMessages : [];
   if (eng.length === 0) return { messages: json, source: "json" };
-  if (eng.length >= json.length) return { messages: eng, source: "engine" };
+  if (eng.length >= json.length) {
+    const byId = new Map();
+    for (const message of json) {
+      if (message && typeof message.id === "string") byId.set(message.id, message);
+    }
+    return {
+      messages: eng.map((message) => mergeMessagePreferEngine(message, byId.get(message?.id))),
+      source: "engine",
+    };
+  }
   return { messages: json, source: "json" };
 }

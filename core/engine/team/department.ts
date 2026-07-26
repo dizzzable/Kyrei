@@ -220,11 +220,17 @@ function createTaskDeadline(
     }, timeoutMs);
   };
   armIdleTimeout();
+  // Mirrors team/tool.ts: the idle threshold is advisory and re-arms, but
+  // maxRuntime is the hard ceiling and has to actually abort. Notifying without
+  // aborting left department mode with a cap in name only.
   const maxRuntimeId = controller.signal.aborted
     ? undefined
     : setTimeout(() => {
       if (controller.signal.aborted) return;
-      onThreshold(timeoutError(maxRuntimeMs, "runtime"));
+      const error = timeoutError(maxRuntimeMs, "runtime");
+      onThreshold(error);
+      if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
+      controller.abort(error);
     }, maxRuntimeMs);
   return {
     signal: controller.signal,

@@ -1,0 +1,33 @@
+{
+  // Typecheck the untyped JS half of the product: core/*.js (including the
+  // ~12k-line gateway.js that owns auth, secret storage and every HTTP route)
+  // and electron/**. Until this existed the only static check on that code was
+  // `node --check`, i.e. a syntax parse.
+  //
+  // Deliberately lenient to start: the point of the first pass is to surface
+  // real mistakes (typos, wrong arity, impossible comparisons), not to force a
+  // 35k-line annotation project. Ratchet the flags up as the count comes down.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true
+  },
+  "include": ["core/*.js", "electron/**/*.js"],
+  // `.dist/index.mjs` is a gitignored esbuild artifact that a dynamic import in
+  // gateway.js drags into the program. Its errors describe generated code, and
+  // worse, its presence changed the total — so the ratchet count depended on
+  // whether someone had run `build:engine`. The script filters it too, belt and
+  // braces, and `check:js-types` now runs after `build:engine` in `gate`.
+  "exclude": ["**/*.test.js", "core/engine/.dist", "core/engine/.dist/**"]
+}

@@ -52,7 +52,7 @@ export const Message = memo(function Message({
   onFileReviewFileDecision?: (path: string, accept: boolean) => Promise<void> | void;
   onFileReviewHunkDecision?: (path: string, hunkId: string, accept: boolean) => Promise<void> | void;
 }) {
-  const { showReasoning } = useUiSettings();
+  const { showReasoning, richRendering } = useUiSettings();
   const { t } = useI18n();
 
   if (message.role === "user") {
@@ -116,6 +116,16 @@ export const Message = memo(function Message({
         if (part.type === "reasoning") return null;
         const text = sanitizeAssistantDisplayText(part.text);
         if (!text.trim()) return null;
+        // "Rich message rendering" was written to settings and read by nobody:
+        // Markdown rendered unconditionally. Off means the raw text, which is
+        // also the cheap path for very long transcripts.
+        if (!richRendering) {
+          return (
+            <p key={i} className="whitespace-pre-wrap break-words text-[13.5px] leading-6 text-foreground">
+              {text}
+            </p>
+          );
+        }
         return <Markdown key={i} text={text} />;
       })}
       {message.fileReview && (

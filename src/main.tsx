@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import { App } from "./App";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { applyTheme, getTheme } from "./lib/theme";
 import { restoreCustomTheme } from "./lib/vscode-theme";
 import { applyScale, getUiSettings } from "./store/settings";
@@ -21,10 +22,14 @@ installWindowDropGuard();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <I18nProvider>
-      <TooltipProvider>
-        <App />
-      </TooltipProvider>
-    </I18nProvider>
+    {/* Outermost on purpose: it must survive a throw from I18nProvider or the
+        design-system providers too, so it renders its own bare-DOM fallback. */}
+    <AppErrorBoundary>
+      <I18nProvider>
+        <TooltipProvider>
+          <App />
+        </TooltipProvider>
+      </I18nProvider>
+    </AppErrorBoundary>
   </StrictMode>,
 );

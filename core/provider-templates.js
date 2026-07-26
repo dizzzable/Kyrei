@@ -63,7 +63,7 @@ export const PROVIDER_TEMPLATES = Object.freeze([
     docsURL: "https://console.anthropic.com/settings/keys",
     protocol: "anthropic-messages",
     baseURL: "https://api.anthropic.com/v1",
-    models: [{ id: "claude-sonnet-4-20250514" }, { id: "claude-haiku-4-20250414" }],
+    models: [{ id: "claude-opus-5" }, { id: "claude-sonnet-5" }, { id: "claude-haiku-4-5" }],
   }),
   template({
     id: "gemini",

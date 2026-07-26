@@ -131,8 +131,20 @@ export function normalizeProviderAccountMember(value, fallbackId = "account-1", 
 }
 
 /** Normalize the complete public pool configuration without retaining credentials. */
-export function normalizeProviderAccountPool(value) {
+/**
+ * @param {unknown} value
+ * @param {object} [options]
+ * @param {string} [options.defaultStrategy]
+ *   Applied when this pool has no strategy of its own. The global
+ *   Capacity → Strategy setting supplies it, so a provider that was never
+ *   configured individually follows the workspace-wide preference instead of
+ *   silently falling back to "balanced".
+ */
+export function normalizeProviderAccountPool(value, options = {}) {
   const source = object(value);
+  const explicit = PROVIDER_ACCOUNT_POOL_STRATEGIES.includes(source.strategy)
+    || source.strategy === "spare-first"
+    || source.strategy === "least-used";
   const rows = Array.isArray(source.members) ? source.members : [];
   const seen = new Set();
   const members = [];
@@ -145,7 +157,7 @@ export function normalizeProviderAccountPool(value) {
   return {
     version: 1,
     enabled: source.enabled === true,
-    strategy: normalizeStrategy(source.strategy),
+    strategy: normalizeStrategy(explicit ? source.strategy : options.defaultStrategy),
     sessionAffinity: source.sessionAffinity !== false,
     members,
   };

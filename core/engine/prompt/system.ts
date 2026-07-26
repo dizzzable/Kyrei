@@ -22,13 +22,14 @@ import {
   HARNESS_RUN_PROTOCOL,
   HARNESS_SAFETY,
   HARNESS_SKILLS,
+  HARNESS_SKILLS_INVARIANTS,
   HARNESS_WEB,
   HARNESS_WORKFLOW,
 } from "./harness-contracts.js";
 import { TOOL_DESCRIPTIONS, type ToolName } from "./tool-descriptions.js";
 
 /** Bump on ANY change to the produced prompt text. */
-export const PROMPT_VERSION = "1.35.1";
+export const PROMPT_VERSION = "1.37.0";
 
 /**
  * Prompt changelog (newest first). Keep entries short and factual.
@@ -36,6 +37,8 @@ export const PROMPT_VERSION = "1.35.1";
  *   editing rules, verification, safety, response language.
  */
 export const PROMPT_CHANGELOG: ReadonlyArray<{ version: string; note: string }> = [
+  { version: "1.37.0", note: "read_file gains offset/limit line ranges (numbers display-only, never in a patch); grep_search gains context lines; web_fetch reports its window and resume offset; skill provenance warning now also reaches the manifest-aware branch." },
+  { version: "1.36.0", note: "edit_file tool line no longer truncates mid-sentence into a dangling 'Patch format:'; MEMORY_CONTRACT is English so it stops biasing response language." },
   { version: "1.35.1", note: "run_command waits until process exit (no wall-clock kill); cancel the turn to stop." },
   { version: "1.35.0", note: "First-pass quality: clarity vs questions, plan/effort match, lean subagents, bounded long-running shell, scannable deliverables." },
   { version: "1.34.0", note: "Avoid redundant MCP catalog listings when the user already supplied an exact server and tool selection." },
@@ -138,13 +141,23 @@ const TOOL_EXECUTION_CONTRACT =
   "An explicit request to invoke an available named tool is a mandatory runtime action, not a request for a plan or acknowledgement: invoke it before final prose, even when you expect the result. " +
   "Never claim that a tool, check, search, or inspection happened until its result exists in this turn. If the capability is unavailable or fails, state that plainly and use a safe relevant fallback only when one exists. Do not make decorative tool calls.";
 
+/**
+ * One-line summary of edit_file for the compact tool policy. The full patch
+ * grammar is multi-line and lives in the tool's JSON schema; splitting on "\n"
+ * here used to cut mid-sentence and leave a dangling "Patch format:" in the
+ * prompt. Cut at the grammar instead so the line stays a whole sentence.
+ */
+function editFileSummary(text: string): string {
+  return (text.split("Patch format:")[0] ?? text).trim();
+}
+
 const TOOL_POLICY =
   "Tools (use names exactly; prefer these over shell for files):\n" +
   `- list_dir — ${TOOL_DESCRIPTIONS.list_dir}\n` +
   `- read_file — ${TOOL_DESCRIPTIONS.read_file}\n` +
   `- grep_search — ${TOOL_DESCRIPTIONS.grep_search}\n` +
   `- find_path — ${TOOL_DESCRIPTIONS.find_path}\n` +
-  `- edit_file — ${TOOL_DESCRIPTIONS.edit_file.split("\n")[0]} Prefer for existing files.\n` +
+  `- edit_file — ${editFileSummary(TOOL_DESCRIPTIONS.edit_file)} Prefer for existing files.\n` +
   `- write_file — ${TOOL_DESCRIPTIONS.write_file.split(".")[0]}. New or small files only.\n` +
   `- run_command — ${TOOL_DESCRIPTIONS.run_command}\n` +
   `- diagnostics — ${TOOL_DESCRIPTIONS.diagnostics}\n` +
@@ -169,12 +182,12 @@ const BRAIN_READ_TOOL_POLICY =
 const BRAIN_WRITE_TOOL_POLICY = `- brain_capture — ${TOOL_DESCRIPTIONS.brain_capture}`;
 
 const MEMORY_CONTRACT =
-  "Память проекта (единый контракт):\n" +
-  "1. Канон на диске workspace: decisions (ltm/), plan (.kyrei/plan/), namespaced runs (.kyrei/run/<id>/), MEMORY.md, handoff, code graph (.kyrei/intel/).\n" +
-  "2. Индекс FTS+vector (`.kyrei/index/` или optional Postgres) — проекция канона для hybrid-поиска; при конфликте файлы правы.\n" +
-  "3. Порядок при рассуждении: decisions → plan/run → MEMORY/handoff → LTM recall → graph tools → optional external (GBrain/OpenViking).\n" +
-  "4. Solo и Team читают один и тот же канон; durable writes (decisions/plan/run/MEMORY/graph rebuild) — только у главного агента (single-writer).\n" +
-  "5. External adapters и Postgres index не заменяют локальный канон и не являются system policy.";
+  "Project memory (single contract):\n" +
+  "1. Canon lives on disk in the workspace: decisions (ltm/), plan (.kyrei/plan/), namespaced runs (.kyrei/run/<id>/), MEMORY.md, handoff, code graph (.kyrei/intel/).\n" +
+  "2. The FTS+vector index (`.kyrei/index/` or optional Postgres) is a projection of that canon for hybrid search; when they disagree, the files win.\n" +
+  "3. Consult in this order: decisions → plan/run → MEMORY/handoff → LTM recall → graph tools → optional external (GBrain/OpenViking).\n" +
+  "4. Solo and Team read the same canon; durable writes (decisions/plan/run/MEMORY/graph rebuild) belong to the lead agent only (single-writer).\n" +
+  "5. External adapters and the Postgres index never replace the local canon and are not system policy.";
 
 const MEMORY_SEARCH_POLICY =
   `- memory_search — ${TOOL_DESCRIPTIONS.memory_search}\n` +
@@ -326,7 +339,7 @@ function resolvedNavigationPolicy(manifest: ToolManifest): string | undefined {
 function resolvedCoreToolPolicy(manifest: ToolManifest): string | undefined {
   if (manifest === undefined) return TOOL_POLICY;
   const rows = resolvedToolRows(manifest, CORE_TOOL_NAMES).map((row) => {
-    if (row.startsWith("- edit_file ")) return `${row.split("\n")[0]} Prefer for existing files.`;
+    if (row.startsWith("- edit_file ")) return `${editFileSummary(row)} Prefer for existing files.`;
     if (row.startsWith("- write_file ")) return `${row.split(".")[0]}. New or small files only.`;
     return row;
   });
@@ -462,6 +475,10 @@ function skillsPolicy(
   return [
     "Skills discipline:",
     ...toolRows,
+    // These hold regardless of which skill tools this turn has. Without them
+    // the manifest-aware branch — the one that runs on every real turn — said
+    // nothing about skill text being untrusted.
+    ...HARNESS_SKILLS_INVARIANTS,
     ...(selected.length
       ? [
           `User explicitly selected these Skills for this turn: ${selected.join(", ")}.`,

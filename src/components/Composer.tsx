@@ -7,8 +7,17 @@ import {
   dequeueQueuedPrompt,
   enqueueQueuedPrompt,
   removeQueuedPrompt,
+  shouldAutoDrain,
+  MAX_AUTO_DRAIN_ATTEMPTS,
 } from "@/store/composer-queue";
 import { subscribeComposerSkillSelection } from "@/store/composer-skills";
+import {
+  browseBackward,
+  browseForward,
+  deriveUserHistory,
+  isBrowsingHistory,
+  resetBrowseState,
+} from "@/store/composer-input-history";
 import { useAtom } from "@/store/atom";
 import { setUiSetting, useUiSettings } from "@/store/settings";
 import { addSnippet, useSnippets } from "@/store/snippets";
@@ -36,7 +45,7 @@ import {
 import { cn } from "@/lib/utils";
 import { shouldRestoreComposerFocus } from "@/lib/composer-focus";
 import { useI18n } from "@/i18n";
-import type { ProviderProfile, SkillInfo } from "@/lib/types";
+import type { ChatMessage, MessagePart, ProviderProfile, SkillInfo } from "@/lib/types";
 
 const MAX_SELECTED_SKILLS = 32;
 
@@ -45,6 +54,13 @@ interface ComposerProps {
   stopping?: boolean;
   disabled?: boolean;
   sessionId?: string | null;
+  /**
+   * Live session messages, used to derive the up-arrow history ring.
+   * Derived lazily on keypress rather than per render: `messages` changes
+   * identity on every streamed token, so memoizing here would cost O(n) per
+   * token on a long transcript for a feature used a few times a session.
+   */
+  messages?: readonly ChatMessage[];
   model: string;
   provider: string;
   providers?: readonly ProviderProfile[];
@@ -81,6 +97,7 @@ export function Composer({
   stopping = false,
   disabled,
   sessionId,
+  messages,
   model,
   provider,
   providers = [],
@@ -115,9 +132,29 @@ export function Composer({
   const speechSupported = isSpeechSynthesisSupported();
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const restoreComposerFocus = useRef(false);
-  const history = useRef<string[]>([]);
-  const browse = useRef<number | null>(null);
-  const draining = useRef(false);
+  /** Per-entry auto-drain attempts; a remount resets it, as documented. */
+  const drainAttempts = useRef<{ id: string | null; count: number }>({ id: null, count: 0 });
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  /**
+   * Newest-first user turns for this session; computed only when browsing.
+   *
+   * Text lives in `parts` — `ChatMessage` has no `text` or `content` field.
+   * Reading those made every entry the empty string, so the ring was always
+   * empty and the up-arrow did nothing at all. The old prop type declared them
+   * as OPTIONAL, which is why it still compiled.
+   */
+  const sessionHistory = useCallback(
+    () => deriveUserHistory(
+      messagesRef.current ?? [],
+      (message) => message.parts
+        .filter((part): part is Extract<MessagePart, { type: "text" }> => part.type === "text")
+        .map((part) => part.text)
+        .join("")
+        .trim(),
+    ),
+    [],
+  );
   const activeDraftScope = useRef(sessionId);
   const valueRef = useRef(value);
   const busy = streaming || stopping;
@@ -217,7 +254,7 @@ export function Composer({
     setAttachments(restored.attachments);
     setExpanded(restored.text.includes("\n"));
     setSelectedSkillIds([]);
-    browse.current = null;
+    resetBrowseState(sessionId);
   }, [sessionId]);
   useEffect(() => () => {
     stashSessionDraft(activeDraftScope.current, valueRef.current, attachmentsRef.current);
@@ -228,7 +265,7 @@ export function Composer({
       const text = typeof detail?.text === "string" ? detail.text : "";
       updateDraft(text);
       setExpanded(text.includes("\n"));
-      browse.current = null;
+      resetBrowseState(sessionId);
       window.requestAnimationFrame(() => {
         const input = ref.current;
         if (!input) return;
@@ -280,17 +317,27 @@ export function Composer({
 
   // Auto-drain the queue one prompt at a time whenever the session goes idle.
   useEffect(() => {
-    if (busy || !sessionId || queued.length === 0 || draining.current) return;
-    draining.current = true;
-    const head = dequeueQueuedPrompt(sessionId);
-    draining.current = false;
-    if (head) {
-      const images = head.attachments
-        ?.filter((a) => a.kind === "image" && a.dataBase64 && a.mediaType)
-        .map((a) => ({ name: a.label, mediaType: a.mediaType!, data: a.dataBase64! }));
-      onSend(head.text, head.skillIds, images?.length ? images : undefined);
-    }
-  }, [busy, sessionId, queued.length, onSend]);
+    if (!sessionId || !shouldAutoDrain({ isBusy: busy, queueLength: queued.length })) return;
+    // `disabled` encodes exactly the conditions App.send early-returns on
+    // (approval blocked, file review blocked, rewinding, no session). Dequeuing
+    // first and calling onSend second meant that in any of those states the
+    // entry was removed and then silently dropped — queue a prompt while
+    // streaming, have the turn end `awaiting_approval`, and it vanished.
+    if (disabled) return;
+    const head = queued[0];
+    if (!head) return;
+    // The store documents a retry cap that the previous inline drain ignored.
+    // Past it the entry stays queued for a manual send rather than spinning.
+    const attempt = drainAttempts.current.id === head.id ? drainAttempts.current.count : 0;
+    if (attempt >= MAX_AUTO_DRAIN_ATTEMPTS) return;
+    drainAttempts.current = { id: head.id, count: attempt + 1 };
+    const removed = dequeueQueuedPrompt(sessionId);
+    if (!removed) return;
+    const images = removed.attachments
+      ?.filter((a) => a.kind === "image" && a.dataBase64 && a.mediaType)
+      .map((a) => ({ name: a.label, mediaType: a.mediaType!, data: a.dataBase64! }));
+    onSend(removed.text, removed.skillIds, images?.length ? images : undefined);
+  }, [busy, disabled, sessionId, queued, onSend]);
 
   const submit = () => {
     const text = value.trim();
@@ -326,8 +373,9 @@ export function Composer({
       setSelectedSkillIds([]);
       return;
     }
-    if (text && history.current[history.current.length - 1] !== text) history.current.push(text);
-    browse.current = null;
+    // No local ring to append to: the sent turn becomes part of the session's
+    // messages, which is where the history is derived from.
+    resetBrowseState(sessionId);
     onSend(text, selectedSkillIds, imagePayload.length ? imagePayload : undefined);
     for (const a of attachmentsRef.current) revokePreview(a);
     updateDraft("", []);
@@ -561,18 +609,22 @@ export function Composer({
       // sendOnEnter === false → plain Enter inserts a newline (default behavior).
     }
 
-    const h = history.current;
+    // History is derived from the session's own messages, so it survives a
+    // remount, a reconnect, and messages that predate this panel — none of
+    // which the previous submit-only useRef could do.
     if (e.key === "ArrowUp") {
-      if (!h.length || value.includes("@")) return;
-      if (browse.current === null) { if (value.trim() !== "") return; browse.current = h.length; }
-      browse.current = Math.max(0, browse.current - 1);
+      if (value.includes("@")) return;
+      if (!isBrowsingHistory(sessionId) && value.trim() !== "") return;
+      const ring = sessionHistory();
+      const text = browseBackward(sessionId, value, ring);
+      if (text === null) return;
       e.preventDefault();
-      updateDraft(h[browse.current]);
-    } else if (e.key === "ArrowDown" && browse.current !== null) {
+      updateDraft(text);
+    } else if (e.key === "ArrowDown" && isBrowsingHistory(sessionId)) {
+      const step = browseForward(sessionId, sessionHistory());
+      if (!step) return;
       e.preventDefault();
-      browse.current += 1;
-      if (browse.current >= h.length) { browse.current = null; updateDraft(""); }
-      else updateDraft(h[browse.current]);
+      updateDraft(step.text);
     }
   };
 
@@ -677,7 +729,7 @@ export function Composer({
             data-composer-input
             onChange={(e) => {
               updateDraft(e.target.value);
-              browse.current = null;
+              resetBrowseState(sessionId);
               refreshMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onKeyDown={onKeyDown}

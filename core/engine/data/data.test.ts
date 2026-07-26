@@ -179,6 +179,49 @@ describe("SQLite MemoryStore + FTS", () => {
     // A term absent from the doc must still exclude it (AND semantics hold).
     expect((await mem.search("durable postgres")).length).toBe(0);
   });
+
+  it("ranks by bm25 rather than insertion order", async () => {
+    // Regression: the query had no ORDER BY, so FTS5 returned rows in rowid
+    // order and LIMIT handed back the oldest-inserted matches. The weak match
+    // is inserted first here specifically so insertion order would fail.
+    const { db } = openDb(":memory:");
+    const mem = createSqliteMemoryStore(db);
+    const base = { scope: "project", kind: "memory", contentHash: "h", updatedAt: nowIso() } as const;
+    await mem.upsertDoc({
+      ...base,
+      id: "weak",
+      path: "/ws/weak.md",
+      title: "Unrelated notes",
+      body: `deployment checklist mentions rollback once. ${"filler sentence about unrelated topics. ".repeat(40)}`,
+    });
+    await mem.upsertDoc({
+      ...base,
+      id: "strong",
+      path: "/ws/strong.md",
+      title: "Rollback procedure",
+      body: "rollback rollback rollback — the rollback procedure for a failed deploy.",
+    });
+
+    const hits = await mem.search("rollback");
+    expect(hits.map((h) => h.id)).toEqual(["strong", "weak"]);
+    expect(hits[0]!.relevance).toBeGreaterThan(hits[1]!.relevance);
+  });
+
+  it("reports relevance in (0,1] with 1 for the best hit", async () => {
+    const { db } = openDb(":memory:");
+    const mem = createSqliteMemoryStore(db);
+    await mem.upsertDoc({
+      id: "only",
+      scope: "project",
+      kind: "memory",
+      path: "/ws/only.md",
+      body: "a single matching document about widgets",
+      contentHash: "h",
+      updatedAt: nowIso(),
+    });
+    const [hit] = await mem.search("widgets");
+    expect(hit?.relevance).toBe(1);
+  });
 });
 
 describe("SQLite VectorStore (brute-force cosine)", () => {

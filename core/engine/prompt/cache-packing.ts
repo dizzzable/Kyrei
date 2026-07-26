@@ -13,6 +13,7 @@
 import type { ModelMessage, ToolSet } from "ai";
 import type { ProviderProtocol } from "../types.js";
 import type { ProviderOptionsMap } from "../provider/build.js";
+import { isWorkingStatePinMessage } from "../context/working-state.js";
 
 export interface SystemPromptParts {
   /** Immutable-ish harness + tools + mode (prompt-cache friendly). */
@@ -43,9 +44,16 @@ const ANTHROPIC_CACHE = {
   },
 };
 
-function isAnthropic(protocol: ProviderProtocol | string | undefined): boolean {
+/**
+ * Anthropic is the one protocol where the system prompt is packed as system
+ * *messages* spliced into `messages` rather than sent via `instructions` —
+ * which changes who is responsible for counting it toward the context budget.
+ */
+export function isAnthropicProtocol(protocol: ProviderProtocol | string | undefined): boolean {
   return protocol === "anthropic-messages";
 }
+
+const isAnthropic = isAnthropicProtocol;
 
 /** Join parts deterministically (same as buildSystemPrompt for snapshot parity). */
 export function joinSystemParts(parts: SystemPromptParts): string {
@@ -171,14 +179,22 @@ export function applyHistoryCacheBreakpoint(
   protocol?: ProviderProtocol | string,
 ): ModelMessage[] {
   if (!isAnthropic(protocol) || messages.length === 0) return messages;
-  const last = messages[messages.length - 1] as ModelMessage & {
-    providerOptions?: ProviderOptionsMap;
-  };
+  // Anchor on the last message that is NOT the working-state pin. The pin is
+  // rebuilt every step (its body carries goal/failures, which change), and
+  // withWorkingStatePin strips the previous one before appending the new one —
+  // so anchoring on the pin meant the message carrying the breakpoint was
+  // deleted on the very next step and history was never cached past step 1.
+  // Anchored one message earlier, the breakpoint survives the swap and the
+  // volatile pin simply sits after the cached prefix, where it belongs.
+  let index = messages.length - 1;
+  while (index >= 0 && isWorkingStatePinMessage(messages[index]!)) index--;
+  if (index < 0) return messages;
+  const anchor = messages[index] as ModelMessage & { providerOptions?: ProviderOptionsMap };
   const cached = {
-    ...last,
-    providerOptions: mergeProviderOptions(last.providerOptions, ANTHROPIC_CACHE),
+    ...anchor,
+    providerOptions: mergeProviderOptions(anchor.providerOptions, ANTHROPIC_CACHE),
   } as ModelMessage;
-  return [...messages.slice(0, -1), cached];
+  return [...messages.slice(0, index), cached, ...messages.slice(index + 1)];
 }
 
 /** Human-readable routing note for docs / settings (Wave B3 companion). */

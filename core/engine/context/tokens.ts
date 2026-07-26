@@ -61,12 +61,45 @@ export function messageText(m: ModelMessage): string {
   return out.join("\n");
 }
 
-export async function estimateMessages(messages: ModelMessage[], model: string): Promise<number> {
+/**
+ * `baselineTokens` covers everything in the request that is not a message: the
+ * system prompt and the tool-schema block. On Anthropic the system prompt is
+ * packed as a system *message* and would be counted, but every other protocol
+ * sends it via `instructions`, and no protocol puts tool schemas in `messages`
+ * at all. Omitting them under-reported the prompt by several thousand tokens,
+ * and before the first step there is no provider usage to correct the estimate
+ * — so a restored long session could overflow on its very first request.
+ */
+export async function estimateMessages(
+  messages: ModelMessage[],
+  model: string,
+  baselineTokens = 0,
+): Promise<number> {
   const kind = pickTokenizer(model);
-  let sum = 0;
+  let sum = Math.max(0, Math.floor(baselineTokens));
   for (const m of messages) {
     sum += await encodeCount(messageText(m), kind);
     sum += PER_MESSAGE_OVERHEAD;
+  }
+  return sum;
+}
+
+/** Token cost of a request's non-message parts, for `estimateMessages`. */
+export async function estimateRequestBaseline(input: {
+  model: string;
+  system?: string;
+  toolSchemas?: unknown;
+}): Promise<number> {
+  const kind = pickTokenizer(input.model);
+  let sum = 0;
+  if (input.system) sum += await encodeCount(input.system, kind);
+  if (input.toolSchemas !== undefined) {
+    // Serialized schemas are what the provider actually bills for.
+    try {
+      sum += await encodeCount(JSON.stringify(input.toolSchemas) ?? "", kind);
+    } catch {
+      /* non-serializable tool set → skip rather than block the estimate */
+    }
   }
   return sum;
 }

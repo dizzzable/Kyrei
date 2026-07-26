@@ -75,6 +75,25 @@ function argString(args: unknown, keys: string[]): string {
   return "";
 }
 
+/**
+ * `read_file` and `grep_search` results carry a prompt-hardening banner that
+ * marks their content as untrusted for the model. It is control-plane text, not
+ * something the user asked to see, so strip it before the tool card renders —
+ * the same reason redactLegacyHealHandoff exists.
+ */
+/**
+ * The engine emits the banner as up to four lines: the warning, `file: <rel>`,
+ * and — for a ranged read — `lines: …` plus `more: …`. Stripping only the first
+ * two left the tool card opening with "line numbers are display-only; do not
+ * include them in an edit_file patch", which is exactly the model-directed text
+ * this exists to hide.
+ */
+const UNTRUSTED_BANNER_RE = /^# Workspace file contents \(untrusted[^\n]*\n(?:file: [^\n]*\n)?(?:lines: [^\n]*\n)?(?:more: [^\n]*\n)?/;
+
+export function stripUntrustedBanner(result: unknown): unknown {
+  return typeof result === "string" ? result.replace(UNTRUSTED_BANNER_RE, "") : result;
+}
+
 export function buildToolView(part: ToolPart, t: ChatTranslator): ToolView {
   const meta = TOOL_META[part.name];
   const isFileEdit = FILE_EDIT.has(part.name);
@@ -84,8 +103,9 @@ export function buildToolView(part: ToolPart, t: ChatTranslator): ToolView {
     argString(part.args, ["path", "file", "filepath"]) ||
     argString(part.args, ["command", "query", "pattern", "search_term", "url", "slug", "question", "documentId", "skillId", "id"]);
 
-  const errorText = part.error || extractToolErrorMessage(part.result);
-  const detail = status === "error" ? errorText : (isFileEdit ? "" : formatToolResultSummary(part.result, t));
+  const result = stripUntrustedBanner(part.result);
+  const errorText = part.error || extractToolErrorMessage(result);
+  const detail = status === "error" ? errorText : (isFileEdit ? "" : formatToolResultSummary(result, t));
 
   const inlineDiff = part.inlineDiff ?? "";
   const diffStats = inlineDiff ? countDiffLineStats(inlineDiff) : null;

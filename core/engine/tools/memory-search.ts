@@ -303,9 +303,12 @@ async function searchIndex(store: MemoryStore, query: string, hits: Hit[], limit
     for (const d of docs) {
       const boost =
         d.kind === "decision" ? 5 : d.kind === "plan" ? 4 : d.kind === "memory" ? 3 : 2;
+      // This used to be a flat `10 + boost`, so every FTS hit of the same kind
+      // tied and dedupeHits broke the tie alphabetically by source. Spread the
+      // band by the backend's own relevance so the ranking actually survives.
       hits.push({
         source: kindToSource(d.kind, d.path),
-        score: 10 + boost + (d.scope === "session" ? 1 : 0),
+        score: 6 + boost + d.relevance * 8 + (d.scope === "session" ? 1 : 0),
         title: d.title ?? d.id,
         snippet: clip(d.body, 280),
         path: d.path,

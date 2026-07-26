@@ -6,6 +6,22 @@
  * outage. The caller owns transport-specific probing and result shapes.
  */
 export class RuntimeHealthGate {
+  /**
+   * `classify` has three outcomes, not two: "healthy" records a last-good
+   * snapshot, "failure" advances the hysteresis counter, and anything else
+   * ("neutral") passes the observation through and resets the counter — used
+   * for states that are neither good nor an outage, such as "not installed".
+   * The default only ever returns two of them, so the contract has to be
+   * declared here or callers that use the third get flagged as wrong.
+   *
+   * @param {{
+   *   cacheTtlMs?: number,
+   *   failureThreshold?: number,
+   *   retryDelayMs?: number,
+   *   classify?: (value: any) => "healthy" | "failure" | "neutral",
+   *   now?: () => number,
+   * }} [options]
+   */
   constructor({
     cacheTtlMs = 2_000,
     failureThreshold = 2,

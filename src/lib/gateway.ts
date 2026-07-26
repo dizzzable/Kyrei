@@ -256,12 +256,46 @@ export class GatewayRequestError extends Error {
   }
 }
 
+/**
+ * Deadline for a gateway REST call. Generous enough for a cold engine load or
+ * a workspace scan, short enough that a wedged request surfaces as an error the
+ * UI can render instead of a spinner that never resolves. Streaming does not go
+ * through here — that is SSE on /api/events.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Endpoints that legitimately run for minutes: a package install, a full
+ * workspace reindex, a model-backed evaluation sweep. The 30s default aborted
+ * them CLIENT-side while the server kept working, so the UI showed
+ * `gateway_timeout` and the user retried — producing a second install or a
+ * concurrent reindex. A long deadline is still a deadline; unbounded is not.
+ */
+const LONG_REQUEST_TIMEOUT_MS = 15 * 60_000;
+const LONG_REQUEST_PATHS = [
+  "/api/memory/gbrain/install",
+  "/api/memory/gbrain/initialize",
+  "/api/memory/index/reindex",
+  "/api/evolution/evaluate",
+];
+
+export function timeoutForPath(path: string): number {
+  return LONG_REQUEST_PATHS.some((prefix) => path.startsWith(prefix))
+    ? LONG_REQUEST_TIMEOUT_MS
+    : REQUEST_TIMEOUT_MS;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   if (!GATEWAY_TOKEN) throw new GatewayRequestError("capability_unavailable");
   const method = String(init?.method ?? "GET").toUpperCase();
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
+      // Every caller is of the shape `setLoading(true); await gateway.x()`, and
+      // without a deadline a gateway that accepts the socket but never answers
+      // leaves an unbounded spinner with no way out. An explicit signal in
+      // `init` wins, so callers that need longer can still say so.
+      signal: AbortSignal.timeout(timeoutForPath(path)),
       ...init,
       headers: { "Content-Type": "application/json", "X-Kyrei-Gateway-Token": GATEWAY_TOKEN, ...(init?.headers || {}) },
     });
@@ -269,9 +303,12 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
     // Browser fetch exposes local gateway shutdown/boot races as the opaque
     // `TypeError: Failed to fetch`. Keep that detail out of the UI and give
     // callers a stable, retryable error code instead.
+    const timedOut = error instanceof DOMException && error.name === "TimeoutError";
     throw new GatewayRequestError("request_failed", {
-      detail: "gateway_unreachable",
-      serverCode: method === "GET" ? "gateway_unreachable" : "gateway_request_failed",
+      detail: timedOut ? "gateway_timeout" : "gateway_unreachable",
+      serverCode: timedOut
+        ? "gateway_timeout"
+        : method === "GET" ? "gateway_unreachable" : "gateway_request_failed",
     });
   }
   if (!res.ok) {
@@ -1243,8 +1280,21 @@ export const gateway = {
       body: JSON.stringify({ path }),
     }).then(r => r.entries),
 
-  /** Subscribe to a session's event stream. Returns an unsubscribe function. */
-  subscribe(session: string, onEvent: (event: GatewayEvent) => void): () => void {
+  /**
+   * Subscribe to a session's event stream. Returns an unsubscribe function.
+   *
+   * `onConnectionChange` exists because a dead stream used to be completely
+   * invisible: `onerror` was an empty comment trusting EventSource to
+   * reconnect. It usually does — but the gateway mints a fresh capability token
+   * per launch, so after a gateway restart every reconnect 401s with the
+   * renderer's launch-URL token and the chat is dead forever with no banner, no
+   * retry, and no reload affordance. The caller can now render that state.
+   */
+  subscribe(
+    session: string,
+    onEvent: (event: GatewayEvent) => void,
+    onConnectionChange?: (state: "open" | "reconnecting") => void,
+  ): () => void {
     if (!GATEWAY_TOKEN) throw new GatewayRequestError("capability_unavailable");
     const url = new URL(`${BASE}/api/events`);
     url.searchParams.set("session", session);
@@ -1252,10 +1302,15 @@ export const gateway = {
     // same per-launch capability in a query value accepted only on this route.
     url.searchParams.set("token", GATEWAY_TOKEN);
     const es = new EventSource(url.href);
+    es.onopen = () => onConnectionChange?.("open");
     es.onmessage = e => {
       try { onEvent(JSON.parse(e.data)); } catch { /* ignore keepalive/comments */ }
     };
-    es.onerror = () => { /* EventSource reconnects automatically. */ };
+    es.onerror = () => {
+      // CLOSED means EventSource gave up (a 401 is not retried); CONNECTING
+      // means it is retrying on its own. Both are "not receiving events".
+      onConnectionChange?.("reconnecting");
+    };
     return () => es.close();
   },
 };

@@ -6,6 +6,7 @@ import { DEFAULT_ENGINE_CONFIG } from "../types.js";
 import { estimateMessages } from "../context/tokens.js";
 import { makePrepareStep } from "./prepare-step.js";
 import type { CcrStore } from "../context/ccr.js";
+import { isWorkingStatePinMessage } from "../context/working-state.js";
 
 const fakeCcr = {
   put: async () => "hash",
@@ -209,6 +210,38 @@ describe("prepare-step handoff + LTM checkpoint", () => {
     expect(compacted.length).toBeLessThan(messages.length);
     expect(JSON.stringify(compacted)).toContain("END OF CONTEXT SUMMARY");
     expect(compacted.some((message) => String(message.content).includes(`turn 13: ${chunk}`))).toBe(true);
+  });
+
+  it("leaves a non-overflowing turn's tool history byte-identical by default", async () => {
+    // Regression: alwaysMaskToolBodies defaulted true, so pruning ran on every
+    // step regardless of overflow. The keepLast boundary advanced by one each
+    // step, rewriting one more mid-history tool message and invalidating the
+    // provider's message-prefix cache for the rest of the turn.
+    const ccr = {
+      put: async () => "sha256:" + "d".repeat(64),
+      get: async () => null,
+      has: async () => false,
+      gc: async () => ({ removed: 0, freedBytes: 0 }),
+    } as unknown as CcrStore;
+    const prepare = makePrepareStep(DEFAULT_ENGINE_CONFIG, {
+      model: "gpt-5.6-sol",
+      window: 400_000,
+      ccr,
+      workspace: ws,
+      sessionId: "sess-stable",
+    });
+    // Tool bodies large enough that the old default would have masked them,
+    // but nowhere near the soft-overflow threshold of a 400k window.
+    const body = "y".repeat(9_000);
+    const messages = Array.from({ length: 10 }, (_, index) => ({
+      role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content: `turn ${index}: ${body}`,
+    }));
+
+    const result = await prepare({ messages });
+    const returned = result?.messages ?? messages;
+    const withoutPin = returned.filter((m) => !isWorkingStatePinMessage(m));
+    expect(withoutPin).toEqual(messages);
   });
 
   it("clips a single oversized protected turn so compaction actually fits the model window", async () => {

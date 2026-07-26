@@ -3,7 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "ai";
-import { isOverflow, estimateMessages, heuristicCount, providerUsageFromSteps } from "./tokens.js";
+import {
+  isOverflow,
+  estimateMessages,
+  estimateRequestBaseline,
+  heuristicCount,
+  providerUsageFromSteps,
+} from "./tokens.js";
 import { createCcrStore, ccrHash, makeRetrieveTool } from "./ccr.js";
 import {
   pruneToolOutputs,
@@ -14,6 +20,38 @@ import {
   summarizeMiddleTurns,
   SUMMARY_END_MARKER,
 } from "./compaction.js";
+
+describe("tokens — request baseline", () => {
+  // Regression: only `messages` were counted. On every protocol except
+  // Anthropic the system prompt travels via `instructions`, and tool schemas
+  // are never in `messages` at all, so the estimate missed thousands of tokens
+  // — and on the first request there is no provider usage to correct it.
+  it("counts the system prompt and tool schemas", async () => {
+    const baseline = await estimateRequestBaseline({
+      model: "gpt-5.6-sol",
+      system: "You are a coding agent. ".repeat(200),
+      toolSchemas: { read_file: { description: "Read a file. ".repeat(50) } },
+    });
+    expect(baseline).toBeGreaterThan(500);
+  });
+
+  it("is zero when there is no system prompt and no tools", async () => {
+    expect(await estimateRequestBaseline({ model: "gpt-5.6-sol" })).toBe(0);
+  });
+
+  it("adds the baseline on top of the message estimate", async () => {
+    const messages = [{ role: "user", content: "hello" }] as ModelMessage[];
+    const bare = await estimateMessages(messages, "gpt-5.6-sol");
+    expect(await estimateMessages(messages, "gpt-5.6-sol", 1_000)).toBe(bare + 1_000);
+  });
+
+  it("survives a non-serializable tool set instead of blocking the estimate", async () => {
+    const circular: Record<string, unknown> = {};
+    circular["self"] = circular;
+    await expect(estimateRequestBaseline({ model: "gpt-5.6-sol", toolSchemas: circular }))
+      .resolves.toBe(0);
+  });
+});
 
 describe("tokens", () => {
   it("isOverflow dual-trigger soft/hard", () => {

@@ -54,6 +54,28 @@ function reasoningIndex(parts: MessagePart[], id: string | undefined): number {
   return parts.findIndex((part) => part.type === "reasoning" && part.id === id);
 }
 
+/**
+ * Clear `running` on any tool part of a turn that has finished.
+ *
+ * The gateway only rewrites running parts when a turn ends `interrupted`
+ * (`interruptedTurnParts`); every other terminal status — `error`,
+ * `max_steps`, `goal_unsatisfied`, `budget_exceeded`, `heal_handoff` — persists
+ * `running: true` verbatim, and the row is no longer `pending` so the store
+ * refuses to repair it. Rendering that as a live spinner outlived the message,
+ * the session switch, and the app restart.
+ *
+ * Returns the same array when nothing needed settling, so callers can rely on
+ * reference equality to skip re-renders.
+ */
+export function settleRunningToolParts(parts: MessagePart[]): MessagePart[] {
+  if (!parts.some((part) => part.type === "tool" && part.running)) return parts;
+  return parts.map((part) => (
+    part.type === "tool" && part.running
+      ? { ...part, running: false, error: part.error ?? "tool_interrupted" }
+      : part
+  ));
+}
+
 export function appendText(parts: MessagePart[], delta: string): MessagePart[] {
   return appendTextPart(parts, delta);
 }

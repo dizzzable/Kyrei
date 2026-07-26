@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   APPROVAL_TTL_MS,
   SessionMutationError,
@@ -192,6 +192,32 @@ function boundedSessionId(value) {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id) ? id : "";
 }
 
+/**
+ * Rename with a short retry on the transient Windows failures.
+ *
+ * `rename` onto an existing file is atomic on POSIX but not contention-free on
+ * Windows: an antivirus scan, the search indexer, or any other process holding
+ * a momentary handle on `state.json` makes it fail with EPERM/EBUSY/EACCES. The
+ * flush was then simply lost — the session's newest messages never reached
+ * disk, and the only trace was a log line. A few short retries turn almost all
+ * of those into a successful write.
+ *
+ * @param {string} from
+ * @param {string} to
+ */
+async function renameWithRetry(from, to, attempts = 5) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const transient = error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "EACCES";
+      if (!transient || attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 20));
+    }
+  }
+}
+
 function normalizeCodexThreadIds(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const next = {};
@@ -207,6 +233,7 @@ function normalizeCodexThreadIds(value) {
 function normalizeSessionRecord(value) {
   const source = value && typeof value === "object" ? value : {};
   const accountBindingWasSupplied = Object.prototype.hasOwnProperty.call(source, "providerAccountId");
+  const codexThreadIdsWasSupplied = Object.prototype.hasOwnProperty.call(source, "codexThreadIds");
   const {
     providerId: rawProviderId,
     modelId: rawModelId,
@@ -294,7 +321,16 @@ function normalizeSessionRecord(value) {
     ...(continuationSourceSessionId ? { continuationSourceSessionId } : {}),
     ...(continuationPacketVersion ? { continuationPacketVersion } : {}),
     ...(continuationCreatedAt ? { continuationCreatedAt } : {}),
-    ...(codexThreadIds ? { codexThreadIds } : {}),
+    // An explicitly supplied EMPTY map must clear, not be dropped. Omitting the
+    // key let `upsertSession`'s merge preserve the previous map, so a managed
+    // Codex session with a single account could never forget a thread id that
+    // failed to resume — every later turn retried the dead thread, re-fired the
+    // reset notice, and re-sent the recovery seed.
+    ...(codexThreadIds
+      ? { codexThreadIds }
+      : codexThreadIdsWasSupplied
+        ? { codexThreadIds: undefined }
+        : {}),
     ...(codingMode ? { codingMode } : {}),
   };
 }
@@ -307,6 +343,10 @@ export class SessionStore {
     this.maxMessages = maxMessages;
     this.flushTimer = null;
     this.flushPromise = Promise.resolve();
+    /** Set by load() when the on-disk state was unreadable; kept for diagnostics. */
+    this.loadError = null;
+    /** Set when a corrupt file could not be quarantined — never overwrite it. */
+    this.readOnly = false;
     this.state = {
       schemaVersion: SCHEMA_VERSION,
       sessions: [],
@@ -317,16 +357,74 @@ export class SessionStore {
   }
 
   async load() {
+    let raw;
     try {
-      const raw = await readFile(this.file, "utf8");
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        this.state = this.migrate(parsed);
+      raw = await readFile(this.file, "utf8");
+    } catch (error) {
+      // A missing file is a fresh workspace. Anything else (EACCES, EISDIR, an
+      // I/O error) is NOT, and must not be mistaken for one.
+      if (error?.code !== "ENOENT") {
+        this.loadError = error;
+        // The comment above was right and the code did not act on it: without
+        // going read-only, the very next touch() flushed empty defaults over a
+        // file we merely FAILED TO READ. A transient EBUSY/EPERM from an
+        // antivirus or indexer lock — routine on Windows — silently destroyed
+        // every session. Refusing to write is always recoverable; writing is
+        // not.
+        this.readOnly = true;
+        console.error(`[kyrei session-store] cannot read ${this.file}, refusing to write:`, error?.message ?? error);
       }
-    } catch {
-      // No prior state (fresh workspace) — keep defaults.
+      return this.state;
     }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      // The file exists but is unparseable — a crash or disk-full mid-write.
+      // This used to be swallowed, and because the very next touch() flushes
+      // the empty default state over it, a single truncated byte destroyed
+      // every session and message with no backup. Preserve the bytes first;
+      // only then is continuing with defaults a recoverable state.
+      await this.#quarantineCorrupt(error);
+      return this.state;
+    }
+    // Valid JSON that is not a state object (`null`, `123`, an array) is just
+    // as corrupt as unparseable bytes, and used to fall through to the same
+    // silent overwrite.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      await this.#quarantineCorrupt(new Error(`expected an object, found ${Array.isArray(parsed) ? "an array" : typeof parsed}`));
+      return this.state;
+    }
+    this.state = this.migrate(parsed);
     return this.state;
+  }
+
+  /**
+   * Preserve an unusable state file before continuing from defaults. If it
+   * cannot be preserved, refuse to write at all — losing history silently is
+   * worse than not persisting this run.
+   * @param {unknown} error
+   */
+  async #quarantineCorrupt(error) {
+    this.loadError = error;
+    const detail = error instanceof Error ? error.message : String(error);
+    // Millisecond resolution plus a random suffix: two loads in the same
+    // millisecond would otherwise overwrite the first preserved copy.
+    const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomBytes(3).toString("hex")}`;
+    const quarantine = `${this.file}.corrupt-${stamp}`;
+    try {
+      await rename(this.file, quarantine);
+      console.error(
+        `[kyrei session-store] ${this.file} is corrupt (${detail}); `
+        + `moved to ${quarantine} and starting from an empty state. The original bytes are recoverable.`,
+      );
+    } catch (moveError) {
+      this.readOnly = true;
+      console.error(
+        `[kyrei session-store] ${this.file} is corrupt and could not be quarantined `
+        + `(${moveError?.message ?? moveError}); persistence is disabled for this run so the file is not overwritten.`,
+      );
+    }
   }
 
   migrate(parsed) {
@@ -724,7 +822,9 @@ export class SessionStore {
     // Debounce disk writes so bursts of events collapse into one flush.
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      this.flush().catch(() => {});
+      this.flush().catch((error) => {
+        console.error("[kyrei session-store] scheduled flush failed:", error?.message ?? error);
+      });
     }, 150);
     if (typeof this.flushTimer.unref === "function") this.flushTimer.unref();
   }
@@ -735,15 +835,35 @@ export class SessionStore {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    // Set when load() found a corrupt file it could not preserve. Writing here
+    // would destroy the only copy of the user's history.
+    if (this.readOnly) return;
     const write = async () => {
       await mkdir(dirname(this.file), { recursive: true });
       // Unique temp name (Windows-safe): concurrent flushes must not share state.json.tmp.
       const tmp = `${this.file}.${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 12)}.tmp`;
-      await writeFile(tmp, JSON.stringify(this.state, null, 2), "utf8");
-      await rename(tmp, this.file);
+      let handle;
+      try {
+        handle = await open(tmp, "wx", 0o600);
+        await handle.writeFile(JSON.stringify(this.state, null, 2), "utf8");
+        // Without the fsync the rename can land before the data does, so a
+        // power loss leaves a correctly-named but truncated file — the exact
+        // corruption the quarantine in load() now has to clean up after.
+        await handle.sync();
+        await handle.close();
+        handle = null;
+        await renameWithRetry(tmp, this.file);
+      } finally {
+        if (handle) await handle.close().catch(() => {});
+        await rm(tmp, { force: true }).catch(() => {});
+      }
     };
     const operation = this.flushPromise.then(write, write);
-    this.flushPromise = operation.catch(() => {});
+    // A persistently failing flush used to be completely silent, so the app
+    // looked healthy while nothing was being saved.
+    this.flushPromise = operation.catch((error) => {
+      console.error("[kyrei session-store] flush failed:", error?.message ?? error);
+    });
     return operation;
   }
 

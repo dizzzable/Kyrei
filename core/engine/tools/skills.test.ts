@@ -166,9 +166,20 @@ describe("Agent Skills tool", () => {
 
     const continued = await execute(tools, { id: "skill-review", offset });
     expect(continued).toContain("continued at character");
-    const finalOffset = Number(continued.match(/offset (\d+)/)?.[1]);
-    const final = await execute(tools, { id: "skill-review", offset: finalOffset });
-    expect(`${first}\n${continued}\n${final}`).toContain("-END");
+
+    // Page to the end rather than assuming a fixed page count: how much content
+    // fits per page depends on the header, so hard-coding three calls encoded
+    // the header's length into an unrelated test.
+    let pages = `${first}\n${continued}`;
+    let next = Number(continued.match(/offset (\d+)/)?.[1]);
+    for (let guard = 0; Number.isInteger(next) && guard < 20; guard += 1) {
+      const page = await execute(tools, { id: "skill-review", offset: next });
+      pages += `\n${page}`;
+      const following = Number(page.match(/offset (\d+)/)?.[1]);
+      if (!Number.isInteger(following) || following === next) break;
+      next = following;
+    }
+    expect(pages).toContain("-END");
     expect(continued).not.toContain("linked local documents");
   });
 

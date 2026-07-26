@@ -289,6 +289,45 @@ describe("PipelineRunStore", () => {
       .toBe("budget_paused");
   });
 
+  it("resumes a blocked run and re-arms its blocked stages", async () => {
+    // Regression: blocked was a terminal trap. The run-level edge
+    // blocked -> running was legal, but resume() refused the status and
+    // advance() only looks at `pending` stages, so a transient block (runner
+    // transition budget exhausted, an engine export momentarily missing)
+    // destroyed a mission permanently — Cancel was the only way out.
+    const dataDir = await root();
+    const store = new PipelineRunStore({ dataDir });
+    await store.create(input("blocked-recovery"));
+    await store.start("blocked-recovery");
+    await store.updateStage("blocked-recovery", "research", {
+      status: "blocked",
+      error: { code: "action_executor_unavailable" },
+    });
+    const blocked = await store.transition("blocked-recovery", "blocked", { reason: "action_executor_unavailable" });
+    expect(blocked.status).toBe("blocked");
+
+    const resumed = await store.resume("blocked-recovery");
+    expect(resumed.status).toBe("running");
+    const stage = resumed.stages.find((s) => s.id === "research");
+    // Re-armed so advance() will pick it up again, with the stale block reason
+    // cleared rather than carried forward.
+    expect(stage?.status).toBe("pending");
+    expect(stage?.error ?? null).toBeNull();
+
+    // Durable across a reopen.
+    expect((await new PipelineRunStore({ dataDir }).load("blocked-recovery"))?.status).toBe("running");
+  });
+
+  it("still refuses to resume a terminal or budget-exhausted run", async () => {
+    const store = new PipelineRunStore({ dataDir: await root() });
+    await store.create(input("no-resume"));
+    await store.start("no-resume");
+    await store.transition("no-resume", "budget_paused", { reason: "pipeline_budget_exhausted" });
+    await expect(store.resume("no-resume")).rejects.toThrow("pipeline_resume_invalid");
+    await store.cancel("no-resume");
+    await expect(store.resume("no-resume")).rejects.toThrow("pipeline_resume_invalid");
+  });
+
   it("keeps terminal runs immutable and turns unsuccessful writer exits into uncertain state", async () => {
     const store = new PipelineRunStore({ dataDir: await root() });
     await store.create(input("terminal-guard-run"));

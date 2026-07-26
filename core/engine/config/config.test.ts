@@ -102,7 +102,7 @@ describe("resolveEngineConfig (task 2.6)", () => {
   });
 
   it("normalizes explicit child idle and max-runtime limits", () => {
-    const { config, warnings } = resolveEngineConfig({
+    const { config, warnings, rejections } = resolveEngineConfig({
       delegation: { timeoutMs: 45_000, idleTimeoutMs: 60_000, maxRuntimeMs: 30_000 },
     });
     expect(config.delegation).toEqual({
@@ -112,7 +112,12 @@ describe("resolveEngineConfig (task 2.6)", () => {
       maxRuntimeMs: 60_000,
     });
     expect(warnings.some((warning) => warning.includes("legacy alias"))).toBe(true);
-    expect(warnings.some((warning) => warning.includes("maxRuntimeMs < idleTimeoutMs"))).toBe(true);
+    // The clamp is a REJECTION — the configured 30s is not in force — so it has
+    // to reach the user, not just the log. The alias rename is not: the value
+    // the user set still applies under its current name.
+    expect(rejections).toEqual([
+      { path: "delegation.maxRuntimeMs", message: expect.stringContaining("idleTimeoutMs") },
+    ]);
   });
 
   it("preserves advisory delegation leases up to one hour", () => {
@@ -437,5 +442,176 @@ describe("resolveEngineConfig (task 2.6)", () => {
     expect(() => resolveEngineConfig("nonsense")).not.toThrow();
     expect(() => resolveEngineConfig([1, 2, 3])).not.toThrow();
     expect(resolveEngineConfig(42).config).toEqual(DEFAULT_ENGINE_CONFIG);
+  });
+
+  describe("rejections are separated from migration notices", () => {
+    // `warnings` is the full diagnostic log and is dominated by successful
+    // migrations, which are noise to a user. `rejections` carries only the
+    // settings that were REFUSED, so the UI can say "this is not in force"
+    // without also reporting every legacy key it quietly rewrote.
+    it("reports a refused leaf with its dotted path and leaves migrations out", () => {
+      const { warnings, rejections } = resolveEngineConfig({
+        maxToolCalls: 12, // legacy alias → migrated, NOT a rejection
+        memory: { index: { enabled: true, connectionString: "" } },
+      });
+
+      expect(warnings.some((w) => w.includes("maxToolCalls"))).toBe(true);
+      expect(rejections.map((r) => r.path)).toEqual(["memory.index.connectionString"]);
+      expect(rejections.every((r) => !r.path.includes("maxToolCalls"))).toBe(true);
+      // Every rejection must also stay in the log, so nothing is lost.
+      for (const rejection of rejections) {
+        expect(warnings.some((w) => w.includes(rejection.path))).toBe(true);
+      }
+    });
+
+    it("reports no rejections for a clean config", () => {
+      expect(resolveEngineConfig({ maxSteps: 12 }).rejections).toEqual([]);
+      expect(resolveEngineConfig({}).rejections).toEqual([]);
+      expect(resolveEngineConfig(undefined).rejections).toEqual([]);
+    });
+  });
+
+  describe("partial recovery is leaf-granular", () => {
+    // Regression: salvage pruned by `issue.path[0]`, so one bad leaf reset the
+    // whole top-level block. Clearing the Postgres connection string in
+    // Settings writes "", which fails z.string().min(1), and every memory.*
+    // setting reverted to defaults on every turn — silently, since the
+    // warnings are only console.warn'd.
+    it("keeps sibling memory settings when one leaf is invalid", () => {
+      const { config, warnings } = resolveEngineConfig({
+        memory: {
+          index: { enabled: true, connectionString: "" },
+          ltm: { enabled: true },
+          recall: { k: 9 },
+        },
+      });
+
+      expect(warnings.some((w) => w.includes("memory.index.connectionString"))).toBe(true);
+      // The offending leaf is defaulted…
+      expect(config.memory.index.connectionString).toBe(DEFAULT_ENGINE_CONFIG.memory.index.connectionString);
+      // …and its siblings survive.
+      expect(config.memory.index.enabled).toBe(true);
+      expect(config.memory.ltm.enabled).toBe(true);
+      expect(config.memory.recall.k).toBe(9);
+    });
+
+    it("drops only the offending array element, not the whole array", () => {
+      // A bad MCP server id used to discard the entire `mcp` block, silently
+      // disabling every configured server.
+      const { config } = resolveEngineConfig({
+        mcp: {
+          enabled: true,
+          servers: [
+            { id: "good-one", command: "node" },
+            { id: "has spaces and is invalid", command: "node" },
+            { id: "good-two", command: "node" },
+          ],
+        },
+      });
+
+      expect(config.mcp.enabled).toBe(true);
+      expect(config.mcp.servers.map((server) => server.id)).toEqual(["good-one", "good-two"]);
+    });
+
+    it("fails permission rules closed rather than pruning them", () => {
+      // normalizePermissions runs before the zod parse and coerces an unknown
+      // action to `deny`, so a malformed rule is tightened, not dropped. That
+      // is deliberate and must stay that way — pruning would silently widen
+      // access.
+      const { config } = resolveEngineConfig({
+        permissions: {
+          rules: [
+            { pattern: "^run_command:npm test$", action: "allow" },
+            { pattern: "^write_file:", action: "not-a-real-action" },
+            { pattern: "^run_command:git push$", action: "deny" },
+          ],
+        },
+      });
+
+      expect(config.permissions.rules.map((rule) => rule.action)).toEqual(["allow", "deny", "deny"]);
+    });
+
+    it("keeps user deny rules when an allow-once path is over-long", () => {
+      // The gateway injects protectedPathAllowOnce from the model's own
+      // approval args on every later turn of a session. An entry past the
+      // schema's 500-char bound used to fail the whole `permissions` block, and
+      // salvage replaced it with the defaults — erasing every user deny rule.
+      // The gateway now refuses such an entry; this pins the engine side so a
+      // stale poisoned config cannot widen access either.
+      const { config } = resolveEngineConfig({
+        permissions: {
+          terminal: "off",
+          rules: [{ pattern: "^run_command:", action: "deny" }],
+          protectedPathAllowOnce: ["src/ok.ts", "x".repeat(600)],
+        },
+      });
+
+      expect(config.permissions.terminal).toBe("off");
+      expect(config.permissions.rules).toEqual([{ pattern: "^run_command:", action: "deny" }]);
+      expect(config.permissions.protectedPathAllowOnce ?? []).not.toContain("x".repeat(600));
+    });
+
+    it("keeps unrelated top-level blocks intact", () => {
+      const { config } = resolveEngineConfig({
+        maxSteps: 24,
+        compression: { protectLastN: 9 },
+        memory: { index: { connectionString: "" } },
+      });
+
+      expect(config.maxSteps).toBe(24);
+      expect(config.compression.protectLastN).toBe(9);
+    });
+  });
+});
+
+describe("array salvage survives an element with several problems", () => {
+  // Regression: zod reports one issue per bad FIELD, so a single malformed
+  // element produced several issues at the SAME index. Splicing as each one
+  // arrived removed that index repeatedly and deleted the element's innocent
+  // neighbours — and because the retry then succeeded, the truncated array was
+  // accepted and persisted with nothing in warnings or rejections to say so.
+  it("drops only the bad element when it has two invalid fields", () => {
+    const { config, rejections } = resolveEngineConfig({
+      mcp: {
+        enabled: true,
+        servers: [
+          { id: "bad id with spaces", command: "" },
+          { id: "good-one", command: "node" },
+        ],
+      },
+    });
+
+    expect(config.mcp.servers.map((server) => server.id)).toEqual(["good-one"]);
+    expect(rejections.every((rejection) => rejection.path.startsWith("mcp.servers.0"))).toBe(true);
+  });
+
+  it("drops the right elements when several are bad at non-adjacent indices", () => {
+    const { config } = resolveEngineConfig({
+      mcp: {
+        enabled: true,
+        servers: [
+          { id: "bad one", command: "" },
+          { id: "keep-a", command: "node" },
+          { id: "also bad", command: "" },
+          { id: "keep-b", command: "node" },
+        ],
+      },
+    });
+
+    expect(config.mcp.servers.map((server) => server.id)).toEqual(["keep-a", "keep-b"]);
+  });
+
+  it("still salvages when the only bad element is the last one", () => {
+    const { config } = resolveEngineConfig({
+      mcp: {
+        enabled: true,
+        servers: [
+          { id: "keep-a", command: "node" },
+          { id: "bad tail", command: "" },
+        ],
+      },
+    });
+
+    expect(config.mcp.servers.map((server) => server.id)).toEqual(["keep-a"]);
   });
 });

@@ -16,11 +16,13 @@ import {
   Palette,
   Network,
   Plus,
+  ShieldAlert,
   SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
 import { gateway } from "@/lib/gateway";
+import { sanitizeConfigRejections } from "@/lib/config-rejections";
 import { rebaseImportedPipelines } from "@/lib/pipeline-import";
 import type {
   AppConfig,
@@ -70,6 +72,7 @@ import {
 import { LANGUAGES, useI18n, setLang, type Lang } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { importPermissionRules } from "@/lib/permission-rules";
+import { ENGINE_FIELD_DEFAULTS } from "@/lib/engine-field-defaults";
 
 interface SettingsProps {
   config: AppConfig;
@@ -142,6 +145,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
   const ui = useUiSettings();
   const sttSupported = isSpeechRecognitionSupported();
   const ttsSupported = isSpeechSynthesisSupported();
+
+  // Derived, never state: it must track the config the gateway last returned,
+  // and the gateway recomputes it on every save. Bounded because the list is
+  // rendered in full and a pathological config could produce hundreds.
+  const rejections = sanitizeConfigRejections(config.engineConfigRejections);
 
   const [provider, setProvider] = useState(config.provider);
   const [model, setModel] = useState(config.model);
@@ -877,6 +885,34 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
             <div className="mx-auto w-full max-w-5xl">
+              {/*
+                Shown on EVERY section, not just Advanced: a rejected leaf can
+                belong to any of them, and the whole point is that the field the
+                user is looking at may not be the value in force. This used to
+                be a console.warn in the main process — invisible.
+              */}
+              {rejections.length > 0 && (
+                <div
+                  role="alert"
+                  className="mb-4 rounded-lg border border-danger/40 bg-danger/10 px-3.5 py-3 text-[13px]"
+                >
+                  <div className="flex items-center gap-2 font-semibold text-danger">
+                    <ShieldAlert size={15} />
+                    {t("settings.configRejected.title", { count: rejections.length })}
+                  </div>
+                  <p className="mt-1 text-secondary">{t("settings.configRejected.body")}</p>
+                  <ul className="mt-2 space-y-1">
+                    {rejections.map((rejection) => (
+                      <li key={`${rejection.path}:${rejection.message}`} className="text-secondary">
+                        {/* Validator output: a config path and its reason, not translatable copy. i18n-data-ok */}
+                        <code className="text-foreground">{rejection.path || "engine"}</code>
+                        {" — "}
+                        {rejection.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {visibleSection === "model" && (
                 <ModelSettings
                   config={config}
@@ -939,10 +975,11 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                       <Field label={t("settings.protectedPaths.label")} hint={t("settings.protectedPaths.hint")} stacked>
                         <textarea
                           className="min-h-[72px] w-full rounded-md border border-border-soft bg-elevated/40 px-2.5 py-2 font-mono text-[12px] text-foreground"
-                          value={(Array.isArray(getEngineField("permissions.protectedPaths", []))
-                            ? (getEngineField("permissions.protectedPaths", []) as string[])
-                            : []
-                          ).join("\n")}
+                          value={(() => {
+                            const fallback = ENGINE_FIELD_DEFAULTS["permissions.protectedPaths"];
+                            const current = getEngineField("permissions.protectedPaths", fallback);
+                            return (Array.isArray(current) ? (current as string[]) : [...fallback]).join("\n");
+                          })()}
                           onChange={(event) => {
                             const lines = event.target.value
                               .split("\n")
@@ -1386,7 +1423,7 @@ export function Settings({ config, onClose, onSaved, initialSection = "model" }:
                           <BoolField
                             label={t("settings.compression.summaryUseLlm.label")}
                             hint={t("settings.compression.summaryUseLlm.hint")}
-                            value={Boolean(getEngineField("compression.summaryUseLlm", false))}
+                            value={Boolean(getEngineField("compression.summaryUseLlm", ENGINE_FIELD_DEFAULTS["compression.summaryUseLlm"]))}
                             onChange={(value) => setEngineField("compression.summaryUseLlm", value)}
                           />
                           <NumberField

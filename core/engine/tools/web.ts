@@ -64,13 +64,15 @@ function searchMetadata(query: string, limit: number | undefined): Record<string
   return { queryLength: query.length, limit: limit ?? DEFAULT_SEARCH_LIMIT };
 }
 
-function urlMetadata(raw: string, maxChars: number | undefined): Record<string, unknown> {
+function urlMetadata(raw: string, maxChars: number | undefined, offset?: number): Record<string, unknown> {
   const url = new URL(raw);
   return {
     origin: url.origin,
     pathDepth: url.pathname.split("/").filter(Boolean).length,
     urlLength: raw.length,
     maxChars: maxChars ?? DEFAULT_MAX_CHARS,
+    // Which window of an untrusted page entered the context, not just how much.
+    ...(offset ? { offset } : {}),
   };
 }
 
@@ -151,12 +153,13 @@ export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): 
       description: TOOL_DESCRIPTIONS.web_fetch,
       inputSchema: z.object({
         url: z.string().url().describe("Public http(s) URL returned by web_search or supplied by the user."),
-        maxChars: z.number().int().min(1_000).max(60_000).optional(),
+        maxChars: z.number().int().min(1_000).max(60_000).optional().describe("Maximum characters of page text to return (default 14000)."),
+        offset: z.number().int().min(0).optional().describe("Character offset to resume from. A truncated result reports the exact offset to pass here for the next chunk."),
       }),
-      execute: async ({ url, maxChars }, { toolCallId }) => {
+      execute: async ({ url, maxChars, offset }, { toolCallId }) => {
         const started = Date.now();
         const correlation = { sessionId: options.sessionId, toolCallId };
-        const metadata = urlMetadata(url, maxChars);
+        const metadata = urlMetadata(url, maxChars, offset);
         if (containsSensitiveOutbound(url, options.sensitiveValues)) {
           await audit(options.audit, correlation, { tool: "web_fetch", metadata, decision: "deny", status: "denied", durationS: (Date.now() - started) / 1000 });
           return SENSITIVE_OUTBOUND_MESSAGE;
@@ -168,7 +171,7 @@ export function buildWebTools(cfg: EngineConfig, options: WebToolOptions = {}): 
         }
         await audit(options.audit, correlation, { tool: "web_fetch", metadata, decision, status: "start" });
         try {
-          const page = await browser.fetch(url, maxChars);
+          const page = await browser.fetch(url, maxChars, offset);
           await audit(options.audit, correlation, {
             tool: "web_fetch",
             metadata: {

@@ -95,6 +95,16 @@ export interface MemoryDoc {
   updatedAt: string;
 }
 
+/**
+ * A search result. `relevance` is min-max normalized to (0, 1] within a single
+ * result set — 1 is the best hit of that query — so callers can rank across
+ * backends without knowing whether the score came from FTS5 bm25 (lower is
+ * better) or Postgres ts_rank (higher is better).
+ */
+export interface MemoryHit extends MemoryDoc {
+  relevance: number;
+}
+
 export interface MemoryStore {
   upsertDoc(doc: MemoryDoc): Promise<void>;
   getDoc(id: string): Promise<MemoryDoc | null>;
@@ -103,8 +113,33 @@ export interface MemoryStore {
     kind?: MemoryDoc["kind"];
     workspace?: string;
   }): Promise<MemoryDoc[]>;
-  search(query: string, opts?: { scope?: MemoryDoc["scope"]; limit?: number }): Promise<MemoryDoc[]>;
+  /**
+   * Ordered best-first. Implementations MUST rank; an unranked LIMIT returns
+   * arbitrary rows (insertion order), not relevant ones.
+   *
+   * `match` defaults to "all" (every term must appear) — right for an explicit
+   * model-issued query where precision matters. "any" ORs the terms and leans
+   * on the ranker to sort them, which is what automatic recall needs: ANDing a
+   * whole natural-language sentence matches nothing.
+   */
+  search(
+    query: string,
+    opts?: { scope?: MemoryDoc["scope"]; limit?: number; match?: "all" | "any" },
+  ): Promise<MemoryHit[]>;
   removeDoc(id: string): Promise<void>;
+}
+
+/** Min-max normalize raw backend scores (higher = better) into (0, 1]. */
+export function normalizeRelevance<T>(rows: readonly T[], rawScore: (row: T) => number): Array<T & { relevance: number }> {
+  if (!rows.length) return [];
+  const scores = rows.map(rawScore).map((s) => (Number.isFinite(s) ? s : 0));
+  const max = Math.max(...scores);
+  const min = Math.min(...scores);
+  const span = max - min;
+  return rows.map((row, i) => ({
+    ...row,
+    relevance: span > 0 ? 0.25 + 0.75 * ((scores[i]! - min) / span) : 1,
+  }));
 }
 
 export interface VectorHit {

@@ -184,7 +184,7 @@ describe("system prompt (versioned, task 2.5)", () => {
     expect(decisions).toContain("record_decision");
     expect(decisions).toContain("query_decisions");
     expect(decisions).toContain("durable architectural");
-    expect(decisions).toContain("Память проекта");
+    expect(decisions).toContain("Project memory (single contract)");
 
     const planning = buildSystemPrompt({ hasTools: true, hasPlanningTools: true, workspace: "/w" })!;
     expect(planning).toContain("plan_read");

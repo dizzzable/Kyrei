@@ -640,7 +640,28 @@ export class CodexAppServerConnector {
     }
   }
 
-  async runTurn({ threadId, prompt, images = [], workspace, model, modelParams, accountId, onThread, onEvent, signal } = {}) {
+  /**
+   * Run one turn against the Codex App Server.
+   *
+   * @param {object} [options]
+   * @param {string} [options.threadId] Thread to resume; empty starts a new one.
+   * @param {string} [options.prompt]
+   * @param {Array<{ path?: string }>} [options.images]
+   * @param {string} [options.workspace]
+   * @param {string} [options.model]
+   * @param {unknown} [options.modelParams]
+   * @param {string} [options.accountId]
+   * @param {(threadId: string) => unknown} [options.onThread] Called with the id of a newly opened thread.
+   * @param {(event: unknown) => unknown} [options.onEvent]
+   * @param {AbortSignal} [options.signal]
+   * @param {string} [options.resumeSeed]
+   *   Transcript to replay into a replacement thread. Used ONLY when a supplied
+   *   `threadId` could not be resumed — Codex owns the history, so without this
+   *   a dropped thread is silent amnesia.
+   * @param {(info: { threadId?: string, reason: string }) => unknown} [options.onThreadReset]
+   *   Called when `threadId` was rejected and a new thread had to be opened.
+   */
+  async runTurn({ threadId, prompt, images = [], workspace, model, modelParams, accountId, onThread, onEvent, signal, resumeSeed, onThreadReset } = {}) {
     if (typeof prompt !== "string") throw connectorError("codex_app_server_prompt_invalid", "Codex prompt is invalid");
     if (typeof workspace !== "string" || !workspace.trim()) {
       throw connectorError("codex_app_server_workspace_required", "Codex requires a workspace");
@@ -739,6 +760,12 @@ export class CodexAppServerConnector {
     try {
       if (signal?.aborted) throw Object.assign(new Error("interrupted"), { name: "AbortError" });
       signal?.addEventListener?.("abort", abort, { once: true });
+      // A failed resume means Codex no longer holds this session's history —
+      // it restarted, or the thread expired or was garbage-collected. Starting
+      // a fresh thread is the only way forward, but doing it silently is total
+      // invisible amnesia: unlike every other provider, this path never sends
+      // `messages`, so Codex's own thread WAS the conversation.
+      let threadReset = false;
       if (activeThreadId) {
         try {
           await client.request("thread/resume", {
@@ -746,8 +773,14 @@ export class CodexAppServerConnector {
             cwd: workspace,
             ...codexThreadTuningParams(nativeModelParams, model),
           });
-        } catch {
+        } catch (error) {
+          threadReset = true;
           activeThreadId = "";
+          try {
+            await onThreadReset?.({ threadId, reason: safeErrorText(error?.message || "thread/resume failed") });
+          } catch {
+            /* the caller's bookkeeping must not abort the turn */
+          }
         }
       }
       if (!activeThreadId) {
@@ -762,7 +795,18 @@ export class CodexAppServerConnector {
         if (!SAFE_ID.test(activeThreadId)) throw connectorError("codex_app_server_thread_invalid", "Codex returned an invalid thread id");
         await onThread?.(activeThreadId);
       }
-      const input = [{ type: "text", text: prompt }];
+      const input = [];
+      // Re-seed the replacement thread with the conversation Codex lost, so the
+      // turn continues instead of starting from nothing. Only on a reset: a
+      // genuinely new session has nothing to replay.
+      if (threadReset && typeof resumeSeed === "string" && resumeSeed.trim()) {
+        input.push({ type: "text", text: resumeSeed });
+        emit({
+          type: "reasoning.delta",
+          payload: { source: "kyrei-status", text: "Codex lost this session's thread; continuing on a new one seeded with the conversation so far.\n" },
+        });
+      }
+      input.push({ type: "text", text: prompt });
       for (const image of Array.isArray(images) ? images : []) {
         if (typeof image?.path === "string" && image.path.length <= 4_096) input.push({ type: "localImage", path: image.path });
       }

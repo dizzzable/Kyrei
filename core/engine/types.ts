@@ -374,8 +374,16 @@ export interface CompressionConfig {
   /** Anti-thrash cooldown after a successful summary (ms). */
   summaryCooldownoffMs: number;
   /**
-   * Wave D2: always mask tool bodies older than protectLastN even without soft overflow.
-   * Full bodies remain in CCR when smart compress archives them.
+   * Wave D2: always mask tool bodies older than protectLastN even without soft
+   * overflow. Full bodies remain in CCR when smart compress archives them.
+   *
+   * Defaults to false. When on, the keepLastMessages boundary advances by one
+   * every step, so one more mid-history tool message is rewritten each step —
+   * which invalidates the provider's message-prefix cache from that point for
+   * the rest of the turn. A cached token costs ~10% of a fresh one, so masking
+   * a fraction of the tool bytes while re-billing the whole history at full
+   * price is a net loss on any cache-capable provider. Under actual overflow
+   * pruning still runs; this flag only controls the no-overflow case.
    */
   alwaysMaskToolBodies: boolean;
   /** Wave D1: goal/focus-aware skim when compressing code/text tool output. */
@@ -738,7 +746,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     protectFirstN: 2,
     summaryMinMessages: 12,
     summaryCooldownoffMs: 60_000,
-    alwaysMaskToolBodies: true,
+    alwaysMaskToolBodies: false,
     goalSkim: true,
     pinWorkingState: true,
   },
@@ -1178,17 +1186,6 @@ export interface RunKyreiChatOpts {
   fallbackProviders?: RuntimeProviderTarget[];
   /** Optional just-in-time account capacity and health lifecycle. */
   providerAttemptLifecycle?: ProviderAttemptLifecycle;
-  /**
-   * Subscription shield: pacing + soft TLS/header hygiene for expensive seats.
-   * Gateway-owned; never accepted raw from the renderer chat payload.
-   */
-  subscriptionShield?: {
-    enabled?: boolean;
-    mode?: "off" | "standard" | "stealth";
-    minIntervalMs?: number;
-    connectTimeoutMs?: number;
-    maxConnectionsPerOrigin?: number;
-  };
   /** Optional multi-provider team available to the acting session model. */
   team?: RuntimeTeamSpec;
   workspace?: string;

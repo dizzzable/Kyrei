@@ -102,6 +102,26 @@ export function permissionRuleFromApproval(toolName, args, action) {
         return action === "allow" ? null : createExactToolPermissionRule(name, action);
       }
     }
+    if (name === "mcp_call") {
+      // The backend key is `mcp_call:<serverId>:<tool>` (security/tool-approval.ts).
+      // Without this branch an "Always allow" on ONE MCP call fell through to the
+      // tool-wide rule below and permanently granted every tool on every
+      // configured server — the same mistake write_file avoids by scoping to a
+      // path. NOTE: this file, not src/lib/permission-rules.ts, is what the
+      // gateway actually imports; the two must be kept in step.
+      const serverId = typeof a.serverId === "string" ? a.serverId.trim() : "";
+      const tool = typeof a.tool === "string" ? a.tool.trim() : "";
+      // A `:` in either segment would make the key ambiguous ("a" + "b:c" and
+      // "a:b" + "c" produce the same rule), so refuse to widen on it.
+      if (!serverId || !tool || serverId.includes(":") || tool.includes(":")) {
+        return action === "allow" ? null : createExactToolPermissionRule(name, action);
+      }
+      try {
+        return { pattern: exactPattern(`mcp_call:${serverId}:${tool}`), action };
+      } catch {
+        return action === "allow" ? null : createExactToolPermissionRule(name, action);
+      }
+    }
     return createExactToolPermissionRule(name, action);
   } catch {
     return null;

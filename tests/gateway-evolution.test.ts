@@ -118,6 +118,72 @@ describe("gateway evolution control plane", () => {
     expect(await promoted.json()).toMatchObject({ code: "evolution_apply_unavailable" });
   });
 
+  describe("canary is gated by its own mode and by risk", () => {
+    // `low-risk-canary` is documented as "additionally allow canary for
+    // low-risk candidates". Neither half was enforced: canary was accepted
+    // under plain `manual` too, and at any risk level — so the mode was
+    // indistinguishable from `manual` and its name was not a guarantee.
+    const setPromotionMode = async (promotionMode: string) => {
+      // Merge into the full engine: a bare PUT replaces the whole block.
+      const cfg = await (await request("/api/config")).json() as { engine?: Record<string, unknown> };
+      const put = await request("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({ engine: { ...(cfg.engine ?? {}), evolution: { promotionMode } } }),
+      });
+      expect(put.status).toBe(200);
+    };
+
+    const createCandidate = async (risk: string) => {
+      const create = await request("/api/evolution/candidates", {
+        method: "POST",
+        body: JSON.stringify({
+          target: { kind: "skill", id: "skill:testing" },
+          title: `Candidate (${risk})`,
+          summary: "Proposal only",
+          risk,
+          proposal: {},
+        }),
+      });
+      expect(create.status).toBe(201);
+      return (await create.json() as { candidate: { id: string; risk: string } }).candidate;
+    };
+
+    const canary = (id: string) => request(`/api/evolution/candidates/${id}/transition`, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: 1, status: "canary", evidence: { receipts: ["manual-canary"] } }),
+    });
+
+    it("refuses canary under manual, which does not offer it", async () => {
+      const candidate = await createCandidate("low");
+      const response = await canary(candidate.id);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: "evolution_canary_unavailable" });
+    });
+
+    it("refuses canary for a candidate that is not low risk", async () => {
+      await setPromotionMode("low-risk-canary");
+      for (const risk of ["medium", "high"]) {
+        const candidate = await createCandidate(risk);
+        expect(candidate.risk).toBe(risk);
+        const response = await canary(candidate.id);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "evolution_canary_risk_too_high" });
+      }
+    });
+
+    it("gets past both gates for a low-risk candidate in the canary mode", async () => {
+      await setPromotionMode("low-risk-canary");
+      const candidate = await createCandidate("low");
+      const response = await canary(candidate.id);
+      // The executor still has the last word (a proposal with nothing to apply
+      // is refused on its own merits) — what matters here is that neither
+      // canary gate is what rejected it.
+      const body = await response.json() as { code?: string };
+      expect(body.code).not.toBe("evolution_canary_unavailable");
+      expect(body.code).not.toBe("evolution_canary_risk_too_high");
+    });
+  });
+
   it("refuses the evaluation sweep when evaluation is disabled", async () => {
     const evaluate = await request("/api/evolution/evaluate", { method: "POST" });
     expect(evaluate.status).toBe(409);

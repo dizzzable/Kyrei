@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { EvolutionStore } from "../core/evolution-store.js";
-import { evaluatePendingCandidates } from "../core/evolution-eval.js";
+import { evaluatePendingCandidates, MIN_APPROVE_SCORE } from "../core/evolution-eval.js";
 
 async function storeWithPending(count: number, now = () => Date.parse("2026-07-26T10:00:00.000Z")) {
   const dataDir = await mkdtemp(join(tmpdir(), "kyrei-evo-worker-"));
@@ -38,6 +38,34 @@ describe("evaluatePendingCandidates (evolution worker core)", () => {
     expect(candidate.status).toBe("approved");
     expect(candidate.evidence.receipts.length).toBeGreaterThan(0);
     expect(candidate.evidence.metrics).toMatchObject({ score: 0.9 });
+  });
+
+  it("refuses to approve a low-confidence approval", async () => {
+    // Regression: the gate was `verdict === "approve"` alone; score was read
+    // only for display, so a 0.0-confidence approval became `approved` — the
+    // sole precondition promotion checks before rewriting an artifact on disk.
+    const { store } = await storeWithPending(1);
+    const out = await evaluatePendingCandidates(store, {
+      generateText: cannedModel('{"verdict":"approve","score":0.0,"rationale":"not sure at all"}'),
+      model: {},
+      costEntry: { inputPerM: 0, outputPerM: 0 },
+      abortMs: 0,
+    });
+    expect(out).toMatchObject({ ok: true, evaluated: 1, approved: 0, rejected: 1 });
+    expect(await store.list({ status: "approved" })).toHaveLength(0);
+    const [candidate] = await store.list({ status: "rejected" });
+    expect(candidate.reason).toMatch(/^eval_low_score:/);
+  });
+
+  it("still approves at or above the confidence bar", async () => {
+    const { store } = await storeWithPending(1);
+    const out = await evaluatePendingCandidates(store, {
+      generateText: cannedModel(`{"verdict":"approve","score":${MIN_APPROVE_SCORE},"rationale":"borderline but sound"}`),
+      model: {},
+      costEntry: { inputPerM: 0, outputPerM: 0 },
+      abortMs: 0,
+    });
+    expect(out).toMatchObject({ ok: true, approved: 1, rejected: 0 });
   });
 
   it("rejects a candidate with a reason when the model rejects", async () => {

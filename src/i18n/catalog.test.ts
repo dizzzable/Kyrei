@@ -23,6 +23,41 @@ describe("translation catalog", () => {
     }
   });
 
+  it("uses the single-brace placeholder syntax the interpolator understands", () => {
+    // Regression: two settings strings shipped `{{count}}`/`{{reason}}`, but
+    // `interpolate` matches `\{([A-Za-z][\w.-]*)\}` — so it substituted the
+    // INNER braces and left the outer pair in the rendered text ("{5} failed
+    // check(s)"). A double brace is always a bug, never an escape.
+    for (const [lang, locale] of Object.entries(CATALOG)) {
+      for (const [key, message] of Object.entries(locale)) {
+        for (const form of typeof message === "string" ? [message] : Object.values(message)) {
+          expect(form, `${lang}/${key}`).not.toMatch(/\{\{|\}\}/);
+        }
+      }
+    }
+  });
+
+  it("keeps placeholder names identical across locales", () => {
+    // A translated string that drops or renames a placeholder silently loses
+    // the value at runtime — `interpolate` leaves unknown names untouched.
+    // Deliberately `unknown`: the same helper reads both locales, whose value
+    // types are distinct string-literal unions.
+    const placeholders = (message: unknown) => {
+      const forms = typeof message === "string"
+        ? [message]
+        : Object.values(message as Record<string, unknown>).filter((f): f is string => typeof f === "string");
+      const names = new Set<string>();
+      for (const form of forms) {
+        for (const match of form.matchAll(/\{([A-Za-z][\w.-]*)\}/g)) names.add(match[1]!);
+      }
+      return [...names].sort();
+    };
+
+    for (const key of Object.keys(CATALOG.en) as (keyof typeof CATALOG.en)[]) {
+      expect(placeholders(CATALOG.ru[key]), String(key)).toEqual(placeholders(CATALOG.en[key]));
+    }
+  });
+
   it("exposes stable locale data without translating language names", () => {
     expect(LANGUAGES).toEqual([
       { id: "en", label: "English" },

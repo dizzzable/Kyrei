@@ -22,6 +22,16 @@ export interface McpClient {
   close(): Promise<void>;
 }
 
+/**
+ * How long one manager reuses a tool catalog. Long enough that paging through
+ * `mcp_list_tools` costs one fan-out instead of one per page, short enough that
+ * a server whose tool set changes mid-run is picked up within the same turn.
+ */
+const CATALOG_CACHE_MS = 30_000;
+
+/** Sentinel entry standing in for a server whose tool listing failed. */
+const LIST_FAILED_TOOL = "__error__";
+
 function sanitizeServerId(id: string): string {
   return id.trim().replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 64);
 }
@@ -126,30 +136,62 @@ export function createMcpManager(options: McpManagerOptions) {
     return client;
   }
 
+  /**
+   * Catalog cache.
+   *
+   * `mcp_list_tools` is paginated, and every page used to re-list every server
+   * from scratch — so paging through a catalog cost N server round-trips per
+   * page. The cache is per-manager, and a manager lives for one run, so it can
+   * never leak one workspace's catalog into another.
+   *
+   * There is deliberately no invalidation on tool-set change: MCP's
+   * `notifications/tools/list_changed` is not wired, so the only bound is the
+   * TTL. Failures are never cached (see `listTools`), which is what matters —
+   * a stale success for 30s is harmless, a stale failure hides a server.
+   */
+  let catalogCache: { at: number; tools: McpToolInfo[] } | null = null;
+
+  function invalidateCatalog(): void {
+    catalogCache = null;
+  }
+
   async function listTools(): Promise<McpToolInfo[]> {
     if (!config.enabled) return [];
-    const out: McpToolInfo[] = [];
-    for (const server of config.servers) {
+    if (catalogCache && Date.now() - catalogCache.at < CATALOG_CACHE_MS) return catalogCache.tools;
+    // Concurrent, not sequential: awaiting each server in turn meant
+    // `maxServers` × `timeoutMs` (8 × 30s) could elapse inside ONE tool call
+    // while the model waited. Servers are independent, so nothing is ordered
+    // between them — only the output is, and that is restored by the sort.
+    const perServer = await Promise.all(config.servers.map(async (server) => {
       try {
-        const client = getClient(server.id);
-        const tools = await client.listTools();
-        for (const t of tools.slice(0, config.maxToolsPerServer)) {
-          out.push({
-            serverId: server.id,
-            name: t.name,
-            ...(t.description ? { description: t.description } : {}),
-            ...(t.inputSchema !== undefined ? { inputSchema: t.inputSchema } : {}),
-          });
-        }
-      } catch (error) {
-        out.push({
+        const tools = await getClient(server.id).listTools();
+        return tools.slice(0, config.maxToolsPerServer).map((t) => ({
           serverId: server.id,
-          name: "__error__",
+          name: t.name,
+          ...(t.description ? { description: t.description } : {}),
+          ...(t.inputSchema !== undefined ? { inputSchema: t.inputSchema } : {}),
+        }));
+      } catch (error) {
+        return [{
+          serverId: server.id,
+          name: LIST_FAILED_TOOL,
           description: `Failed to list tools: ${(error as Error).message}`,
-        });
+        }];
       }
+    }));
+    // Preserve configured server order so the catalog and its page offsets are
+    // stable across calls regardless of which server answered first.
+    const out = perServer.flat();
+    // Never cache a failure: a stdio server that loses the race with its own
+    // spawn (npx-based ones routinely do) would otherwise stay invisible to the
+    // model for the whole TTL, and the pre-cache code retried on the next call.
+    if (!out.some((entry) => entry.name === LIST_FAILED_TOOL)) {
+      catalogCache = { at: Date.now(), tools: out };
     }
-    return out;
+    // Hand out a copy: the only consumer sorts the result in place, which would
+    // otherwise permanently reorder the cache this function just promised was
+    // in configured order.
+    return out.slice();
   }
 
   /** Explicit diagnostics used by Settings; unlike listTools it preserves one
@@ -164,31 +206,23 @@ export function createMcpManager(options: McpManagerOptions) {
     error?: string;
   }>> {
     if (!config.enabled) return [];
-    const out = [];
-    for (const server of config.servers) {
+    // Concurrent for the same reason as listTools: this backs the Settings
+    // diagnostics panel, which hung for the sum of every server's timeout.
+    // Never cached — its whole purpose is to report live health.
+    return await Promise.all(config.servers.map(async (server) => {
+      const identity = {
+        id: server.id,
+        command: server.command ?? server.url ?? "",
+        transport: server.transport ?? "stdio",
+        ...(server.source ? { source: server.source } : {}),
+      };
       try {
         const tools = await getClient(server.id).listTools();
-        out.push({
-          id: server.id,
-          command: server.command ?? server.url ?? "",
-          transport: server.transport ?? "stdio",
-          ...(server.source ? { source: server.source } : {}),
-          ok: true,
-          toolCount: tools.length,
-        });
+        return { ...identity, ok: true, toolCount: tools.length };
       } catch (error) {
-        out.push({
-          id: server.id,
-          command: server.command ?? server.url ?? "",
-          transport: server.transport ?? "stdio",
-          ...(server.source ? { source: server.source } : {}),
-          ok: false,
-          toolCount: 0,
-          error: (error as Error).message,
-        });
+        return { ...identity, ok: false, toolCount: 0, error: (error as Error).message };
       }
-    }
-    return out;
+    }));
   }
 
   function formatCallResult(raw: unknown): string {
@@ -258,6 +292,7 @@ export function createMcpManager(options: McpManagerOptions) {
   async function close(): Promise<void> {
     const all = [...clients.values()];
     clients.clear();
+    invalidateCatalog();
     await Promise.all(all.map((c) => c.close().catch(() => undefined)));
   }
 

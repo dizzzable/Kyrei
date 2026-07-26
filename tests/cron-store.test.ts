@@ -156,6 +156,37 @@ describe("CronStore", () => {
     expect(reloaded.history(job.id).map(run => run.result ?? run.error)).toEqual(["three", "two"]);
   });
 
+  it("breaks an abandoned claim so a hung run cannot disable the job forever", async () => {
+    // Regression: the durable claim was released only by finishRun() — which
+    // fires when the run promise settles — or by a fresh load(). The gateway
+    // wires runJob with no timeout and no AbortSignal, so one hung provider
+    // stream disabled the job until the app restarted, with the UI still
+    // reporting "running".
+    const store = makeStore();
+    await store.load();
+    const job = await store.create({ name: "Hangs", prompt: "Run", expression: "* * * * *" });
+    const hung = await store.beginRun(job.id, { trigger: "manual" });
+    expect(hung).toMatchObject({ status: "running" });
+
+    // Still inside the window: the claim must hold.
+    now = new Date(now.getTime() + 60 * 60 * 1_000);
+    expect(await store.beginRun(job.id, { trigger: "manual" })).toBeNull();
+
+    // Past the window: the stale record is retired and a new run may start.
+    now = new Date(now.getTime() + 2 * 60 * 60 * 1_000);
+    const fresh = await store.beginRun(job.id, { trigger: "manual" });
+    expect(fresh).toMatchObject({ status: "running" });
+    expect(fresh!.id).not.toBe(hung!.id);
+
+    const abandoned = store.history(job.id).find((entry) => entry.id === hung!.id);
+    expect(abandoned).toMatchObject({ status: "cancelled", error: "cron_run_abandoned" });
+    expect(abandoned!.finishedAt).toBe(now.toISOString());
+  });
+
+  it("rejects a stale-run window that could retire a legitimate long run", () => {
+    expect(() => new CronStore({ runtimeDir: dir, staleRunMs: 1_000 })).toThrow("cron-stale-run-invalid");
+  });
+
   it("recovers persisted running runs as cancelled and reconciles the owning job", async () => {
     const store = makeStore();
     await store.load();

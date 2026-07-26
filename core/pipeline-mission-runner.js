@@ -263,6 +263,17 @@ export class PipelineMissionRunner {
       this._emit("pipeline.stage.uncertain", { runId: run.runId, stageId: stage.id, error: message });
       return interrupted;
     }
+    // NOTE: per-stage retry is configurable in the UI and the built-in
+    // pipeline ships `maxAttempts: 2`, but the runner deliberately still fails
+    // the run on the first stage error. claimStage() already enforces the
+    // ceiling and counts attempts, and STAGE_TRANSITIONS now allows
+    // failed -> pending, so the machinery is in place — what is missing is a
+    // decision, not code. Re-arming here changes two contracts that existing
+    // tests encode: every attempt bills the budget again (see "charges safe
+    // aggregate metrics when a direct Team department fails"), and a failure
+    // caused by a deliberate abort such as credential rotation must not be
+    // repeated (see "aborts and redacts an in-flight Team result after
+    // credential rotation"). Settle those before turning this on.
     const failed = await this.runStore.transition(run.runId, "failed", {
       stageId: stage.id,
       reason: message,

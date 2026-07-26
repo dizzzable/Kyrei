@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, chmod, readFile, writeFile, mkdir, readdir, stat, rename, rm, realpath, open as openFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, relative, sep } from "node:path";
 import {
   SessionStore,
   SessionApprovalError,
@@ -45,6 +45,7 @@ import {
 import {
   buildContinuationPacket,
   readContinuationPacket,
+  clearRollingContextSummary,
   readRollingContextSummary,
   renderContinuationContext,
   writeContinuationPacket,
@@ -200,9 +201,11 @@ import {
   resolveCompatModelRef,
 } from "./openai-compat.js";
 import {
+  CAPACITY_STRATEGIES,
   listFamilyModelRefs,
   normalizeCapacityConfig,
   orderCapacityCandidates,
+  poolStrategyForCapacity,
 } from "./capacity-router.js";
 
 // A regular chat can expose many enabled skills, but a user-selected set is
@@ -269,12 +272,64 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+/** Most recent messages replayed into a rebuilt Codex thread. */
+const CODEX_RESEED_MESSAGES = 24;
+/** Ceiling on the replayed transcript, so a long session cannot blow the turn. */
+const CODEX_RESEED_CHARS = 12_000;
+
+/**
+ * Render a conversation as plain text for re-seeding a Codex thread.
+ *
+ * The Codex App Server owns its own history, so the gateway normally discards
+ * `messages` on that path. When a `thread/resume` fails, that history is gone
+ * and this is the only copy — hence a lossy but self-describing transcript
+ * rather than structured messages Codex has no way to accept.
+ *
+ * Takes the TAIL: the newest turns are the ones the next reply depends on.
+ *
+ * @param {unknown} messages
+ * @returns {string}
+ */
+function codexResumeSeed(messages) {
+  if (!Array.isArray(messages)) return "";
+  const lines = [];
+  for (const message of messages.slice(-CODEX_RESEED_MESSAGES)) {
+    if (!message || typeof message !== "object") continue;
+    const role = message.role === "assistant" ? "Assistant" : message.role === "user" ? "User" : "";
+    if (!role) continue; // tool/system turns are Codex-internal, not replayable
+    const text = typeof message.content === "string"
+      ? message.content
+      : Array.isArray(message.content)
+        ? message.content.filter(part => part?.type === "text" && typeof part.text === "string").map(part => part.text).join("")
+        : "";
+    if (!text.trim()) continue;
+    lines.push(`${role}: ${text.trim()}`);
+  }
+  if (!lines.length) return "";
+  let body = lines.join("\n\n");
+  if (body.length > CODEX_RESEED_CHARS) body = `…\n\n${body.slice(-CODEX_RESEED_CHARS)}`;
+  return `[Recovered transcript of this session — the previous thread was lost. Continue from here; do not repeat work already reported.]\n\n${body}`;
+}
+
 function internalModelMessages(value) {
   if (!Array.isArray(value)) return [];
   return value.flatMap(message => {
     if (!message || typeof message !== "object") return [];
-    if ((message.role !== "assistant" && message.role !== "tool") || !Array.isArray(message.content)) return [];
-    return [{ ...message, content: message.content.slice(0, 500) }];
+    if (message.role !== "assistant" && message.role !== "tool") return [];
+    if (Array.isArray(message.content)) {
+      return [{ ...message, content: message.content.slice(0, 500) }];
+    }
+    // The engine legitimately emits `{role:"assistant", content:"<text>"}` —
+    // on the host-enforced diagnostic path and on a recovery pass that returned
+    // no responseMessages. Dropping those meant a multi-pass turn persisted the
+    // tool calls from pass 1 but not the final answer from pass 2, and because
+    // the surviving structured messages made the list non-empty, the
+    // `message.content` fallback in convoFor never kicked in either. The model
+    // then re-derived work it had already reported. Normalize instead of drop.
+    if (typeof message.content === "string" && message.content.length > 0) {
+      return [{ ...message, content: [{ type: "text", text: message.content }] }];
+    }
+    return [];
   }).slice(0, 500);
 }
 
@@ -544,6 +599,37 @@ function approvalResponses(parts) {
       reason: part.decisionReason || (part.status === "expired" ? "approval_expired" : approved ? "user_approved_once" : "user_denied"),
     }];
   });
+}
+
+/**
+ * Confine a renderer-supplied relative path to the workspace.
+ *
+ * The engine jail (`safePath`) is authoritative and used whenever the bundle
+ * loaded. The fallback below runs only when the engine failed to load, and it
+ * must match the jail's semantics rather than the weaker `startsWith("..")`
+ * test the file endpoints used to inline: that test accepts a cross-drive
+ * absolute (`relative("C:\\ws", "D:\\x")` is `"D:\\x"`), accepts Windows
+ * drive-relative (`C:rel`) and UNC/device paths, and wrongly rejects a real
+ * in-workspace entry literally named `..foo`.
+ *
+ * Throws on any escape; returns the absolute path otherwise.
+ *
+ * @param {{ safePath?: unknown }} mod loaded engine bundle
+ * @param {string} workspace
+ * @param {string} rel
+ * @returns {string}
+ */
+function workspacePath(mod, workspace, rel) {
+  const target = rel || ".";
+  if (typeof mod?.safePath === "function") return mod.safePath(workspace, target);
+  if (/^[a-zA-Z]:(?![\\/])/.test(target)) throw new Error("path outside workspace");
+  if (/^\\\\/.test(target) || /^\/\//.test(target)) throw new Error("path outside workspace");
+  const abs = resolve(workspace, target);
+  const within = relative(workspace, abs);
+  if (within !== "" && (within === ".." || within.startsWith(`..${sep}`) || within.startsWith("../") || isAbsolute(within))) {
+    throw new Error("path outside workspace");
+  }
+  return abs;
 }
 
 function readBody(req) {
@@ -2477,7 +2563,11 @@ export async function startGateway({
       const seen = new Set();
       for (const entries of Object.values(networkInterfaces())) {
         for (const entry of entries ?? []) {
-          if (!entry || entry.internal || (entry.family !== "IPv4" && entry.family !== 4)) continue;
+          // `family` is "IPv4" on current Node, but older runtimes reported the
+          // number 4. Widen before comparing so the numeric fallback stays live
+          // instead of reading as an impossible comparison.
+          const family = /** @type {string | number} */ (entry?.family);
+          if (!entry || entry.internal || (family !== "IPv4" && family !== 4)) continue;
           const ip = entry.address;
           if (!ip || seen.has(ip)) continue;
           seen.add(ip);
@@ -2886,7 +2976,7 @@ export async function startGateway({
   }));
   /**
    * Dual-write one session JSON → engine mirror.
-   * @returns {{ ok: boolean, error?: string, skipped?: boolean }}
+   * @returns {Promise<{ ok: boolean, error?: string, skipped?: boolean }>}
    */
   const mirrorGatewaySession = async (sessionId) => {
     return withSessionMirrorWriteLock(async () => {
@@ -3396,7 +3486,9 @@ export async function startGateway({
     if (unavailableTarget || skillIdentity.complete !== true) {
       throw pipelineConflict("pipeline_runtime_unavailable");
     }
-    const sandbox = await sandboxCapabilityProbe(configSnapshot.engine ?? {}, configSnapshot.workspace);
+    // The probe inspects platform sandbox binaries only; it takes no workspace.
+    // A second argument was being passed and silently dropped.
+    const sandbox = await sandboxCapabilityProbe(configSnapshot.engine ?? {});
     if ((configSnapshot.engine?.sandbox ?? "off") === "strict-required" && sandbox?.available !== true) {
       throw pipelineConflict("sandbox_required_unavailable");
     }
@@ -3475,6 +3567,17 @@ export async function startGateway({
         : "";
     const path = raw.replaceAll("\\", "/").trim();
     if (!path) return;
+    // The path comes from the model's own tool args and is injected into
+    // permissions.protectedPathAllowOnce on every later turn of this session.
+    // The schema caps each entry at 500 chars; a longer one made the whole
+    // `permissions` block fail validation, and salvage then replaced it with
+    // DEFAULT_ENGINE_CONFIG.permissions — wiping every user-authored deny rule
+    // for the rest of the session. Refuse the entry instead of poisoning the
+    // block: a path that long is not a real approval target.
+    if (path.length > 500) {
+      console.warn(`[kyrei] ignoring an over-long allow-once path (${path.length} chars) for session ${sessionId}`);
+      return;
+    }
     const list = sessionProtectedAllowOnce.get(sessionId) ?? [];
     if (list.includes(path)) return;
     list.push(path);
@@ -3504,7 +3607,12 @@ export async function startGateway({
       ...withMode,
       permissions: {
         ...permissions,
-        protectedPathAllowOnce: merged.slice(0, 200),
+        // Enforce the schema's own per-entry bound here as well, so a config
+        // already poisoned by an earlier build self-heals instead of dropping
+        // the whole permissions block (and with it every deny rule) each turn.
+        protectedPathAllowOnce: merged
+          .filter((p) => typeof p === "string" && p.length > 0 && p.length <= 500)
+          .slice(0, 200),
       },
     };
   };
@@ -5561,7 +5669,25 @@ export async function startGateway({
 
   function runtimePoolFor(provider, configState = config) {
     if (!isCodexChatgptPoolProvider(provider)) {
-      return normalizeProviderAccountPool(provider.accountPool, provider.models);
+      // A provider that never set its own strategy follows the workspace-wide
+      // Capacity setting. That setting is otherwise inert: only the pool holds
+      // the per-account state these strategies need.
+      // `provider.models` is REQUIRED here: it is what drops a per-account
+      // `modelIds` pin that references a model the user has since deleted.
+      // Passing the options object in its place silently disabled that filter.
+      //
+      // Read the RAW capacity strategy, not the normalized one: normalization
+      // supplies `spare-first`, which maps to `fill-first`. Feeding that down
+      // would silently flip every existing pool from `balanced` on upgrade,
+      // for a user who never opened the Capacity settings. Only an explicit
+      // choice may override a pool's own default.
+      const chosenStrategy = isPlainRecord(configState.capacity)
+        && CAPACITY_STRATEGIES.includes(configState.capacity.strategy)
+        ? poolStrategyForCapacity(normalizeCapacityConfig(configState.capacity))
+        : undefined;
+      return normalizeProviderAccountPool(provider.accountPool, provider.models, {
+        ...(chosenStrategy ? { defaultStrategy: chosenStrategy } : {}),
+      });
     }
     const managedConfig = normalizeCodexChatgptPool(configState.codexChatgptPool);
     const managed = codexChatgptRouterPool(managedConfig);
@@ -7017,7 +7143,6 @@ export async function startGateway({
       // Capacity chain: all accounts for primary model, then same-family models
       // on other providers, then configured fallbacks — so spare keys keep the job alive.
       const capacityCfg = normalizeCapacityConfig(config.capacity);
-      const subscriptionShield = capacityCfg.subscriptionShield;
       const familyTargets = [];
       if (capacityCfg.enabled && capacityCfg.crossProviderFamily) {
         for (const ref of listFamilyModelRefs(config, mainTarget.providerId, mainTarget.model)) {
@@ -7081,7 +7206,6 @@ export async function startGateway({
         model: mainTarget.model,
         ...(mainTarget.limits ? { modelLimits: { ...mainTarget.limits } } : {}),
         providerAttemptLifecycle,
-        subscriptionShield,
         ...(workerProvider ? { workerProvider } : {}),
         ...(fallbackProviders.length ? { fallbackProviders } : {}),
         ...(team ? { team } : {}),
@@ -7145,6 +7269,27 @@ export async function startGateway({
               ...(safeModelParams ? { modelParams: safeModelParams } : {}),
               ...(usesManagedCodexProfile ? { accountId: codexAccountId } : {}),
               signal: controller.signal,
+              // Codex owns its own history, so `common.messages` is otherwise
+              // unused here. It is exactly the fallback needed when Codex has
+              // dropped the thread — see codexResumeSeed.
+              resumeSeed: codexResumeSeed(common.messages),
+              onThreadReset: async ({ threadId: lostThreadId, reason }) => {
+                console.warn(`[kyrei] codex thread ${lostThreadId} could not be resumed (${reason}); reseeding a new thread`);
+                // Drop the dead id immediately: if this turn fails before
+                // `onThread` fires, the next one must not retry the same
+                // unusable thread.
+                const latest = store.getSession(sessionId);
+                const existingThreads = latest?.codexThreadIds && typeof latest.codexThreadIds === "object"
+                  ? latest.codexThreadIds
+                  : {};
+                if (usesManagedCodexProfile) {
+                  const { [codexAccountId]: _dropped, ...rest } = existingThreads;
+                  store.upsertSession({ id: sessionId, codexThreadIds: rest, updatedAt: new Date().toISOString() });
+                } else {
+                  store.upsertSession({ id: sessionId, codexThreadId: "", updatedAt: new Date().toISOString() });
+                }
+                await store.flush();
+              },
               onThread: async (codexThreadId) => {
                 // The opaque Codex thread id is enough to resume a
                 // ChatGPT-backed session after a Kyrei restart; it is not an
@@ -7190,6 +7335,29 @@ export async function startGateway({
         if (!result) {
           throw lastNativeError ?? new ProviderConfigError("provider_accounts_unavailable");
         }
+        // Codex App Server is a native runtime, not the Kyrei engine, so it
+        // returns its own shape. Normalize it onto RunKyreiChatResult here so
+        // the shared post-turn path below reads one contract instead of two.
+        result = {
+          text: typeof result.text === "string" ? result.text : "",
+          parts: Array.isArray(result.parts) ? result.parts : [],
+          status: typeof result.status === "string" ? result.status : "complete",
+          // Per-attempt outcomes on this path are recorded through
+          // providerAttemptLifecycle; there is no engine attempt list.
+          attempts: [],
+          ...(result.route ? { route: result.route } : {}),
+          // Omitted rather than zeroed: a ChatGPT-plan turn has no per-token
+          // price, and `costUsd: 0` would assert one.
+          ...(result.usage ? { usage: result.usage } : {}),
+          // Codex's own thread is the authoritative history. This exists only
+          // so a later switch to another provider replays a self-describing
+          // record instead of relying on convoFor's plain-text fallback. Tool
+          // activity is deliberately NOT replayed: the ids and tool names are
+          // Codex-namespaced and meaningless to another provider.
+          ...(typeof result.text === "string" && result.text
+            ? { responseMessages: [{ role: "assistant", content: [{ type: "text", text: result.text }] }] }
+            : {}),
+        };
       } else {
         const mod = await getEngine();
         result = await mod.runKyreiChat({
@@ -7200,9 +7368,13 @@ export async function startGateway({
         });
       }
       // Wave E: remember last harness snapshot for Usage settings (no secrets).
-      if (result?.harness && typeof result.harness === "object") {
-        lastHarnessMetrics = sanitizeHarnessMetrics(result.harness);
-      }
+      // Assign unconditionally: this is the LAST turn's snapshot, so a turn
+      // that reports none must clear it. Only overwriting on a hit left a
+      // Codex turn (which has no harness) serving the previous engine turn's
+      // numbers from /api/status as if they described the latest one.
+      lastHarnessMetrics = result?.harness && typeof result.harness === "object"
+        ? sanitizeHarnessMetrics(result.harness)
+        : null;
       // UI parts and structured model history can legitimately share the same
       // tool input object. Redact them as separate roots: the generic cycle
       // guard otherwise replaces the second reference with "[CIRCULAR]" and
@@ -8158,7 +8330,24 @@ export async function startGateway({
       }
 
       if (path === "/api/config") {
-        if (req.method === "GET") return sendJson(res, 200, publicConfig());
+        if (req.method === "GET") {
+          const snapshot = publicConfig();
+          // Settings the validator refused are replaced by defaults, so the
+          // value the user sees is not the value in force. That used to be a
+          // console.warn in the main process — invisible. Ship it with the
+          // config so the UI can say so. Migration notices stay in the log.
+          let engineConfigRejections = [];
+          try {
+            const mod = await getEngine();
+            if (typeof mod.resolveEngineConfig === "function") {
+              engineConfigRejections = mod.resolveEngineConfig(snapshot.engine).rejections ?? [];
+            }
+          } catch {
+            // The engine bundle is optional here: a config the user cannot
+            // read is worse than one shown without its validation notes.
+          }
+          return sendJson(res, 200, { ...snapshot, engineConfigRejections });
+        }
         if (req.method === "PUT") {
           const body = await readBody(req);
           const snapshot = await mutateConfig(async () => {
@@ -8458,6 +8647,18 @@ export async function startGateway({
           }
           const current = await evolutionStore.get(id);
           if (!current) return sendJson(res, 404, { code: "evolution_candidate_not_found", error: "evolution_candidate_not_found" });
+          // `low-risk-canary` is the only mode that adds canary, and the name is
+          // a promise: a medium/high-risk candidate must not reach it. Neither
+          // half was enforced, so the mode was indistinguishable from `manual`
+          // and a high-risk candidate could be canaried under either.
+          if (nextStatus === "canary") {
+            if (evolutionConfig.promotionMode !== "low-risk-canary") {
+              return sendJson(res, 409, { code: "evolution_canary_unavailable", error: "evolution_canary_unavailable" });
+            }
+            if (current.risk !== "low") {
+              return sendJson(res, 409, { code: "evolution_canary_risk_too_high", error: "evolution_canary_risk_too_high" });
+            }
+          }
           if (nextStatus === "rolled-back") {
             const undo = await rollbackPromotion(current);
             if (!undo.ok) return sendJson(res, 409, { code: undo.code, error: undo.code });
@@ -8468,16 +8669,39 @@ export async function startGateway({
             return sendJson(res, 200, { candidate });
           }
           // canary / promoted → run the executor, then record its receipts.
+          // Promoting a candidate that is ALREADY canary must not re-run the
+          // executor: the artifact is already mutated, so a second begin() would
+          // snapshot the canaried bytes as "prior state" and rollback would then
+          // restore the canary instead of the original. Just record the status.
+          if (nextStatus === "promoted" && current.status === "canary") {
+            const candidate = await evolutionStore.transition(id, {
+              ...body,
+              evidence: {
+                ...(body?.evidence ?? {}),
+                receipts: [...(body?.evidence?.receipts ?? []), "promote:already-applied-by-canary"],
+              },
+            });
+            return sendJson(res, 200, { candidate });
+          }
           const applied = await runPromotionExecutor(current);
           if (!applied.ok) {
             // Honest failure: mark the candidate failed rather than mutate blindly.
             await evolutionStore.transition(id, { expectedRevision: current.revision, status: "failed", reason: applied.code }).catch(() => {});
             return sendJson(res, 409, { code: applied.code, error: applied.code });
           }
-          const candidate = await evolutionStore.transition(id, {
-            ...body,
-            evidence: { ...(body?.evidence ?? {}), receipts: [...(body?.evidence?.receipts ?? []), ...applied.receipts] },
-          });
+          let candidate;
+          try {
+            candidate = await evolutionStore.transition(id, {
+              ...body,
+              evidence: { ...(body?.evidence ?? {}), receipts: [...(body?.evidence?.receipts ?? []), ...applied.receipts] },
+            });
+          } catch (transitionErr) {
+            // The executor already committed. Leaving the artifact rewritten
+            // while the candidate stays `approved` is an unowned mutation that
+            // nothing later reconciles, so undo it before surfacing the error.
+            await rollbackPromotion(current).catch(() => {});
+            throw transitionErr;
+          }
           return sendJson(res, 200, { candidate });
         }
         const candidate = await evolutionStore.transition(id, body);
@@ -11690,6 +11914,10 @@ export async function startGateway({
           }
           runtimeActivity.delete(id);
           sessionProtectedAllowOnce.delete(id);
+          // The compression cache outlives the session it describes unless it
+          // is dropped here. Nothing called `clearContextSummary`, so every
+          // session ever compressed left a file in the workspace forever.
+          if (config.workspace) await clearRollingContextSummary(config.workspace, id);
           return sendJson(res, 200, { ok: true });
         }
         if (!sessionMatch[2] && req.method === "PATCH") {
@@ -11906,10 +12134,7 @@ export async function startGateway({
         let abs;
         try {
           const mod = await getEngine();
-          abs = typeof mod.safePath === "function" ? mod.safePath(config.workspace, rel || ".") : resolve(config.workspace, rel);
-          if (typeof mod.safePath !== "function" && relative(config.workspace, abs).startsWith("..")) {
-            return sendJson(res, 400, { error: "path outside workspace" });
-          }
+          abs = workspacePath(mod, config.workspace, rel);
         } catch {
           return sendJson(res, 400, { error: "path outside workspace" });
         }
@@ -11929,19 +12154,34 @@ export async function startGateway({
         if (!config.workspace) return sendJson(res, 400, { error: "no workspace" });
         const rel = url.searchParams.get("path") || "";
         let abs;
+        let engineModule = null;
         try {
-          const mod = await getEngine();
-          abs = typeof mod.safePath === "function" ? mod.safePath(config.workspace, rel || ".") : resolve(config.workspace, rel);
-          if (typeof mod.safePath !== "function" && relative(config.workspace, abs).startsWith("..")) {
-            return sendJson(res, 400, { error: "path outside workspace" });
-          }
+          engineModule = await getEngine();
+          abs = workspacePath(engineModule, config.workspace, rel);
         } catch {
           return sendJson(res, 400, { error: "path outside workspace" });
+        }
+        // The jail only proves the path is INSIDE the workspace. `protectedPaths`
+        // is what says a file inside it is still off limits — and it was applied
+        // to writes only, so `GET /api/file?path=.env` returned the file
+        // verbatim. The explorer listing hides dotfiles, which made this look
+        // safe while a direct request was not.
+        if (typeof engineModule?.matchesProtectedPath === "function") {
+          const protectedPaths = isPlainRecord(config.engine?.permissions)
+            ? config.engine.permissions.protectedPaths
+            : undefined;
+          if (Array.isArray(protectedPaths)
+            && engineModule.matchesProtectedPath(rel.replaceAll("\\", "/"), protectedPaths)) {
+            return sendJson(res, 403, { code: "path_protected", error: "path_protected" });
+          }
         }
         try {
           const info = await stat(abs);
           if (info.size > 500_000) return sendJson(res, 200, { path: rel, content: "[file too large for preview]", truncated: true });
-          const content = await readFile(abs, "utf8");
+          // Redact like every other channel: a preview of a config or fixture
+          // file can carry a live key even when the path itself is not listed
+          // as protected.
+          const content = redactSensitiveText(await readFile(abs, "utf8"), runtimeSensitiveValues());
           return sendJson(res, 200, { path: rel, content });
         } catch (e) {
           return sendJson(res, 404, { error: e.message });
@@ -12001,12 +12241,22 @@ export async function startGateway({
         const slash = Math.max(query.lastIndexOf("/"), query.lastIndexOf("\\"));
         const dirRel = slash >= 0 ? query.slice(0, slash) : "";
         const prefix = (slash >= 0 ? query.slice(slash + 1) : query).toLowerCase();
+        // A traversal attempt is a hard 400. A directory that simply does not
+        // exist is NOT an error here — the user is mid-keystroke — so those
+        // stay `200 {entries: []}`. Merging the two (the old single `catch`)
+        // meant an escape was indistinguishable from an empty directory.
+        // Resolve the engine OUTSIDE the traversal try: folding its load
+        // failure into that catch made a perfectly legal in-workspace path
+        // report "outside workspace" whenever the bundle was missing.
+        // `workspacePath` has its own fallback for a null module.
+        const pathModule = await getEngine().catch(() => null);
+        let absDir;
         try {
-          const mod = await getEngine();
-          // Validate the directory stays inside the workspace via the engine jail.
-          const absDir = typeof mod.safePath === "function"
-            ? mod.safePath(config.workspace, dirRel || ".")
-            : resolve(config.workspace, dirRel || ".");
+          absDir = workspacePath(pathModule, config.workspace, dirRel);
+        } catch {
+          return sendJson(res, 400, { error: "path outside workspace" });
+        }
+        try {
           const dirents = await readdir(absDir, { withFileTypes: true });
           const entries = dirents
             .filter(d => d.name.toLowerCase().startsWith(prefix) && (!d.name.startsWith(".") || prefix.startsWith(".")))

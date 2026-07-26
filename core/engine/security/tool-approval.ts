@@ -9,7 +9,19 @@ import { safePath } from "./jail.js";
 import { decideAll, type ActionContext, type Decision } from "./permissions.js";
 import { runPreHooks, secretScanHook } from "./pre-hook.js";
 
-export type GuardedToolName = "run_command" | "write_file" | "edit_file" | "diagnostics";
+export type GuardedToolName =
+  | "run_command"
+  | "write_file"
+  | "edit_file"
+  | "diagnostics"
+  | "memory_write_project"
+  | "memory_write_notes"
+  | "memory_write_global";
+
+/** Fixed target of memory_write_project, relative to the workspace root. */
+const PROJECT_MEMORY_TARGET = ".kyrei/memory/MEMORY.md";
+/** Fixed target of memory_write_notes, relative to the workspace root. */
+const NOTES_MEMORY_TARGET = ".kyrei/memory/notes.md";
 
 export interface ToolApprovalEvaluation {
   decision: Decision;
@@ -51,12 +63,29 @@ async function actionsFor(
     ]);
   }
 
+  // Both memory writers feed the system prompt of every later turn, so they are
+  // gated even though they are not ordinary file mutators. Their paths are
+  // fixed by the tool, not supplied by the model.
+  if (toolName === "memory_write_project") {
+    return [{ tool: toolName, target: PROJECT_MEMORY_TARGET }];
+  }
+  // The third memory writer was registered by buildMemoryWriteTools but absent
+  // from the guarded set, so it ran completely ungated — same class as the
+  // other two, and the omission looks accidental rather than intended.
+  if (toolName === "memory_write_notes") {
+    return [{ tool: toolName, target: NOTES_MEMORY_TARGET }];
+  }
+  if (toolName === "memory_write_global") {
+    // GLOBAL.md lives outside the workspace, so it has no jailable target.
+    return [{ tool: toolName }];
+  }
+
   const files = await readdir(workspace).catch(() => [] as string[]);
   const commands = detectEcosystem(files as string[]);
   const selected = commands.find((candidate) => candidate.ecosystem === "typescript")
     ?? commands.find((candidate) => ["python", "rust", "go"].includes(candidate.ecosystem));
   return selected
-    ? [{ tool: toolName }, { tool: "run_command", command: selected.command }]
+    ? [{ tool: toolName }, { tool: "run_command", command: selected.command, trustedSource: true }]
     : [{ tool: toolName }];
 }
 
@@ -101,7 +130,15 @@ export async function evaluateToolApproval(input: {
     };
   }
 
-  if (!["run_command", "write_file", "edit_file", "diagnostics"].includes(input.toolName)) return null;
+  if (![
+    "run_command",
+    "write_file",
+    "edit_file",
+    "diagnostics",
+    "memory_write_project",
+    "memory_write_notes",
+    "memory_write_global",
+  ].includes(input.toolName)) return null;
   const toolName = input.toolName as GuardedToolName;
   let actions: ActionContext[];
   try {

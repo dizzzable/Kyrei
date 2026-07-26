@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,13 @@ import { createDefaultCodingPipeline } from "../core/pipeline-config.js";
 import { PipelineRunStore } from "../core/pipeline-run-store.js";
 import { WorkspaceLeaseStore } from "../core/workspace-lease-store.js";
 import { rebaseImportedPipelines } from "../src/lib/pipeline-import";
+
+// Each case here boots a real gateway and drives pipeline stages through it.
+// Under the suite's parallel workers that regularly exceeds the 15s global
+// budget — a DIFFERENT test in this file timed out on two consecutive gate
+// runs, which is the signature of contention rather than a logic fault. Give
+// the file its own budget instead of letting CI flake.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 let dataDir = "";
 let server: { port: number; token: string; close(): void | Promise<void> };
@@ -773,18 +780,22 @@ describe("gateway Pipeline v1 control plane", () => {
       method: "POST",
       body: JSON.stringify({ pipelineId: "coding-product", goal: "Create a long audit history" }),
     });
+    // A small page size proves the same contract — two full pages, `hasMore`,
+    // and sequence continuity across the boundary — with a tenth of the work.
+    // The old fixture wrote 125 journal entries, each a durable fsync+rename,
+    // which took ~60s on Windows under the suite's parallel workers.
     const writer = new PipelineRunStore({ dataDir });
-    for (let index = 0; index < 125; index += 1) {
+    for (let index = 0; index < 13; index += 1) {
       await writer.attachSession(created.run.runId, `audit-session-${index}`);
     }
 
-    const first = await request<any>(`/api/pipeline-runs/${created.run.runId}/journal?limit=50`);
-    expect(first.events).toHaveLength(50);
+    const first = await request<any>(`/api/pipeline-runs/${created.run.runId}/journal?limit=5`);
+    expect(first.events).toHaveLength(5);
     expect(first.hasMore).toBe(true);
     const second = await request<any>(
-      `/api/pipeline-runs/${created.run.runId}/journal?afterSequence=${first.nextAfterSequence}&limit=50`,
+      `/api/pipeline-runs/${created.run.runId}/journal?afterSequence=${first.nextAfterSequence}&limit=5`,
     );
-    expect(second.events).toHaveLength(50);
+    expect(second.events).toHaveLength(5);
     expect(second.events[0].sequence).toBe(first.nextAfterSequence + 1);
     expect(second.hasMore).toBe(true);
   });

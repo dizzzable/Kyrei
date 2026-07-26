@@ -7,6 +7,7 @@ import { ToolIcon } from "./chat/ToolIcon";
 import { DiffView } from "./chat/DiffView";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import { useUiSettings } from "@/store/settings";
 
 function StatusGlyph({ status }: { status: "running" | "success" | "error" | "approval" }) {
   if (status === "running") return <Loader2 size={13} className="animate-spin text-primary" />;
@@ -17,12 +18,15 @@ function StatusGlyph({ status }: { status: "running" | "success" | "error" | "ap
 
 export function ToolRow({ part }: { part: ToolPart }) {
   const { t } = useI18n();
+  const { toolView } = useUiSettings();
   const view = buildToolView(part, t);
   const hasDiff = Boolean(view.inlineDiff);
   const expandable = hasDiff || Boolean(view.detail);
   // File edits stay compact like Hermes: filename + +/- stats first, full
-  // patch only after the user explicitly expands it.
-  const [open, setOpen] = useState(false);
+  // patch only after the user explicitly expands it. The "Default tool view"
+  // setting picks the starting state — it was written to settings and read by
+  // nobody, so Technical behaved exactly like Compact.
+  const [open, setOpen] = useState(toolView === "technical");
 
   return (
     <div

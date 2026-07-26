@@ -29,6 +29,24 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
+/**
+ * `node -e` is the portable way to run a snippet in these tests, but it now
+ * falls in the interpreter ask-tier (an inline one-liner can do anything a
+ * denylist cannot anticipate). These suites are about guarded execution, audit,
+ * env sanitization, redaction and abort — not about that tier — so they opt the
+ * exact command shape back in the same way a real user would: an explicit rule.
+ */
+const ALLOW_NODE_EVAL = {
+  ...DEFAULT_ENGINE_CONFIG,
+  permissions: {
+    ...DEFAULT_ENGINE_CONFIG.permissions,
+    rules: [
+      ...(DEFAULT_ENGINE_CONFIG.permissions.rules ?? []),
+      { pattern: "^run_command:node -e ", action: "allow" as const },
+    ],
+  },
+};
+
 describe("tools — guarded mutations and audit", () => {
   it("fails closed for commands requiring approval without running them", async () => {
     const cfg = {
@@ -182,7 +200,7 @@ describe("tools — guarded mutations and audit", () => {
   it("executes an allowed safe command and audits its lifecycle", async () => {
     const records: AuditRecord[] = [];
     const commandRunner = { run: vi.fn(async () => "(exit code: 0)\nallowed-command") };
-    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       audit: { write: async (record) => void records.push(record) },
       sessionId: "session-safe",
       actorId: "main",
@@ -238,7 +256,7 @@ describe("tools — guarded mutations and audit", () => {
     process.env.DATABASE_URL = "postgres://user:password@db/private";
     process.env.CUSTOM_CREDENTIAL = "custom-local-secret";
     try {
-      const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map());
+      const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map());
       const out = await execFrom(guarded, "run_command", {
         command: "node -e \"console.log(process.env.DATABASE_URL, process.env.CUSTOM_CREDENTIAL)\"",
       });
@@ -254,7 +272,7 @@ describe("tools — guarded mutations and audit", () => {
   });
 
   it("redacts exact runtime credentials of any length from tool output", async () => {
-    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       sensitiveValues: ["x", "tiny"],
     });
     const out = await execFrom(guarded, "run_command", {
@@ -297,7 +315,7 @@ describe("tools — guarded mutations and audit", () => {
   it("routes allowed diagnostics through the same internal command process", async () => {
     await writeFile(join(ws, "tsconfig.json"), "{}", "utf8");
     const commandRunner = { run: vi.fn(async () => "(exit code: 0)\nclean") };
-    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       sessionId: "session-diagnostics",
       actorId: "main",
       commandRunner,
@@ -318,7 +336,7 @@ describe("tools — guarded mutations and audit", () => {
     const controller = new AbortController();
     controller.abort();
     const records: AuditRecord[] = [];
-    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       abortSignal: controller.signal,
       audit: { write: async (record) => void records.push(record) },
     });
@@ -355,7 +373,7 @@ describe("tools — guarded mutations and audit", () => {
   it("terminates a running command tree on cancellation", async () => {
     const controller = new AbortController();
     const records: AuditRecord[] = [];
-    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       abortSignal: controller.signal,
       audit: { write: async (record) => void records.push(record) },
     });
@@ -466,7 +484,7 @@ describe("tools — guarded mutations and audit", () => {
   it("records metadata-only start/complete audit and ignores sink failures", async () => {
     const records: AuditRecord[] = [];
     const content = "unique-file-content-payload";
-    const guarded = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const guarded = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       audit: { write: async (r) => void records.push(r) },
       sessionId: "s1",
     });
@@ -484,7 +502,7 @@ describe("tools — guarded mutations and audit", () => {
         throw new Error("unavailable");
       },
     };
-    const resilient = buildTools(ws, DEFAULT_ENGINE_CONFIG, new Map(), {
+    const resilient = buildTools(ws, ALLOW_NODE_EVAL, new Map(), {
       audit: brokenAudit,
     });
     await expect(
@@ -523,6 +541,35 @@ describe("tools — read-only search", () => {
     const out = await exec("grep_search", { query: "foo" });
     expect(out).toContain("a.ts");
   });
+
+  it("grep_search surfaces an invalid regex instead of reporting no matches", async () => {
+    // Regression: stderr was never read and every exit code treated as success,
+    // so a malformed pattern reached the model as "(no matches)" — telling it
+    // the symbol does not exist in the repository.
+    await expect(exec("grep_search", { query: "foo(" })).rejects.toThrow(/search failed/i);
+  });
+
+  it("grep_search reports a global result cap rather than truncating silently", async () => {
+    await mkdir(join(ws, "many"), { recursive: true });
+    for (let i = 0; i < 6; i++) {
+      await writeFile(join(ws, "many", `f${i}.ts`), "needle\nneedle\n", "utf8");
+    }
+    const out = await exec("grep_search", { query: "needle", path: "many", maxResults: 3 });
+    expect(out.split("\n").filter((l) => l.includes("needle") && l.includes(":"))).toHaveLength(3);
+    expect(out).toMatch(/more matches not shown/);
+  });
+
+  it("find_path reports a truncated result set", async () => {
+    await mkdir(join(ws, "wide"), { recursive: true });
+    for (let i = 0; i < 5; i++) await writeFile(join(ws, "wide", `w${i}.ts`), "x", "utf8");
+    const out = await exec("find_path", { pattern: "wide/**/*.ts", limit: 2 });
+    expect(out).toMatch(/more paths not shown/);
+  });
+
+  it("marks read_file and grep_search output as untrusted", async () => {
+    expect(await exec("read_file", { path: "src/a.ts" })).toContain("untrusted data");
+    expect(await exec("grep_search", { query: "foo" })).toContain("untrusted data");
+  });
 });
 
 describe("tools — batch (partial success, read-only only)", () => {
@@ -541,7 +588,7 @@ describe("tools — batch (partial success, read-only only)", () => {
       calls: [{ tool: "write_file", args: { path: "x", content: "y" } }],
     });
     expect(out).toContain("write_file ✗");
-    expect(out).toContain("не read-only");
+    expect(out).toContain("is not a read-only tool");
   });
 });
 

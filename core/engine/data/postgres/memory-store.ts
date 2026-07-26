@@ -1,4 +1,4 @@
-import type { MemoryStore, MemoryDoc } from "../ports.js";
+import { normalizeRelevance, type MemoryStore, type MemoryDoc } from "../ports.js";
 import type { PgPool } from "./pool.js";
 
 interface DocRow {
@@ -98,17 +98,37 @@ export function createPostgresMemoryStore(pool: PgPool): MemoryStore {
 
     async search(query, opts) {
       const limit = opts?.limit ?? 20;
+      // Mirrors the SQLite backend: without ts_rank the LIMIT picked arbitrary
+      // matching rows rather than the best ones.
+      const vector = `to_tsvector('english', COALESCE(title, '') || ' ' || body)`;
+      // plainto_tsquery ANDs its terms. For "any" build an OR tsquery from
+      // sanitized terms instead (to_tsquery parses operators, so anything that
+      // is not a word character is stripped before it gets there).
+      const anyTerms = query
+        .split(/[^\p{L}\p{N}_]+/u)
+        .filter((t) => t.length >= 2)
+        .slice(0, 24);
+      const useAny = opts?.match === "any" && anyTerms.length > 0;
+      const tsquery = useAny ? `to_tsquery('english', $Q)` : `plainto_tsquery('english', $Q)`;
+      const queryParam = useAny ? anyTerms.join(" | ") : query;
       let sql: string;
       let params: unknown[];
       if (opts?.scope) {
-        sql = `SELECT * FROM memory_docs WHERE scope=$1 AND to_tsvector('english', COALESCE(title, '') || ' ' || body) @@ plainto_tsquery('english', $2) LIMIT $3`;
-        params = [opts.scope, query, limit];
+        const q = tsquery.replace(/\$Q/g, "$2");
+        sql = `SELECT *, ts_rank(${vector}, ${q}) AS ts_rank_score FROM memory_docs`
+          + ` WHERE scope=$1 AND ${vector} @@ ${q} ORDER BY ts_rank_score DESC LIMIT $3`;
+        params = [opts.scope, queryParam, limit];
       } else {
-        sql = `SELECT * FROM memory_docs WHERE to_tsvector('english', COALESCE(title, '') || ' ' || body) @@ plainto_tsquery('english', $1) LIMIT $2`;
-        params = [query, limit];
+        const q = tsquery.replace(/\$Q/g, "$1");
+        sql = `SELECT *, ts_rank(${vector}, ${q}) AS ts_rank_score FROM memory_docs`
+          + ` WHERE ${vector} @@ ${q} ORDER BY ts_rank_score DESC LIMIT $2`;
+        params = [queryParam, limit];
       }
-      const res = await pool.query<DocRow>(sql, params);
-      return res.rows.map(toDoc);
+      const res = await pool.query<DocRow & { ts_rank_score: number }>(sql, params);
+      return normalizeRelevance(res.rows, (r) => Number(r.ts_rank_score)).map((r) => ({
+        ...toDoc(r),
+        relevance: r.relevance,
+      }));
     },
 
     async removeDoc(id) {

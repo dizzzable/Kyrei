@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -249,6 +249,25 @@ export async function readRollingContextSummary(workspace, sessionId) {
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Drop a session's rolling compression summary.
+ *
+ * Mirrors `readRollingContextSummary`: the gateway reaches this directory
+ * directly rather than through the engine bundle. Nothing removed these, so a
+ * long-lived workspace kept one file per session it had ever compressed.
+ *
+ * @param {string} workspace
+ * @param {string} sessionId
+ */
+export async function clearRollingContextSummary(workspace, sessionId) {
+  if (!workspace || !sessionId) return;
+  try {
+    await rm(join(workspace, ".kyrei", "context-summary", `${safeSessionFileName(sessionId)}.json`), { force: true });
+  } catch {
+    /* a derived cache that outlives its session is not worth failing a delete */
   }
 }
 

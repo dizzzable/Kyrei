@@ -6,7 +6,9 @@ import {
   modelsShareFamily,
   normalizeCapacityConfig,
   orderCapacityCandidates,
+  poolStrategyForCapacity,
 } from "../core/capacity-router.js";
+import { normalizeProviderAccountPool as gatewayNormalizeAccountPool } from "../core/provider-config.js";
 
 describe("capacity-router", () => {
   it("classifies model families", () => {
@@ -63,48 +65,96 @@ describe("capacity-router", () => {
       strategy: "spare-first",
       preferSpare: true,
       crossProviderFamily: true,
-      subscriptionShield: {
-        enabled: false,
-        mode: "off",
-        minIntervalMs: 0,
-        connectTimeoutMs: 0,
-        headerTimeoutMs: 0,
-        inactivityTimeoutMs: 0,
-        maxConnectionsPerOrigin: 4,
-      },
     });
   });
 
-  it("disables legacy subscription transport settings so they cannot terminate a chat", () => {
-    expect(normalizeCapacityConfig({
+  it("drops a persisted legacy subscriptionShield block instead of carrying it forward", () => {
+    // The transport layer it configured was removed in v0.7.7; provider SDKs own
+    // their streaming lifecycle. Normalizing the key away keeps a stale timeout
+    // from being rewritten into the saved config on every load.
+    const normalized = normalizeCapacityConfig({
+      enabled: true,
       subscriptionShield: {
-        connectTimeoutMs: 0,
-        inactivityTimeoutMs: 0,
-      },
-    }).subscriptionShield).toMatchObject({
-      enabled: false,
-      mode: "off",
-      headerTimeoutMs: 0,
-      inactivityTimeoutMs: 0,
-    });
-
-    expect(normalizeCapacityConfig({
-      subscriptionShield: {
+        enabled: true,
+        mode: "stealth",
         connectTimeoutMs: 15_000,
-        headerTimeoutMs: 12_000,
         inactivityTimeoutMs: 18_000,
       },
-    }).subscriptionShield).toMatchObject({
-      enabled: false,
-      mode: "off",
-      headerTimeoutMs: 0,
-      inactivityTimeoutMs: 0,
     });
-    expect(normalizeCapacityConfig({
-      subscriptionShield: { connectTimeoutMs: 30_000 },
-    }).subscriptionShield).toMatchObject({
-      headerTimeoutMs: 0,
-      connectTimeoutMs: 0,
-    });
+    expect(normalized).not.toHaveProperty("subscriptionShield");
+    expect(JSON.stringify(normalized)).not.toContain("Timeout");
+  });
+});
+
+describe("poolStrategyForCapacity", () => {
+  // The workspace-wide Capacity strategy is inert on its own: the runtime
+  // targets orderCapacityCandidates sees carry no per-account state. It reaches
+  // the provider account pool — which does hold that state — as the default for
+  // a pool the user never configured individually.
+  it("maps reserve-keeping strategies onto fill-first", () => {
+    // Shipped copy: spare-first is "burn the active account; keep a reserve",
+    // and priority is documented as "same as fill-first for pools".
+    expect(poolStrategyForCapacity({ strategy: "spare-first" })).toBe("fill-first");
+    expect(poolStrategyForCapacity({ strategy: "fill-first" })).toBe("fill-first");
+    expect(poolStrategyForCapacity({ strategy: "priority" })).toBe("fill-first");
+  });
+
+  it("passes through the strategies the pool implements by the same name", () => {
+    expect(poolStrategyForCapacity({ strategy: "round-robin" })).toBe("round-robin");
+    expect(poolStrategyForCapacity({ strategy: "least-used" })).toBe("least-used");
+    expect(poolStrategyForCapacity({ strategy: "balanced" })).toBe("balanced");
+  });
+
+  it("spreads load when the user does not want a cold reserve", () => {
+    // preferSpare is documented as "keep at least one key cold"; off means the
+    // opposite, and it wins over a reserve-keeping strategy.
+    expect(poolStrategyForCapacity({ strategy: "spare-first", preferSpare: false })).toBe("balanced");
+    expect(poolStrategyForCapacity({ strategy: "spare-first", preferSpare: true })).toBe("fill-first");
+  });
+
+  it("falls back to balanced for junk and missing input", () => {
+    expect(poolStrategyForCapacity(undefined)).toBe("balanced");
+    expect(poolStrategyForCapacity({})).toBe("balanced");
+    expect(poolStrategyForCapacity({ strategy: "nonsense" })).toBe("balanced");
+  });
+
+  it("maps the NORMALIZED default the gateway would actually pass", () => {
+    // The two assertions above describe a raw object the gateway never hands
+    // over: it always normalizes first, and the normalized default is
+    // `spare-first` → `fill-first`. Pinning only the raw shape hid that
+    // feeding the normalized default downstream would flip every untouched
+    // pool from `balanced` on upgrade.
+    expect(poolStrategyForCapacity(normalizeCapacityConfig({}))).toBe("fill-first");
+  });
+});
+
+describe("account pool strategy default", () => {
+  // Exercised through `provider-config.js` — the module the GATEWAY imports.
+  // The identically named function in `provider-account-pool.js` is NOT on that
+  // path, and testing it directly is how a completely inert change passed green.
+  it("applies the capacity default only when the pool has no strategy of its own", () => {
+    const pool = (source: Record<string, unknown>, options?: { defaultStrategy?: string }) =>
+      gatewayNormalizeAccountPool(source, [{ id: "m1" }], options).strategy;
+
+    expect(pool({ enabled: true }, { defaultStrategy: "round-robin" })).toBe("round-robin");
+    // An explicit per-provider choice always wins.
+    expect(pool({ enabled: true, strategy: "least-used" }, { defaultStrategy: "round-robin" })).toBe("least-used");
+    // Junk is not an explicit choice.
+    expect(pool({ enabled: true, strategy: "bogus" }, { defaultStrategy: "round-robin" })).toBe("round-robin");
+    // Unchanged without a default.
+    expect(pool({ enabled: true })).toBe("balanced");
+  });
+
+  it("keeps filtering stale per-account model pins", () => {
+    // The options object was once passed in `providerModels`' place, which
+    // silently disabled this filter — an account pinned to a deleted model
+    // stayed routable.
+    const withStalePin = gatewayNormalizeAccountPool(
+      { enabled: true, members: [{ id: "primary" }, { id: "b", modelIds: ["gone"] }] },
+      [{ id: "m1" }],
+      { defaultStrategy: "round-robin" },
+    );
+    const member = withStalePin.members.find((m: { id: string }) => m.id === "b");
+    expect(member?.modelIds ?? []).toEqual([]);
   });
 });

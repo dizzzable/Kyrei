@@ -69,6 +69,27 @@ addCurated("openai", ["gpt-5.6-sol", "gpt-5.6"], curatedEntry({
   reference: OFFICIAL.openaiModels,
 }));
 
+// Current generation: 1M context / 128K output. Seeded by the Anthropic
+// provider template, so without these entries the flagship models resolve to
+// provenance "unknown" and carry no curated limits until Discover runs.
+addCurated(
+  "anthropic",
+  ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-fable-5"],
+  curatedEntry({
+    limits: { contextWindow: 1_000_000, maxOutput: 128_000 },
+    modalities: { input: ["text", "image"], output: ["text"] },
+    features: { tools: true, reasoning: true, streaming: true },
+    reference: OFFICIAL.anthropicModels,
+  }),
+);
+
+addCurated("anthropic", ["claude-haiku-4-5", "claude-haiku-4-5-20251001"], curatedEntry({
+  limits: { contextWindow: 200_000, maxOutput: 64_000 },
+  modalities: { input: ["text", "image"], output: ["text"] },
+  features: { tools: true, reasoning: true, streaming: true },
+  reference: OFFICIAL.anthropicModels,
+}));
+
 addCurated("anthropic", ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"], curatedEntry({
   limits: { contextWindow: 200_000, maxOutput: 64_000 },
   modalities: { input: ["text", "image"], output: ["text"] },

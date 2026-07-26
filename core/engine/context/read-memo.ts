@@ -66,7 +66,15 @@ export function createReadMemo(): ReadMemo {
         map.clear();
         return;
       }
-      map.delete(normalizePath(path));
+      const key = normalizePath(path);
+      map.delete(key);
+      // Ranged reads memoize under `<path>#<offset>-<limit>` so that asking for
+      // a different slice is not answered with the "already read" stub. A write
+      // therefore has to drop every slice of the file, not just the whole-file
+      // entry — otherwise the next ranged read returns pre-edit content.
+      for (const existing of [...map.keys()]) {
+        if (existing.startsWith(`${key}#`)) map.delete(existing);
+      }
     },
     get(path) {
       return map.get(normalizePath(path));

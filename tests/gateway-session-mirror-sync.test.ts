@@ -1,9 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { startGateway } from "../core/gateway.js";
+
+// Boots a real gateway and does real file I/O; under the suite's parallel
+// workers that regularly exceeds the 15s global budget on Windows.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 type GatewayServer = { port: number; token: string; close(): void | Promise<void> };
 type SyncStatus = {

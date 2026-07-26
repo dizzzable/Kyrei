@@ -6,7 +6,7 @@
  * Requirements §10.1–§10.3.
  */
 
-import { mkdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, writeFile, appendFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { SessionStore, SessionRecord, StoredMessage } from "../ports.js";
 
@@ -18,15 +18,45 @@ export function createFileSessionStore(baseDir: string): SessionStore {
     await mkdir(transcriptsDir, { recursive: true });
   }
   async function loadIndex(): Promise<Record<string, SessionRecord>> {
+    let raw: string;
     try {
-      return JSON.parse(await readFile(indexPath, "utf8")) as Record<string, SessionRecord>;
+      raw = await readFile(indexPath, "utf8");
     } catch {
+      return {}; // no index yet — fresh store
+    }
+    try {
+      const parsed = JSON.parse(raw) as Record<string, SessionRecord>;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      // The index exists but is unparseable. Returning {} and letting the next
+      // saveIndex write over it destroyed the session list outright, so keep
+      // the bytes: the transcripts are still on disk and recoverable from them.
+      const quarantine = `${indexPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      await rename(indexPath, quarantine).catch(() => {});
+      console.error(
+        `[kyrei file-store] ${indexPath} is corrupt; moved to ${quarantine}. `
+        + `Transcripts under ${transcriptsDir} are intact.`,
+      );
       return {};
     }
   }
   async function saveIndex(idx: Record<string, SessionRecord>): Promise<void> {
     await ensure();
-    await writeFile(indexPath, JSON.stringify(idx, null, 2), "utf8");
+    // Atomic: a plain writeFile truncates in place, so a crash mid-write left a
+    // half-written index that loadIndex then had to quarantine.
+    const tmp = `${indexPath}.${process.pid}-${Date.now().toString(36)}.tmp`;
+    let handle;
+    try {
+      handle = await open(tmp, "wx");
+      await handle.writeFile(JSON.stringify(idx, null, 2), "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await rename(tmp, indexPath);
+    } finally {
+      if (handle) await handle.close().catch(() => {});
+      await rm(tmp, { force: true }).catch(() => {});
+    }
   }
   const transcriptPath = (id: string) => join(transcriptsDir, `${encodeURIComponent(id)}.jsonl`);
 
@@ -89,10 +119,28 @@ export function createFileSessionStore(baseDir: string): SessionStore {
       } catch {
         return [];
       }
-      const msgs = raw
-        .split("\n")
-        .filter(Boolean)
-        .map((l) => JSON.parse(l) as StoredMessage);
+      // Per-line tolerance, matching every other JSONL reader in the codebase.
+      // A bare `.map(JSON.parse)` meant one crash-truncated tail line threw
+      // away the whole transcript — and because searchMessages iterates every
+      // session, a single corrupt file also took global search down with it.
+      // This is the FALLBACK backend, used when better-sqlite3 fails to load,
+      // so it has to be the most forgiving reader, not the least.
+      const msgs: StoredMessage[] = [];
+      let dropped = 0;
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          msgs.push(JSON.parse(line) as StoredMessage);
+        } catch {
+          dropped += 1;
+        }
+      }
+      if (dropped > 0) {
+        console.warn(
+          `[kyrei file-store] skipped ${dropped} unreadable line(s) in the transcript for ${sessionId}; `
+          + `${msgs.length} message(s) recovered.`,
+        );
+      }
       return opts?.fromSeq != null ? msgs.filter((m) => m.seq >= opts.fromSeq!) : msgs;
     },
 

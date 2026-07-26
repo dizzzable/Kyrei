@@ -75,10 +75,14 @@ export function pipelineRunControls(run: PipelineRunSnapshot): readonly MissionA
     case "queued": return ["start", "cancel"];
     case "running": return ["pause", "cancel"];
     case "paused":
-    case "interrupted": return ["resume", "cancel"];
+    case "interrupted":
+    // Blocked is usually transient — the runner exhausted its per-advance
+    // transition budget, or an engine export was momentarily unavailable.
+    // Offering only Cancel made one flaky dynamic import permanently destroy a
+    // mission; resume re-arms the blocked stages and continues.
+    case "blocked": return ["resume", "cancel"];
     // A pinned mission cannot safely resume after an immutable budget is spent.
-    case "budget_paused":
-    case "blocked": return ["cancel"];
+    case "budget_paused": return ["cancel"];
     case "awaiting_approval": return awaitingApprovalStageId(run) ? ["approve", "reject", "cancel"] : ["cancel"];
     default: return [];
   }

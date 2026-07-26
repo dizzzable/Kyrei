@@ -289,3 +289,34 @@ describe("session store localization migration", () => {
     expect(store.hasUnconsumedApprovals("session")).toBe(false);
   });
 });
+
+describe("codexThreadIds clears when explicitly emptied", () => {
+  // Regression: `normalizeCodexThreadIds` returns undefined for `{}`, and the
+  // record then OMITTED the key — so upsertSession's `{...existing, ...next}`
+  // merge preserved the previous map. In the common single-account case a
+  // managed Codex session could never forget a thread id that failed to
+  // resume: every later turn retried the dead thread, re-fired the reset
+  // notice, and re-sent the recovery seed.
+  it("forgets the last account's thread instead of preserving it", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    store.upsertSession({ id: "s1", codexThreadIds: { acct1: "thread-alpha" } });
+    expect(store.getSession("s1")?.codexThreadIds).toEqual({ acct1: "thread-alpha" });
+
+    store.upsertSession({ id: "s1", codexThreadIds: {} });
+    expect(store.getSession("s1")?.codexThreadIds).toBeUndefined();
+  });
+
+  it("still drops only the named account when others remain", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    store.upsertSession({ id: "s2", codexThreadIds: { a: "thread-a", b: "thread-b" } });
+    store.upsertSession({ id: "s2", codexThreadIds: { b: "thread-b" } });
+    expect(store.getSession("s2")?.codexThreadIds).toEqual({ b: "thread-b" });
+  });
+
+  it("leaves the map alone when the field is not supplied at all", () => {
+    const store = new SessionStore({ runtimeDir: "." });
+    store.upsertSession({ id: "s3", codexThreadIds: { a: "thread-a" } });
+    store.upsertSession({ id: "s3", title: "unrelated update" });
+    expect(store.getSession("s3")?.codexThreadIds).toEqual({ a: "thread-a" });
+  });
+});

@@ -48,19 +48,19 @@ export function MemoryAtlasInspector({ selected, atlas }: { selected: MemoryAtla
     }
   };
 
-  const transitionCandidate = async (status: "promoted" | "rolled-back", reason: string) => {
+  const transitionCandidate = async (status: "canary" | "promoted" | "rolled-back", reason: string) => {
     if (!candidate || candidateBusy) return;
     setCandidateBusy(true);
     setCandidateError(null);
     try {
-      // Promotion/rollback receipts are produced server-side by the executor;
-      // the client just needs a non-empty receipts array to satisfy the store
-      // guard for `promoted` (rolled-back requires none).
+      // Promotion/canary/rollback receipts are produced server-side by the
+      // executor; the client just needs a non-empty receipts array to satisfy
+      // the store guard for `canary`/`promoted` (rolled-back requires none).
       const result = await gateway.transitionEvolutionCandidate(candidate.id, {
         expectedRevision: candidate.revision,
         status,
         reason,
-        ...(status === "promoted" ? { evidence: { receipts: ["manual-promote"] } } : {}),
+        ...(status === "rolled-back" ? {} : { evidence: { receipts: [`manual-${status}`] } }),
       });
       setCandidate(result.candidate);
     } catch (error) {
@@ -96,7 +96,14 @@ export function MemoryAtlasInspector({ selected, atlas }: { selected: MemoryAtla
           <div className="mt-3 flex flex-wrap gap-2">
             {["pending", "evaluating", "approved"].includes(candidate.status) && <Button size="sm" variant="outline" disabled={candidateBusy} onClick={() => void rejectCandidate()}>{candidateBusy ? t("shell.memory.evolution.rejecting") : t("shell.memory.evolution.reject")}</Button>}
             {candidate.status === "approved" && evolutionConfig?.promotionMode !== "off" && <Button size="sm" disabled={candidateBusy} onClick={() => void transitionCandidate("promoted", "Promoted from Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.promoting") : t("shell.memory.evolution.promote")}</Button>}
-            {candidate.status === "promoted" && <Button size="sm" variant="outline" disabled={candidateBusy} onClick={() => void transitionCandidate("rolled-back", "Rolled back from Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.rollingBack") : t("shell.memory.evolution.rollback")}</Button>}
+            {/* Canary exists only under its own mode and only for a low-risk
+                candidate — the same two conditions the gateway enforces. There
+                was no button at all, so the mode was unreachable from the UI. */}
+            {candidate.status === "approved" && evolutionConfig?.promotionMode === "low-risk-canary" && candidate.risk === "low" && <Button size="sm" variant="outline" disabled={candidateBusy} onClick={() => void transitionCandidate("canary", "Canaried from Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.canarying") : t("shell.memory.evolution.canary")}</Button>}
+            {/* A canaried candidate is already applied: it can be confirmed or
+                undone. Without these it had no action at all and was stuck. */}
+            {candidate.status === "canary" && <Button size="sm" disabled={candidateBusy} onClick={() => void transitionCandidate("promoted", "Promoted from canary in Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.promoting") : t("shell.memory.evolution.promote")}</Button>}
+            {["promoted", "canary"].includes(candidate.status) && <Button size="sm" variant="outline" disabled={candidateBusy} onClick={() => void transitionCandidate("rolled-back", "Rolled back from Memory Atlas review")}>{candidateBusy ? t("shell.memory.evolution.rollingBack") : t("shell.memory.evolution.rollback")}</Button>}
           </div>
         </>}
         {!candidate && !candidateError && <span>{t("shell.memory.evolution.loading")}</span>}

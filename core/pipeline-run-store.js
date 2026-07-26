@@ -85,14 +85,21 @@ const STAGE_TRANSITIONS = {
   pending: new Set(["running", "awaiting_approval", "blocked", "skipped", "cancelled"]),
   running: new Set(["awaiting_approval", "blocked", "budget_paused", "interrupted", "uncertain", "completed", "failed", "cancelled"]),
   awaiting_approval: new Set(["blocked", "completed", "failed", "cancelled"]),
-  blocked: new Set(["running", "failed", "skipped", "cancelled"]),
+  // `pending` re-arms a blocked stage so advance() will pick it up again.
+  // Most block reasons are transient (runner transition budget exhausted, an
+  // engine export briefly unavailable), and without this edge a blocked run
+  // had no way back: resume() refused it and advance() only looks at pending.
+  blocked: new Set(["pending", "running", "failed", "skipped", "cancelled"]),
   budget_paused: new Set(["running", "interrupted", "failed", "cancelled"]),
   interrupted: new Set(["running", "failed", "cancelled"]),
   // Uncertain writes are resolved only through the verifier-gated branch in
   // updateStage(); ordinary transition edges deliberately cannot resurrect
   // them.
   uncertain: new Set(),
-  failed: new Set(["running", "skipped", "cancelled"]),
+  // `pending` re-arms a failed stage for another attempt. claimStage() still
+  // enforces the maxAttempts ceiling, so this edge cannot loop forever — it
+  // just gives the runner a way back, which it never had.
+  failed: new Set(["pending", "running", "skipped", "cancelled"]),
   completed: new Set(),
   skipped: new Set(),
   cancelled: new Set(),
@@ -1528,7 +1535,21 @@ export class PipelineRunStore {
 
   resume(runId, options = {}) {
     return this._mutate(runId, "run.resumed", (state, at, sensitive) => {
-      if (state.status !== "paused" && state.status !== "interrupted") throw new Error("pipeline_resume_invalid");
+      // `blocked` was a terminal trap: the run-level edge blocked -> running is
+      // legal, but nothing performed it, so one transient dependency failure
+      // killed a mission permanently and the only way out was Cancel.
+      if (!["paused", "interrupted", "blocked"].includes(state.status)) {
+        throw new Error("pipeline_resume_invalid");
+      }
+      // Re-arm blocked stages so advance() (which only looks for `pending`)
+      // will retry them. The block reason is cleared with them.
+      if (state.status === "blocked") {
+        state.stages = state.stages.map((stage) => (
+          stage.status === "blocked"
+            ? { ...stage, status: "pending", error: null, startedAt: null, finishedAt: null }
+            : stage
+        ));
+      }
       const uncertain = state.stages.filter((stage) => stage.status === "uncertain" || stage.uncertain === true);
       let checkpointMarker = null;
       state.stages = state.stages.map((stage) => {

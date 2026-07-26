@@ -867,6 +867,14 @@ export interface AppConfig {
   /** Non-secret engine tuning (permissions/roles/budgets); shown in Advanced. */
   engine?: Record<string, unknown>;
   /**
+   * Engine settings the validator REFUSED, each replaced by a default. Present
+   * whenever the engine bundle could be loaded. These are not migrations —
+   * every entry means the value stored in `engine` is not the value in force,
+   * so the UI has to say so rather than render a setting that silently does
+   * nothing.
+   */
+  engineConfigRejections?: Array<{ path: string; message: string }>;
+  /**
    * Employee access principals (public metadata only; token hashes stay in secrets).
    * Used for chargeback tagging and optional require-token mode.
    */

@@ -1,9 +1,17 @@
 import type { MessageCatalog } from "../../types";
 
 export const enSettings = {
-  "settings.runtimeHealth.degraded": "Temporarily degraded after {{count}} failed check(s): {{reason}}. Keeping the last healthy state to prevent status flicker.",
-  "settings.runtimeHealth.stale": "Showing the last healthy state while the live check recovers: {{reason}}.",
+  "settings.runtimeHealth.degraded": {
+    one: "Temporarily degraded after {count} failed check: {reason}. Keeping the last healthy state to prevent status flicker.",
+    other: "Temporarily degraded after {count} failed checks: {reason}. Keeping the last healthy state to prevent status flicker.",
+  },
+  "settings.runtimeHealth.stale": "Showing the last healthy state while the live check recovers: {reason}.",
   "settings.runtimeHealth.unknownReason": "temporary check failure",
+  "settings.configRejected.title": {
+    one: "1 setting was rejected and is not in force",
+    other: "{count} settings were rejected and are not in force",
+  },
+  "settings.configRejected.body": "The engine refused these values and is running on its defaults instead. Fix or clear them — what is shown below is not what is applied.",
   "settings.title": "Settings",
   "settings.sectionNav": "Settings section",
   "settings.saved": "Saved",

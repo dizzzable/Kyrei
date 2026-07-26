@@ -12,14 +12,14 @@ export function safePath(workspace: string, target: string): string {
   const t = target ?? ".";
   // Windows-specific escape vectors (Property 12): drive-relative (C:rel),
   // UNC (\\server\share), device/extended namespace (\\?\, \\.\).
-  if (/^[a-zA-Z]:(?![\\/])/.test(t)) throw new Error(`Drive-relative путь запрещён: ${target}`);
-  if (/^\\\\/.test(t) || /^\/\//.test(t)) throw new Error(`UNC/device путь запрещён: ${target}`);
+  if (/^[a-zA-Z]:(?![\\/])/.test(t)) throw new Error(`Drive-relative path is forbidden: ${target}`);
+  if (/^\\\\/.test(t) || /^\/\//.test(t)) throw new Error(`UNC or device path is forbidden: ${target}`);
   const abs = resolve(workspace, t);
   const rel = relative(workspace, abs);
   // rel === "" means target IS the workspace root. An absolute rel means a
   // different drive/root (cross-drive escape). ".." means parent escape.
   if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
-    throw new Error(`Путь вне рабочей папки запрещён: ${target}`);
+    throw new Error(`Path outside the workspace is forbidden: ${target}`);
   }
   return abs;
 }

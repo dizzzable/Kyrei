@@ -9,6 +9,7 @@ import {
   mergeProviderOptions,
 } from "./cache-packing.js";
 import { buildSystemPrompt, buildSystemPromptParts } from "./system.js";
+import { withWorkingStatePin, isWorkingStatePinMessage } from "../context/working-state.js";
 
 describe("cache-packing (Wave B2)", () => {
   it("joins parts like buildSystemPrompt", () => {
@@ -155,6 +156,38 @@ describe("prefix caching — tool + history breakpoints (Wave B3)", () => {
     const messages = [{ role: "user", content: "hi" }] as ModelMessage[];
     expect(applyHistoryCacheBreakpoint(messages, "openai-responses")).toBe(messages);
     expect(applyHistoryCacheBreakpoint([], "anthropic-messages")).toEqual([]);
+  });
+
+  it("anchors before the working-state pin so the breakpoint survives re-pinning", () => {
+    // Regression: the anchor landed on the pin, and withWorkingStatePin strips
+    // the previous pin before appending a fresh one — so the message carrying
+    // the breakpoint was deleted on the next step and history never cached.
+    const history = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "real last history message" },
+    ] as ModelMessage[];
+
+    const step1 = applyHistoryCacheBreakpoint(withWorkingStatePin(history), "anthropic-messages");
+    const cc = (m: ModelMessage) =>
+      (m as { providerOptions?: { anthropic?: { cacheControl?: { type: string } } } })
+        .providerOptions?.anthropic?.cacheControl?.type;
+
+    // The pin is last and uncached; the anchor is the message before it.
+    expect(isWorkingStatePinMessage(step1[step1.length - 1]!)).toBe(true);
+    expect(cc(step1[step1.length - 1]!)).toBeUndefined();
+    expect(cc(step1[step1.length - 2]!)).toBe("ephemeral");
+
+    // Next step re-pins: the old pin is dropped, a new one appended, and the
+    // anchored message must still carry the breakpoint.
+    const step2 = withWorkingStatePin(step1);
+    expect(step2.filter(isWorkingStatePinMessage)).toHaveLength(1);
+    expect(step2.some((m) => cc(m) === "ephemeral")).toBe(true);
+    expect(cc(step2[step2.length - 2]!)).toBe("ephemeral");
+  });
+
+  it("falls back to leaving history alone when every message is a pin", () => {
+    const onlyPin = withWorkingStatePin([]);
+    expect(applyHistoryCacheBreakpoint(onlyPin, "anthropic-messages")).toBe(onlyPin);
   });
 
   it("mergeProviderOptions keeps existing keys when layering cache control", () => {

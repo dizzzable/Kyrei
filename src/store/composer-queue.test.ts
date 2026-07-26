@@ -152,4 +152,33 @@ describe("composer-queue", () => {
       expect(MAX_AUTO_DRAIN_ATTEMPTS).toBe(4);
     });
   });
+
+  describe("drain ordering (Composer contract)", () => {
+    // Regression: Composer dequeued the head and *then* called onSend, which
+    // early-returns while approval or file review is blocking. The entry was
+    // removed and silently dropped. It now peeks, checks `disabled`, and only
+    // dequeues when the send can actually proceed — this test pins the shape
+    // that makes that possible.
+    it("leaves the head in place until it is explicitly dequeued", () => {
+      enqueueText("first");
+      enqueueText("second");
+
+      const head = $queuedPromptsBySession.get()[SID]?.[0];
+      expect(head?.text).toBe("first");
+      // Peeking must not mutate the queue.
+      expect($queuedPromptsBySession.get()[SID]).toHaveLength(2);
+
+      const removed = dequeueQueuedPrompt(SID);
+      expect(removed?.id).toBe(head?.id);
+      expect($queuedPromptsBySession.get()[SID]).toHaveLength(1);
+    });
+
+    it("gives every entry a stable id so attempts can be counted per entry", () => {
+      enqueueText("one");
+      enqueueText("two");
+      const ids = ($queuedPromptsBySession.get()[SID] ?? []).map((entry) => entry.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.every((id) => typeof id === "string" && id.length > 0)).toBe(true);
+    });
+  });
 });

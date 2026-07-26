@@ -77,6 +77,50 @@ describe("session-engine-primary mapping", () => {
     expect(preferMessagesForPrimary(json, []).source).toBe("json");
   });
 
+  it("backfills fields the engine mirror does not carry", () => {
+    // Regression: the engine row was returned wholesale, so imageAttachments,
+    // attachments, errorCode, usage and modelId — none of which the mirror
+    // serializes — were deleted from the conversation on reload. enginePrimary
+    // is the default, so this was the default behaviour.
+    const json = [{
+      id: "1",
+      role: "user",
+      text: "look at this",
+      parts: [{ type: "text", text: "look at this" }, { type: "image", url: "blob:screenshot" }],
+      imageAttachments: [{ path: "/tmp/shot.png" }],
+      attachments: [{ name: "notes.md" }],
+      errorCode: "provider_overloaded",
+      usage: { totalTokens: 42 },
+      modelId: "claude-opus-5",
+    }];
+    const engine = [{ id: "1", role: "user", text: "look at this", content: "look at this", at: "t", parts: [{ type: "text", text: "look at this" }] }];
+
+    const { messages, source } = preferMessagesForPrimary(json, engine);
+    expect(source).toBe("engine");
+    expect(messages[0]).toMatchObject({
+      imageAttachments: [{ path: "/tmp/shot.png" }],
+      attachments: [{ name: "notes.md" }],
+      errorCode: "provider_overloaded",
+      usage: { totalTokens: 42 },
+      modelId: "claude-opus-5",
+    });
+    // The image part survives because the mirror cannot represent it.
+    expect(messages[0].parts).toEqual(json[0].parts);
+    // Engine still wins on the fields it does mirror.
+    expect(messages[0].at).toBe("t");
+  });
+
+  it("keeps engine parts when the JSON copy has nothing the mirror would drop", () => {
+    const json = [{ id: "1", parts: [{ type: "text", text: "old" }] }];
+    const engine = [{ id: "1", parts: [{ type: "text", text: "new" }, { type: "tool", name: "read_file" }] }];
+    expect(preferMessagesForPrimary(json, engine).messages[0].parts).toEqual(engine[0].parts);
+  });
+
+  it("leaves engine-only messages untouched", () => {
+    const engine = [{ id: "only-engine", text: "hi" }];
+    expect(preferMessagesForPrimary([], engine).messages[0]).toEqual(engine[0]);
+  });
+
   it("generates stable clientId when engine message lacks one", () => {
     const m = engineMessageToGateway(
       {

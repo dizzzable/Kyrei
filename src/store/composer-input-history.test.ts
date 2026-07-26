@@ -34,6 +34,26 @@ describe("deriveUserHistory", () => {
   it("returns an empty ring when there are no user messages", () => {
     expect(deriveUserHistory([{ role: "assistant", text: "hi" }], getText)).toEqual([]);
   });
+
+  it("reads text out of the message SHAPE Composer actually receives", () => {
+    // The previous version invented `{role, text}` literals and asserted
+    // against them. App passes `ChatMessage`, which has NO `text` and no
+    // `content` — only `parts` — so the accessor returned "" for every message
+    // and the ring was permanently empty while this test stayed green.
+    const composerAccessor = (message: { parts: Array<{ type: string; text?: string }> }) =>
+      message.parts.filter((part) => part.type === "text").map((part) => part.text ?? "").join("").trim();
+    const messages = [
+      { role: "user", parts: [{ type: "text", text: "first question" }] },
+      { role: "assistant", parts: [{ type: "text", text: "an answer" }] },
+      { role: "user", parts: [{ type: "tool", name: "read_file" }, { type: "text", text: "second question" }] },
+      { role: "user", parts: [{ type: "tool", name: "read_file" }] },
+    ];
+
+    expect(deriveUserHistory(messages, composerAccessor)).toEqual([
+      "second question",
+      "first question",
+    ]);
+  });
 });
 
 describe("browse backward / forward", () => {

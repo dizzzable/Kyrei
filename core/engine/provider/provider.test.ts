@@ -11,7 +11,7 @@ import {
   isServerError,
   retryAfterMsOf,
 } from "./errors.js";
-import { resolve, isLocalBaseURL, registerModel } from "./registry.js";
+import { resolve, isLocalBaseURL, registerModel, canonicalModelId } from "./registry.js";
 import { openStream, type StreamLike } from "./open-stream.js";
 import { buildModel, buildProviderOptions, hasProviderCredentials } from "./build.js";
 
@@ -68,6 +68,18 @@ describe("buildProviderOptions (reasoning/effort)", () => {
     expect(buildProviderOptions("openai-responses", { effort: "xhigh" })).toEqual({ openai: { reasoningEffort: "xhigh" } });
     expect(buildProviderOptions("openai-responses", { effort: "max" })).toEqual({ openai: { reasoningEffort: "xhigh" } });
   });
+  it("keeps max distinct from xhigh on providers that support both", () => {
+    // Anthropic and Bedrock expose max as its own level above xhigh; collapsing
+    // it silently downgraded every request that asked for it.
+    expect(buildProviderOptions("anthropic-messages", { effort: "max" }, undefined, "claude-opus-5")).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "max" },
+    });
+    expect(buildProviderOptions("anthropic-messages", { effort: "xhigh" }, undefined, "claude-opus-5")).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "xhigh" },
+    });
+    expect(buildProviderOptions("amazon-bedrock", { effort: "max" }, undefined, "anthropic.claude-opus-5"))
+      .toMatchObject({ bedrock: { reasoningConfig: { maxReasoningEffort: "max" } } });
+  });
   it("derives from fast/reasoning when no explicit effort", () => {
     expect(buildProviderOptions("openai-chat", { fast: true })).toEqual({ kyrei: { reasoningEffort: "minimal" } });
     expect(buildProviderOptions("openai-chat", { reasoning: true })).toEqual({ kyrei: { reasoningEffort: "medium" } });
@@ -79,8 +91,10 @@ describe("buildProviderOptions (reasoning/effort)", () => {
     expect(buildProviderOptions("openai-chat", { effort: "high", fast: true })).toEqual({ kyrei: { reasoningEffort: "high" } });
   });
   it("maps thinking for Anthropic, Google, Vertex, and Bedrock", () => {
-    expect(buildProviderOptions("anthropic-messages", { effort: "high" })).toEqual({
-      anthropic: { thinking: { type: "enabled", budgetTokens: 16_000 } },
+    // budgetTokens is a hard 400 on Opus 4.7+/Sonnet 5/Fable 5; adaptive+effort
+    // is the current contract and the default for unknown ids.
+    expect(buildProviderOptions("anthropic-messages", { effort: "high" }, undefined, "claude-opus-5")).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
     });
     expect(buildProviderOptions("google-generative-ai", { effort: "medium" })).toEqual({
       google: {
@@ -95,14 +109,66 @@ describe("buildProviderOptions (reasoning/effort)", () => {
       google: { thinkingConfig: { thinkingLevel: "low", includeThoughts: true } },
       vertex: { thinkingConfig: { thinkingLevel: "low", includeThoughts: true } },
     });
-    expect(buildProviderOptions("amazon-bedrock", { effort: "high" })).toMatchObject({
-      bedrock: {
-        reasoningConfig: {
-          type: "enabled",
-          maxReasoningEffort: "high",
-          budgetTokens: 16_000,
-        },
-      },
+    const legacyBedrock = buildProviderOptions(
+      "amazon-bedrock",
+      { effort: "high" },
+      undefined,
+      "anthropic.claude-sonnet-4-5",
+    ) as { bedrock: { reasoningConfig: Record<string, unknown> } };
+    expect(legacyBedrock.bedrock.reasoningConfig).toMatchObject({
+      type: "enabled",
+      budgetTokens: 16_000,
+    });
+    // `effort` ERRORS on Sonnet 4.5 / Haiku 4.5 — this assertion used to pin
+    // the opposite, while the very next test's comment said effort is not sent.
+    // The anthropic-messages branch already omitted it for the same reason.
+    expect(legacyBedrock.bedrock.reasoningConfig).not.toHaveProperty("maxReasoningEffort");
+  });
+  it("keeps the legacy budgetTokens contract for pre-4.6 Claude models", () => {
+    // Sonnet 4.5 / Haiku 4.5 / Opus 4.5 and older still require a token budget
+    // and reject the effort parameter, so neither adaptive nor effort is sent.
+    for (const id of ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-3-haiku-20240307"]) {
+      expect(buildProviderOptions("anthropic-messages", { effort: "high" }, undefined, id)).toEqual({
+        anthropic: { thinking: { type: "enabled", budgetTokens: 16_000 } },
+      });
+    }
+  });
+  it("caps xhigh to high on the 4.6 family, which predates xhigh", () => {
+    expect(buildProviderOptions("anthropic-messages", { effort: "xhigh" }, undefined, "claude-opus-4-6")).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
+    });
+    expect(buildProviderOptions("anthropic-messages", { effort: "max" }, undefined, "claude-sonnet-4-6")).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "max" },
+    });
+  });
+  it("normalizes Bedrock prefixes and Vertex version suffixes when classifying", () => {
+    expect(buildProviderOptions("anthropic-messages", { effort: "low" }, undefined, "claude-opus-4-5@20251101"))
+      .toEqual({ anthropic: { thinking: { type: "enabled", budgetTokens: 2_048 } } });
+    expect(buildProviderOptions("anthropic-messages", { effort: "low" }, undefined, "anthropic.claude-sonnet-5"))
+      .toEqual({ anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" } });
+  });
+
+  it("classifies Bedrock cross-region profiles and Vertex resource paths", () => {
+    // Regression: only a single leading prefix segment was stripped, so
+    // `us.anthropic.*` — the standard Bedrock inference-profile form — and full
+    // Vertex resource paths fell through to "adaptive" and were sent the exact
+    // budgetTokens-free payload those pre-4.6 models reject.
+    const legacy = { anthropic: { thinking: { type: "enabled", budgetTokens: 2_048 } } };
+    for (const id of [
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "eu.anthropic.claude-3-5-sonnet-20240620-v1:0",
+      "apac.anthropic.claude-haiku-4-5",
+      "projects/p/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-5",
+      "claude-instant-1.2",
+    ]) {
+      expect(buildProviderOptions("anthropic-messages", { effort: "low" }, undefined, id)).toEqual(legacy);
+    }
+    expect(buildProviderOptions("anthropic-messages", { effort: "low" }, undefined, "us.anthropic.claude-sonnet-5-v1:0"))
+      .toEqual({ anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" } });
+  });
+  it("maps minimal to low for Anthropic, whose effort enum has no minimal", () => {
+    expect(buildProviderOptions("anthropic-messages", { fast: true }, undefined, "claude-opus-5")).toEqual({
+      anthropic: { thinking: { type: "adaptive", display: "summarized" }, effort: "low" },
     });
   });
 });
@@ -474,5 +540,41 @@ describe("openStream — provider fallback", () => {
     const start = (): StreamLike => streamOf([{ type: "text-delta", text: "a" }, { type: "finish" }]);
     const s = await openStream(2, false, start);
     expect(await collect(s)).toEqual(["text-delta", "finish"]);
+  });
+});
+
+describe("platform-hosted Claude resolves to a real price and window", () => {
+  // Bedrock/Vertex serve the same models under namespaced ids on different
+  // endpoints, so neither the direct lookup nor `isCanonicalHint` matched and
+  // every such deployment got `cost {0,0}` and unknown limits — turning every
+  // dollar budget into a no-op and leaving context accounting without a window.
+  it.each([
+    ["anthropic.claude-opus-4-5-v1:0", "amazon-bedrock"],
+    ["anthropic.claude-sonnet-4-5-20250929-v1:0", "amazon-bedrock"],
+    ["claude-opus-4-5@20250101", "google-vertex"],
+  ])("prices %s on %s", (id, protocol) => {
+    const entry = resolve(id, { protocol, baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com" });
+    expect(entry.cost.inputPerM).toBeGreaterThan(0);
+    expect(entry.cost.outputPerM).toBeGreaterThan(0);
+    expect(entry.limits.contextWindow).toBeGreaterThan(0);
+    // The caller's own id is preserved — only the pricing lookup is normalized.
+    expect(entry.id).toBe(id);
+  });
+
+  it("leaves a genuinely unknown model unpriced", () => {
+    const entry = resolve("anthropic.some-future-model-v1:0", { protocol: "amazon-bedrock" });
+    expect(entry.cost.inputPerM).toBe(0);
+  });
+
+  it("does not let the platform path bypass the canonical check for direct Anthropic", () => {
+    // A proxy claiming anthropic-messages on a foreign endpoint must still miss.
+    const entry = resolve("claude-opus-5", { protocol: "anthropic-messages", baseURL: "https://proxy.example.test/v1" });
+    expect(entry.cost.inputPerM).toBe(0);
+  });
+
+  it("normalizes ids without inventing one", () => {
+    expect(canonicalModelId("anthropic.claude-opus-4-5-v1:0")).toBe("claude-opus-4-5");
+    expect(canonicalModelId("claude-opus-4-5@20250101")).toBe("claude-opus-4-5");
+    expect(canonicalModelId("gpt-5")).toBe("gpt-5");
   });
 });

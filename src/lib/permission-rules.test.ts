@@ -6,10 +6,12 @@ import {
   canonicalizePermissionPathTarget,
   classifyPermissionRule,
   createExactCommandPermissionRule,
+  createExactMcpPermissionRule,
   createExactPathPermissionRule,
   createExactToolPermissionRule,
   guidedPermissionRuleIdentity,
   importPermissionRules,
+  permissionRuleFromApproval,
   permissionRuleMatches,
   permissionToolSupportsInteractiveAsk,
   resolvePermissionRuleAction,
@@ -190,5 +192,55 @@ describe("permission rule import and resolution", () => {
 
     expect(permissionRuleMatches(rule, "edit_file:SRC/APP.TSX")).toBe(false);
     expect(permissionRuleMatches(rule, "edit_file:SRC/APP.TSX", { caseInsensitive: true })).toBe(true);
+  });
+});
+
+describe("always-allow on an MCP call is scoped to that server and tool", () => {
+  // Regression: `mcp_call` fell into the tool-wide bucket, so approving ONE
+  // call produced a rule matching `mcp_call` with any suffix — a blanket grant
+  // over every tool on every configured server. The backend key is
+  // `mcp_call:<serverId>:<tool>`, and write_file already scopes by path.
+  const args = { serverId: "filesystem", tool: "write_file", arguments: {} };
+
+  it("builds a rule that matches only the approved server and tool", () => {
+    const rule = permissionRuleFromApproval("mcp_call", args, "allow");
+    expect(rule).not.toBeNull();
+
+    const matcher = new RegExp(rule!.pattern);
+    expect(matcher.test("mcp_call:filesystem:write_file")).toBe(true);
+    // A different tool on the same server, and the same tool elsewhere.
+    expect(matcher.test("mcp_call:filesystem:delete_file")).toBe(false);
+    expect(matcher.test("mcp_call:other-server:write_file")).toBe(false);
+    // And it must not become a tool-wide grant.
+    expect(matcher.test("mcp_call")).toBe(false);
+    expect(matcher.test("mcp_call:anything")).toBe(false);
+  });
+
+  it("refuses to promote an always-allow when the target is missing", () => {
+    // Same guard run_command has: no target must never widen into "any call".
+    expect(permissionRuleFromApproval("mcp_call", { serverId: "fs" }, "allow")).toBeNull();
+    expect(permissionRuleFromApproval("mcp_call", { tool: "read" }, "allow")).toBeNull();
+    expect(permissionRuleFromApproval("mcp_call", {}, "allow")).toBeNull();
+  });
+
+  it("still allows a tool-wide DENY when the target is missing", () => {
+    // Widening is only dangerous in the allow direction.
+    const rule = permissionRuleFromApproval("mcp_call", {}, "deny");
+    expect(rule).not.toBeNull();
+    expect(new RegExp(rule!.pattern).test("mcp_call:any:thing")).toBe(true);
+  });
+
+  it("keeps a deny scoped when the target is present", () => {
+    const rule = permissionRuleFromApproval("mcp_call", args, "deny");
+    const matcher = new RegExp(rule!.pattern);
+    expect(matcher.test("mcp_call:filesystem:write_file")).toBe(true);
+    expect(matcher.test("mcp_call:filesystem:read_file")).toBe(false);
+  });
+
+  it("rejects a target containing regex metacharacters as a literal", () => {
+    const rule = createExactMcpPermissionRule("srv.*", "a+b", "allow");
+    const matcher = new RegExp(rule.pattern);
+    expect(matcher.test("mcp_call:srv.*:a+b")).toBe(true);
+    expect(matcher.test("mcp_call:srvXY:aab")).toBe(false);
   });
 });

@@ -1,0 +1,4 @@
+{
+  "comment": "Ceiling for `tsc -p tsconfig.core-js.json` errors, excluding the generated .dist bundle. Ratchet DOWN as core/*.js and electron/** get annotated; never raise it to make a red gate green.",
+  "maxErrors": 528
+}

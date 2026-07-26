@@ -37,15 +37,64 @@ function scrollToBottom(element: HTMLElement): void {
   element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
 }
 
-function messageNodes(element: HTMLElement): HTMLElement[] {
-  return Array.from(element.querySelectorAll<HTMLElement>("[data-message-id]"));
+/**
+ * A snapshot taken while following is restored by scrolling to the bottom, and
+ * every transition into `paused` writes a fresh anchor of its own — so an
+ * anchor recorded while following is written and never read. Skipping it is
+ * what keeps the per-token path free of DOM measurement.
+ */
+export function snapshotNeedsAnchor(mode: FollowOutputMode): boolean {
+  return mode === "paused";
+}
+
+/**
+ * Index of the first node whose bottom edge lies below `containerTop`.
+ *
+ * PRECONDITION: `bottomAt` is non-decreasing in `index`. Message wrappers are
+ * document-order block siblings, so this holds; equal values (a zero-height
+ * message) are fine. Returns `count - 1` when every node is above the fold,
+ * matching the previous `?? nodes.at(-1)` fallback, and `-1` for an empty list.
+ *
+ * Replaces a linear scan from the TOP: while pinned at the bottom — the normal
+ * streaming case — that measured every message that had scrolled past, once per
+ * streamed token.
+ */
+export function firstVisibleNodeIndex(
+  count: number,
+  bottomAt: (index: number) => number,
+  containerTop: number,
+): number {
+  if (count <= 0) return -1;
+  let low = 0;
+  let high = count - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (bottomAt(mid) > containerTop + 1) {
+      found = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return found === -1 ? count - 1 : found;
+}
+
+function messageNodes(element: HTMLElement): NodeListOf<HTMLElement> {
+  return element.querySelectorAll<HTMLElement>("[data-message-id]");
 }
 
 function captureAnchor(element: HTMLElement): ScrollAnchor | null {
   const nodes = messageNodes(element);
   if (nodes.length === 0) return null;
   const containerTop = element.getBoundingClientRect().top;
-  const visible = nodes.find((node) => node.getBoundingClientRect().bottom > containerTop + 1) ?? nodes[nodes.length - 1];
+  const index = firstVisibleNodeIndex(
+    nodes.length,
+    (i) => nodes[i]!.getBoundingClientRect().bottom,
+    containerTop,
+  );
+  const visible = nodes[index];
+  if (!visible) return null;
   const messageId = visible.dataset.messageId;
   if (!messageId) return null;
   return {
@@ -56,7 +105,13 @@ function captureAnchor(element: HTMLElement): ScrollAnchor | null {
 
 function restoreAnchor(element: HTMLElement, anchor: ScrollAnchor | null): boolean {
   if (!anchor) return false;
-  const node = messageNodes(element).find((candidate) => candidate.dataset.messageId === anchor.messageId);
+  // Let the DOM do the lookup instead of materializing and scanning every node.
+  const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(anchor.messageId)
+    : null;
+  const node = escaped
+    ? element.querySelector<HTMLElement>(`[data-message-id="${escaped}"]`)
+    : [...messageNodes(element)].find((candidate) => candidate.dataset.messageId === anchor.messageId);
   if (!node) return false;
   const containerTop = element.getBoundingClientRect().top;
   const delta = node.getBoundingClientRect().top - containerTop - anchor.offset;
@@ -93,10 +148,13 @@ export function useConversationScroll(sessionId: string | null, dependencyKey: u
   const storeSnapshot = useCallback((sessionKey: string | null, override?: Partial<ScrollSnapshot>) => {
     if (!sessionKey) return;
     const element = scrollRef.current;
+    const mode = override?.mode ?? followModeRef.current;
     snapshotsRef.current.set(sessionKey, {
-      mode: override?.mode ?? followModeRef.current,
+      mode,
       top: override?.top ?? element?.scrollTop ?? 0,
-      anchor: override?.anchor ?? (element ? captureAnchor(element) : null),
+      // Callers no longer pass an anchor: whether one is worth measuring is a
+      // property of the mode, and this is the only place that knows both.
+      anchor: override?.anchor ?? (element && snapshotNeedsAnchor(mode) ? captureAnchor(element) : null),
     });
   }, []);
 
@@ -110,7 +168,7 @@ export function useConversationScroll(sessionId: string | null, dependencyKey: u
     const snapshot = snapshotsRef.current.get(sessionId);
     if (followModeRef.current === "following") {
       withProgrammaticScroll(() => scrollToBottom(element), suppressScrollRef);
-      writeSnapshot({ mode: "following", top: element.scrollTop, anchor: captureAnchor(element) });
+      writeSnapshot({ mode: "following", top: element.scrollTop });
       return;
     }
     if (!restoreAnchor(element, snapshot?.anchor ?? null)) {
@@ -118,7 +176,7 @@ export function useConversationScroll(sessionId: string | null, dependencyKey: u
         element.scrollTop = snapshot?.top ?? element.scrollTop;
       }, suppressScrollRef);
     }
-    writeSnapshot({ mode: "paused", top: element.scrollTop, anchor: captureAnchor(element) });
+    writeSnapshot({ mode: "paused", top: element.scrollTop });
   }, [sessionId, writeSnapshot]);
 
   const pauseFollowing = useCallback(() => {
@@ -132,7 +190,7 @@ export function useConversationScroll(sessionId: string | null, dependencyKey: u
     if (!element || !sessionId) return;
     setMode("following");
     withProgrammaticScroll(() => scrollToBottom(element), suppressScrollRef);
-    writeSnapshot({ mode: "following", top: element.scrollTop, anchor: captureAnchor(element) });
+    writeSnapshot({ mode: "following", top: element.scrollTop });
   }, [sessionId, setMode, writeSnapshot]);
 
   const handleScroll = useCallback(() => {
@@ -140,11 +198,11 @@ export function useConversationScroll(sessionId: string | null, dependencyKey: u
     if (!element || !sessionId || suppressScrollRef.current) return;
     if (isNearConversationBottom(element)) {
       setMode("following");
-      writeSnapshot({ mode: "following", top: element.scrollTop, anchor: captureAnchor(element) });
+      writeSnapshot({ mode: "following", top: element.scrollTop });
       return;
     }
     setMode("paused");
-    writeSnapshot({ mode: "paused", top: element.scrollTop, anchor: captureAnchor(element) });
+    writeSnapshot({ mode: "paused", top: element.scrollTop });
   }, [sessionId, setMode, writeSnapshot]);
 
   const handleWheelCapture = useCallback((event: WheelEvent<HTMLDivElement>) => {
@@ -187,7 +245,7 @@ export function useConversationScroll(sessionId: string | null, dependencyKey: u
         return;
       }
       withProgrammaticScroll(() => scrollToBottom(element), suppressScrollRef);
-      writeSnapshot({ mode: "following", top: element.scrollTop, anchor: captureAnchor(element) });
+      writeSnapshot({ mode: "following", top: element.scrollTop });
     });
   }, [sessionId, setMode, storeSnapshot, writeSnapshot]);
 

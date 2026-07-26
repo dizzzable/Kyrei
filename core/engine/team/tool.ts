@@ -215,11 +215,19 @@ function createTaskDeadline(
     }, timeoutMs);
   };
   armIdleTimeout();
+  // The idle threshold above is deliberately advisory — it re-arms and keeps
+  // waiting on the provider rather than failing the role. maxRuntime is not:
+  // it is the hard ceiling (default 30min, capped at 2h), and firing a
+  // notification without aborting made it a cap in name only, so a wedged
+  // provider stream held the team run open until the user cancelled the turn.
   const maxRuntimeId = controller.signal.aborted
     ? undefined
     : setTimeout(() => {
       if (controller.signal.aborted) return;
-      onThreshold(timeoutError(maxRuntimeMs, "runtime"));
+      const error = timeoutError(maxRuntimeMs, "runtime");
+      onThreshold(error);
+      if (idleTimeoutId !== undefined) clearTimeout(idleTimeoutId);
+      controller.abort(error);
     }, maxRuntimeMs);
   return {
     signal: controller.signal,

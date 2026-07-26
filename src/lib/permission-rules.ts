@@ -201,6 +201,33 @@ export function createExactPathPermissionRule(
 }
 
 /**
+ * Build one exact rule for a single MCP tool on a single server.
+ *
+ * The backend permission key is `mcp_call:<serverId>:<tool>`
+ * (security/tool-approval.ts). Without this, "Always allow" on one MCP call
+ * produced a tool-wide `mcp_call` rule — silently granting every tool on every
+ * configured server, which is the same mistake `write_file` avoids by scoping
+ * to a path.
+ */
+export function createExactMcpPermissionRule(
+  serverId: string,
+  tool: string,
+  action: PermissionRuleAction,
+): PermissionRule {
+  if (!isPermissionRuleAction(action)) throw new TypeError("permission_rule_action_invalid");
+  const server = typeof serverId === "string" ? serverId.trim() : "";
+  const name = typeof tool === "string" ? tool.trim() : "";
+  // A `:` in either segment makes the key ambiguous: server "a" + tool "b:c"
+  // and server "a:b" + tool "c" produce byte-identical rules, so an allow on
+  // one would silently cover the other.
+  if (!server || !name || `${server}${name}`.includes("\0")
+    || server.includes(":") || name.includes(":")) {
+    throw new TypeError("permission_rule_mcp_target_invalid");
+  }
+  return { pattern: exactPattern(`mcp_call:${server}:${name}`), action };
+}
+
+/**
  * Build a durable permission rule from a pending approval tool call.
  * Returns null when the tool/args cannot form a safe exact rule.
  */
@@ -237,11 +264,22 @@ export function permissionRuleFromApproval(
         return action === "allow" ? null : createExactToolPermissionRule(name, action);
       }
     }
+    if (name === "mcp_call") {
+      const serverId = typeof a.serverId === "string" ? a.serverId.trim() : "";
+      const tool = typeof a.tool === "string" ? a.tool.trim() : "";
+      // Same rule as run_command: an always-allow must never be promoted to a
+      // tool-wide grant just because the target was missing.
+      if (!serverId || !tool) return action === "allow" ? null : createExactToolPermissionRule(name, action);
+      try {
+        return createExactMcpPermissionRule(serverId, tool, action);
+      } catch {
+        return action === "allow" ? null : createExactToolPermissionRule(name, action);
+      }
+    }
     if (
       name === "web_search"
       || name === "web_fetch"
       || name === "diagnostics"
-      || name === "mcp_call"
       || name === "mcp_list_tools"
     ) {
       return createExactToolPermissionRule(name, action);

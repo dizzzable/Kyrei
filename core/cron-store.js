@@ -4,6 +4,11 @@ import { dirname, join } from "node:path";
 
 const SCHEMA_VERSION = 1;
 const DEFAULT_HISTORY_LIMIT = 100;
+/**
+ * Two hours: long enough for a genuine long-horizon agent run, short enough
+ * that a wedged one self-heals without an app restart.
+ */
+const DEFAULT_STALE_RUN_MS = 2 * 60 * 60 * 1_000;
 const MAX_NAME_LENGTH = 160;
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_RUN_TEXT_LENGTH = 4_000;
@@ -116,6 +121,14 @@ export class CronStore {
     now = () => new Date(),
     idFactory = randomUUID,
     maxHistory = DEFAULT_HISTORY_LIMIT,
+    /**
+     * How long a `running` record may hold the durable claim before it is
+     * treated as abandoned. The claim used to be released only by finishRun()
+     * or by a fresh load(), and the gateway wires runJob with no timeout and no
+     * AbortSignal — so one hung provider stream disabled that job until the app
+     * restarted, while the UI kept reporting "running" forever.
+     */
+    staleRunMs = DEFAULT_STALE_RUN_MS,
   } = {}) {
     const root = runtimeDir ?? dataDir;
     if (!file && (!root || typeof root !== "string")) throw new TypeError("cron-runtime-dir-required");
@@ -129,6 +142,8 @@ export class CronStore {
     this.now = now;
     this.idFactory = idFactory;
     this.maxHistory = maxHistory;
+    if (!Number.isFinite(staleRunMs) || staleRunMs < 60_000) throw new RangeError("cron-stale-run-invalid");
+    this.staleRunMs = staleRunMs;
     this.operationChain = Promise.resolve();
     this.tempCounter = 0;
     this.state = emptyState(this.nowDate().toISOString());
@@ -251,11 +266,25 @@ export class CronStore {
     return this.commit(state => {
       const job = requireJob(state, id);
       const runs = state.runs[id] ?? (state.runs[id] = []);
+      const started = this.nowDate();
+      // Break an abandoned claim before honouring it. finishRun() is the only
+      // other release, and it fires only when the run promise settles — which
+      // a hung provider stream never does — so without this the job was dead
+      // until the next app start.
+      for (const entry of runs) {
+        if (entry.status !== "running") continue;
+        const startedAt = Date.parse(entry.startedAt ?? "");
+        if (Number.isFinite(startedAt) && started.getTime() - startedAt >= this.staleRunMs) {
+          entry.status = "cancelled";
+          entry.finishedAt = started.toISOString();
+          entry.durationMs = started.getTime() - startedAt;
+          entry.error = "cron_run_abandoned";
+        }
+      }
       // This durable claim guard complements the scheduler's in-memory lock.
       // It also protects callers that share a store through separate runner
       // instances: the serialized commit permits only one running record.
       if (runs.some(entry => entry.status === "running")) return null;
-      const started = this.nowDate();
       const scheduledFor = trigger === "scheduled"
         ? floorToMinute(options.scheduledFor ?? started).toISOString()
         : null;

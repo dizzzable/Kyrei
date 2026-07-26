@@ -326,6 +326,25 @@ kbd { border: 1px solid var(--k-border-soft); border-radius: 4px; padding: 0.08r
 }
 [data-theme="light"] .conversation-scroll { background: color-mix(in srgb, var(--k-bg) 66%, transparent); }
 
+/*
+ * Layout density. The setting was persisted and read by nothing — no attribute,
+ * no selector — so "Compact" looked identical to "Comfortable". Applied on the
+ * conversation shell alongside data-chat-surface.
+ */
+/* Message spacing lives on `.conversation-messages` (Tailwind `space-y-7`), not
+   on `.conversation-scroll`, which has a single child — the previous selector
+   matched nothing, so compact density changed no message spacing at all. The
+   `:not([hidden]) ~ :not([hidden])` shape matches Tailwind's own so this wins
+   on specificity rather than on stylesheet order. */
+.conversation-shell[data-density="compact"] .conversation-messages > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 0.75rem;
+}
+.conversation-shell[data-density="compact"] .assistant-message > :not([hidden]) ~ :not([hidden]) {
+  margin-top: 0.35rem;
+}
+.conversation-shell[data-density="compact"] .assistant-message p { line-height: 1.45; }
+.conversation-shell[data-density="compact"] .composer-area { padding-top: 0.25rem; padding-bottom: 0.5rem; }
+
 /* Desktop shell: Hermes information architecture on Linear's surface ladder. */
 .shell-titlebar {
   height: var(--app-titlebar-h);

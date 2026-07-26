@@ -238,6 +238,10 @@ describe("pipeline action executor e2e", () => {
 
     const written = await readFile(join(workspace, "notes", "hello.txt"), "utf8");
     expect(written).toContain("hello from pipeline e2e");
-  });
+    // This test chains three waitForPipelineRun polls (15s + 15s + 20s of
+    // allowance) against a 15s global testTimeout, so the 20s wait was
+    // unreachable and the whole test was a coin flip on a loaded runner.
+    // Give it a budget that actually covers its own waits.
+  }, 90_000);
 
 });

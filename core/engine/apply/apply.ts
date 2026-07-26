@@ -41,21 +41,21 @@ function seekWithAnchor(lines: string[], hunk: PatchHunk): { index: number; matc
 
 function applyHunk(lines: string[], hunk: PatchHunk, file: string): string[] {
   if (hunk.needle.length === 0) {
-    throw new ApplyError("NOT_FOUND", file, "Хунк без контекста для локализации вставки.");
+    throw new ApplyError("NOT_FOUND", file, "Hunk has no context lines to locate the insertion point.");
   }
   const { index, matches } = seekWithAnchor(lines, hunk);
   if (matches.length === 0) {
     throw new ApplyError(
       "NOT_FOUND",
       file,
-      `Контекст правки не найден (0 совпадений). Файл не изменён.\nИскомое:\n${hunk.needle.slice(0, 5).join("\n")}\nПроверьте актуальное содержимое (read_file) и обновите строки контекста.`,
+      `Edit context not found (0 matches). File unchanged.\nLooked for:\n${hunk.needle.slice(0, 5).join("\n")}\nRe-read the file (read_file) and rewrite the context lines to match.`,
     );
   }
   if (matches.length > 1) {
     throw new ApplyError(
       "AMBIGUOUS",
       file,
-      `Якорь совпал в ${matches.length} местах (строки: ${matches.map((m) => m + 1).join(", ")}) — правка отклонена. Добавьте больше строк контекста или '@@'-подсказку с уникальным заголовком.`,
+      `Context matched in ${matches.length} places (lines: ${matches.map((m) => m + 1).join(", ")}) — edit rejected as ambiguous. Add more context lines, or an '@@' hint naming a unique enclosing declaration.`,
     );
   }
   const out: string[] = [];
@@ -127,39 +127,39 @@ export async function applyPatch(
     const rel = relative(workspace, absTarget) || p.file;
 
     if (p.op === "delete") {
-      if (!(await exists(absTarget))) throw new ApplyError("MISSING", p.file, `Файл не найден: ${rel}`);
+      if (!(await exists(absTarget))) throw new ApplyError("MISSING", p.file, `File not found: ${rel}`);
       const oldText = (await readFile(absTarget)).toString("utf8");
       staged.push({ rel, absTarget, op: "delete", oldText, newText: "" });
       continue;
     }
 
     if (p.op === "add") {
-      if (await exists(absTarget)) throw new ApplyError("EXISTS", p.file, `Файл уже существует: ${rel} — используйте Update`);
+      if (await exists(absTarget)) throw new ApplyError("EXISTS", p.file, `File already exists: ${rel} — use *** Update File instead`);
       const meta = defaultNewMeta();
       const body = p.addBody ?? [];
-      if (body.length === 0) throw new ApplyError("NOOP", p.file, "Add File без содержимого (no-op).");
+      if (body.length === 0) throw new ApplyError("NOOP", p.file, "Add File has no body (no-op).");
       staged.push({ rel, absTarget, op: "add", meta, nextBytes: serialize(body, meta), oldText: "", newText: body.join("\n") } as StagedFile);
       continue;
     }
 
     // update / move
     const srcAbs = absTarget;
-    if (!(await exists(srcAbs))) throw new ApplyError("MISSING", p.file, `Файл не найден: ${rel}`);
+    if (!(await exists(srcAbs))) throw new ApplyError("MISSING", p.file, `File not found: ${rel}`);
     const buf = await readFile(srcAbs);
     const meta: FileMeta = detectMeta(buf);
     if (meta.encoding === "binary") {
-      throw new ApplyError("BINARY", p.file, `Файл бинарный или не UTF-8 — правка отклонена: ${rel}`);
+      throw new ApplyError("BINARY", p.file, `File is binary or not UTF-8 — edit rejected: ${rel}`);
     }
     const oldLines = decodeToLines(buf, meta);
     let cur = oldLines;
     for (const h of p.hunks) cur = applyHunk(cur, h, p.file);
     const oldText = oldLines.join("\n");
     const newText = cur.join("\n");
-    if (newText === oldText && p.op === "update") throw new ApplyError("NOOP", p.file, `Правка не меняет файл (no-op): ${rel}`);
+    if (newText === oldText && p.op === "update") throw new ApplyError("NOOP", p.file, `Edit leaves the file unchanged (no-op): ${rel}`);
 
     if (p.op === "move") {
       const destAbs = await validateWriteTarget(workspace, p.dest!);
-      if (await exists(destAbs)) throw new ApplyError("EXISTS", p.dest!, `Целевой файл уже существует: ${p.dest}`);
+      if (await exists(destAbs)) throw new ApplyError("EXISTS", p.dest!, `Move destination already exists: ${p.dest}`);
       staged.push({
         rel: relative(workspace, destAbs) || p.dest!,
         absTarget: destAbs,

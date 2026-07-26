@@ -326,10 +326,13 @@ export async function createTeamRoleExecutors(
             target.protocol,
             resolveTurnModelParams(options.modelParams, options.config.defaultReasoningEffort),
             target.reasoningTransport,
+            target.model,
           )
           : buildProviderOptions(
             target.protocol,
             resolveTurnModelParams(options.modelParams, options.config.defaultReasoningEffort),
+            undefined,
+            target.model,
           ),
         emit: options.emit,
         ...(options.providerAttemptLifecycle

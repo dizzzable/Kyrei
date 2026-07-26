@@ -53,10 +53,18 @@ export interface MakePrepareStepOptions {
   metrics?: HarnessMetrics;
   /** Explicit goal for pin/skim when provided by the gateway. */
   goal?: string;
+  /**
+   * Tokens the request spends outside `messages` — system prompt and tool
+   * schemas. Without it the overflow check under-counts the prompt by several
+   * thousand tokens on every protocol that sends the system text via
+   * `instructions` (i.e. everything except Anthropic).
+   */
+  baselineTokens?: number;
 }
 
 export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions): PrepareStep {
   const { model, window, ccr, workspace, sessionId, ltmDir, onMemoryMutated, summaryModel, metrics, goal } = opts;
+  const baseline = Math.max(0, opts.baselineTokens ?? 0);
   const checkpointBudget = window * cfg.contextBudget.softPct;
   const firedMarks = new Set<number>();
   /** In-memory anti-thrash for this stream (also backed by summary file mtime). */
@@ -66,7 +74,7 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
   return async ({ messages, steps }) => {
     // Always drop dangling tool pairs before the next model request.
     let working = prepareMessagesForModel(messages);
-    const est = await estimateMessages(working, model);
+    const est = await estimateMessages(working, model, baseline);
     // Dual-trigger: max(localEstimate, provider-reported usage from prior steps).
     const providerUsage = providerUsageFromSteps(steps);
     const of = isOverflow(est, providerUsage, {
@@ -116,11 +124,14 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
       protectLastN: 6,
       pruneToChars: 500,
       summaryEnabled: true,
-      summaryUseLlm: false,
+      // Keep this fallback aligned with DEFAULT_ENGINE_CONFIG.compression —
+      // summaryUseLlm used to diverge (false here, true there), so behaviour
+      // silently changed depending on whether cfg.compression was set.
+      summaryUseLlm: true,
       protectFirstN: 2,
       summaryMinMessages: 12,
       summaryCooldownoffMs: 60_000,
-      alwaysMaskToolBodies: true,
+      alwaysMaskToolBodies: false,
       goalSkim: true,
       pinWorkingState: true,
     };
@@ -136,7 +147,10 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
     // Stage A — observation masking:
     // - always mask older tool bodies when alwaysMaskToolBodies (Wave D2 default)
     // - always prune on soft/hard overflow (existing)
-    const alwaysMask = compression.alwaysMaskToolBodies !== false;
+    // Opt-in, not default: see EngineConfig.alwaysMaskToolBodies. Masking with
+    // no overflow moves the keepLast boundary every step, rewriting one more
+    // mid-history message each time and breaking the prefix cache.
+    const alwaysMask = compression.alwaysMaskToolBodies === true;
     const shouldPrune = compression.enabled !== false && (alwaysMask || of.soft || of.hard);
     if (shouldPrune) {
       const keepLast = of.hard
@@ -170,7 +184,7 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
     }
 
     // Re-estimate after prune to decide stage B (keep provider usage in the max).
-    const est2 = await estimateMessages(working, model);
+    const est2 = await estimateMessages(working, model, baseline);
     const of2 = isOverflow(est2, providerUsage, {
       window,
       softPct: cfg.contextBudget.softPct,
@@ -275,7 +289,7 @@ export function makePrepareStep(cfg: EngineConfig, opts: MakePrepareStepOptions)
     // A single pasted transcript can still make one of those protected bodies
     // larger than the provider window, so cap only the model projection after
     // ordinary compaction has had a chance to preserve it intact.
-    const est3 = await estimateMessages(working, model);
+    const est3 = await estimateMessages(working, model, baseline);
     const of3 = isOverflow(est3, providerUsage, {
       window,
       softPct: cfg.contextBudget.softPct,

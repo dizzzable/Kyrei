@@ -1,12 +1,41 @@
 const SECRET_KEY = /(?:api[_-]?key|authorization|credentials?|private[_-]?key|secret|session[_-]?token|access[_-]?key|password|cookie)/i;
 
+/**
+ * Kept in step with PATTERNS in `core/engine/security/secrets.ts`.
+ *
+ * The two lists had drifted in OPPOSITE directions: this one still used the
+ * loose `sk-[\w-]{12,}` that the engine side rejected as false-positive-prone,
+ * while lacking every format the engine side had gained — so `AIza…`, `ya29.…`,
+ * `gsk_…`, `xai-…` and the `ghu_/ghs_/ghr_` GitHub variants flowed unredacted
+ * into UI parts, session JSON and logs.
+ *
+ * The two lists are deliberately NOT identical, because their cost of a false
+ * positive differs. This side only ever REDACTS, so over-matching costs a
+ * `[REDACTED]` in a log. The engine list also backs `containsSecret`, which
+ * DENIES write_file, and `containsSensitiveOutbound`, which refuses a fetch —
+ * so it must stay conservative. Where they differ (Bearer, URL credentials),
+ * this side is the looser one on purpose.
+ */
 const SECRET_VALUE_PATTERNS = [
-  /\bsk-[A-Za-z0-9_-]{12,}\b/g,
+  /\bsk-(?:ant|proj|or|svcacct|admin)-[A-Za-z0-9_-]{0,24}[A-Za-z0-9]{20,}\b/g,
+  /\bsk-[A-Za-z0-9]{20,}\b/g,
   /\bsk_(?:live|test)_[A-Za-z0-9_-]{12,}\b/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
-  /\bgh[po]_[A-Za-z0-9]{36}\b/g,
+  /\bgh[pousr]_[A-Za-z0-9]{36,}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/g,
   /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
-  /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}\b/gi,
+  /\bxapp-\d-[A-Za-z0-9-]{10,}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bya29\.[A-Za-z0-9._-]{20,}/g,
+  /\bgsk_[A-Za-z0-9]{40,}\b/g,
+  /\bxai-[A-Za-z0-9]{40,}\b/g,
+  /\bhf_[A-Za-z0-9]{30,}\b/g,
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]{6,}@/g,
+  // Looser than the engine's on purpose (see the note above): a redactor may
+  // over-match, a write-blocker may not.
+  /\bBearer\s+[A-Za-z0-9._~+/-]{8,}\b/gi,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
 ];

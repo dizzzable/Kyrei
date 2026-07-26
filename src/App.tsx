@@ -7,6 +7,7 @@ import { useConversationScroll } from "@/components/conversation/useConversation
 import { CronPanel } from "@/components/cron/CronPanel";
 import { PipelineMissionPanel } from "@/components/pipeline/PipelineMissionPanel";
 import { Message } from "@/components/Message";
+import { MessageErrorBoundary } from "@/components/AppErrorBoundary";
 import { MemoryGraphPanel } from "@/components/memory/MemoryGraphPanel";
 import { ResizeHandle } from "@/components/ResizeHandle";
 import { Settings, type SectionId } from "@/components/Settings";
@@ -28,6 +29,7 @@ import {
   completeReasoning,
   hasLegacyHealHandoff,
   redactLegacyHealHandoff,
+  settleRunningToolParts,
   startReasoning,
   toolComplete,
   toolProgress,
@@ -36,6 +38,7 @@ import {
 import { GatewayRequestError, gateway } from "@/lib/gateway";
 import { hasOpenEscapeLayer, shouldInterruptSessionFromEscape } from "@/lib/escape-hotkey";
 import { actionForCombo } from "@/store/keybinds";
+import { migrateQueuedPrompts } from "@/store/composer-queue";
 import { comboAllowedInInput, comboFromEvent, isEditableTarget } from "@/lib/keybinds/combo";
 import { executableModelParams } from "@/lib/model-capabilities";
 import { getStored, setStored } from "@/lib/persist";
@@ -90,6 +93,8 @@ export function App() {
   const [gatewayConnected, setGatewayConnected] = useState(false);
   const [agentRuns, setAgentRuns] = useState<SubagentRun[]>([]);
   const [startupError, setStartupError] = useState<string | null>(null);
+  /** Live-event stream health. A dead SSE stream used to be entirely silent. */
+  const [streamState, setStreamState] = useState<"open" | "reconnecting">("open");
   const [sessionModelPendingIds, setSessionModelPendingIds] = useState<ReadonlySet<string>>(() => new Set());
   const approvalBlocked = messages.some((message) => message.parts.some(
     (part) => part.type === "approval" && !part.consumedAt,
@@ -262,6 +267,13 @@ export function App() {
   useEffect(() => {
     if (!currentId) return;
     setStored("kyrei-last-session", currentId);
+    // A clean continuation mints a fresh session id for the same conversation,
+    // so anything the user queued under the old id was stranded under a key
+    // nothing reads. composer-queue has always shipped the migration for this
+    // exact case; nothing ever called it.
+    if (currentSession?.continuationSourceSessionId) {
+      migrateQueuedPrompts(currentSession.continuationSourceSessionId, currentId);
+    }
     let alive = true;
     const active = currentSession?.status === "working";
     const localPendingId = pendingAssistantId(currentId);
@@ -589,7 +601,13 @@ export function App() {
         case "message.complete": {
           const pendingId = pendingIdRef.current;
           if (pendingId) {
-            setMessages((current) => current.map((message) => message.id === pendingId ? { ...message, pending: false } : message));
+            // Settle here too, not only on hydration: a `durable: false`
+            // completion (disk flush or engine-mirror failure) skips the
+            // refetch below, so nothing else would ever clear a tool part that
+            // was still running when the turn ended.
+            setMessages((current) => current.map((message) => message.id === pendingId
+              ? { ...message, pending: false, parts: settleRunningToolParts(message.parts) }
+              : message));
           }
           // When UI mode is Auto, adopt the phase the model declared
           // (Effective phase: / MODE_SWITCH:) so the next turn matches tools/prompt/model.
@@ -689,7 +707,9 @@ export function App() {
     };
 
     try {
-      const unsubscribe = gateway.subscribe(currentId, handle);
+      const unsubscribe = gateway.subscribe(currentId, handle, (state) => {
+        if (alive) setStreamState(state);
+      });
       return () => {
         alive = false;
         unsubscribe();
@@ -1400,7 +1420,11 @@ export function App() {
   );
 
   const conversation = (
-    <main className="conversation-shell relative flex h-full min-w-0 flex-1 flex-col" data-chat-surface={ui.chatBackground}>
+    <main
+      className="conversation-shell relative flex h-full min-w-0 flex-1 flex-col"
+      data-chat-surface={ui.chatBackground}
+      data-density={ui.density}
+    >
       <div
         ref={scrollRef}
         className="conversation-scroll min-h-0 flex-1 overflow-y-auto"
@@ -1413,9 +1437,33 @@ export function App() {
       >
         <div ref={contentRef} className="mx-auto max-w-[48rem] px-6 py-6 max-sm:px-4">
           {startupError && <div className="mb-4 rounded-md border border-danger/35 bg-danger/8 px-3 py-2 text-[11px] text-danger">{startupError}</div>}
-          <div className="space-y-7 pb-4">
+          {streamState === "reconnecting" && (
+            <div className="mb-4 flex items-center justify-between gap-3 rounded-md border border-warning/35 bg-warning/8 px-3 py-2 text-[11px] text-warning">
+              <span>{t("shell.stream.reconnecting")}</span>
+              <button
+                type="button"
+                className="shrink-0 rounded border border-warning/40 px-2 py-0.5 font-medium"
+                onClick={() => globalThis.location.reload()}
+              >
+                {t("shell.stream.reload")}
+              </button>
+            </div>
+          )}
+          {/* `conversation-messages` is the stable hook the density rule needs:
+              the compact rule used to target `.conversation-scroll > * + *`,
+              which has exactly ONE child and therefore matched nothing. */}
+          <div className="conversation-messages space-y-7 pb-4">
             {messages.map((message) => (
               <div key={message.id} className="msg-in" data-message-id={message.id}>
+                {/* Per-message boundary: a single malformed part must not take
+                    the whole transcript — or the window — down with it. */}
+                {/* contentKey lets the boundary retry as the message grows: a
+                    throw on a mid-stream partial payload must not blank the
+                    message for the rest of the session. */}
+                <MessageErrorBoundary
+                  messageId={message.id}
+                  contentKey={`${message.parts.length}:${message.pending === true}`}
+                >
                 <Message
                   message={message}
                   onRewind={message.role === "user" && !streaming && !rewinding ? rewindToMessage : undefined}
@@ -1425,6 +1473,7 @@ export function App() {
                   onFileReviewFileDecision={message.role === "assistant" && !streaming && !rewinding ? respondToFileReviewFile : undefined}
                   onFileReviewHunkDecision={message.role === "assistant" && !streaming && !rewinding ? respondToFileReviewHunk : undefined}
                 />
+                </MessageErrorBoundary>
               </div>
             ))}
           </div>
@@ -1446,6 +1495,7 @@ export function App() {
         stopping={stopping}
         disabled={!config || !currentId || rewinding || approvalBlocked || fileReviewBlocked || sessionModelPendingIds.has(currentId)}
         sessionId={currentId}
+        messages={messages}
         model={currentModelId}
         provider={currentProviderId}
         providers={config?.providers ?? []}
@@ -1629,6 +1679,13 @@ function hydrateStoredMessages(
         }
       }
     }
+    // A tool part persisted with `running: true` on a finished message renders
+    // an infinite spinner. The server only repairs those when the turn ended
+    // `interrupted`; for `error`, `max_steps`, `goal_unsatisfied`,
+    // `budget_exceeded` and friends the flag is stored verbatim, so the
+    // spinner survived a session switch and an app restart. A turn that is no
+    // longer pending has no tool still running, by definition.
+    if (!message.pending) parts = settleRunningToolParts(parts);
     return {
       id: message.id,
       role: message.role,

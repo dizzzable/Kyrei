@@ -17,6 +17,15 @@
 export const EVOLUTION_EVAL_VERSION = 1;
 const VERIFIER_ID = "eval-v1";
 
+/**
+ * Minimum self-reported confidence for `approved`. The evaluator is a single
+ * model call with no baseline and no replay, so the score is the only signal
+ * separating a considered approval from a shrug. `approved` is also the sole
+ * precondition promotion checks before rewriting an artifact on disk, so the
+ * bar belongs here rather than in the UI.
+ */
+export const MIN_APPROVE_SCORE = 0.5;
+
 function clip(value, max) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -181,13 +190,28 @@ export async function evaluatePendingCandidates(store, {
           evidence: { notes: "Model returned no parseable verdict.", metrics: { costUsd: tracked ? costUsd : 0, costTracked: tracked } },
         });
         rejected += 1;
-      } else if (verdict.verdict === "approve") {
+      } else if (verdict.verdict === "approve" && verdict.score >= MIN_APPROVE_SCORE) {
         await store.transition(candidate.id, {
           expectedRevision: evaluating.revision,
           status: "approved",
           evidence: evaluationEvidence({ score: verdict.score, rationale: verdict.rationale, costUsd, tracked, model: targetModel }),
         });
         approved += 1;
+      } else if (verdict.verdict === "approve") {
+        // `approved` is the only precondition promotion checks, and promotion
+        // rewrites a real artifact on disk. A verdict of "approve" carrying a
+        // score below the bar used to sail through because score was read only
+        // for display — so a 0.0-confidence approval was promotable.
+        await store.transition(candidate.id, {
+          expectedRevision: evaluating.revision,
+          status: "rejected",
+          reason: `eval_low_score:${verdict.score.toFixed(2)}<${MIN_APPROVE_SCORE}`,
+          evidence: {
+            notes: verdict.rationale,
+            metrics: { score: verdict.score, costUsd: tracked ? costUsd : 0, costTracked: tracked },
+          },
+        });
+        rejected += 1;
       } else {
         await store.transition(candidate.id, {
           expectedRevision: evaluating.revision,

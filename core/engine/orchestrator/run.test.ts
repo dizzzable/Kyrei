@@ -141,6 +141,9 @@ vi.mock("../prompt/cache-packing.js", () => ({
     instructions: [parts?.stable, parts?.volatile].filter(Boolean).join("\n\n"),
     cacheBreakpoints: false,
   }),
+  joinSystemParts: (parts: { stable?: string; volatile?: string } | undefined) =>
+    [parts?.stable, parts?.volatile].filter(Boolean).join("\n\n"),
+  isAnthropicProtocol: (protocol?: string) => protocol === "anthropic-messages",
   mergeProviderOptions: (
     base: Record<string, Record<string, unknown>> | undefined,
     extra: Record<string, Record<string, unknown>> | undefined,
@@ -1373,7 +1376,7 @@ describe("runKyreiChat project context wiring", () => {
     });
   });
 
-  it("uses the provider-native stream even when an old shield timeout is persisted", async () => {
+  it("uses the provider-native stream and installs no fetch timeout layer", async () => {
     const { runKyreiChat } = await import("./run.js");
     await runKyreiChat({
       emit: () => {},
@@ -1383,11 +1386,6 @@ describe("runKyreiChat project context wiring", () => {
       providerId: "slow-provider",
       apiKey: "key",
       model: "slow-model",
-      subscriptionShield: {
-        enabled: true,
-        mode: "stealth",
-        connectTimeoutMs: 30_000,
-      },
     });
 
     const modelOptions = buildModelMock.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -1461,8 +1459,10 @@ describe("runKyreiChat project context wiring", () => {
       headers: { "X-Backup": "backup-header" },
       identifyEngine: false,
     });
-    expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" });
-    expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" });
+    // The model id is threaded through so the Anthropic branch can pick the
+    // right thinking dialect (adaptive+effort vs legacy budgetTokens).
+    expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" }, undefined, "shared-model");
+    expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" }, undefined, "shared-model");
     expect(bridgeStreamMock).toHaveBeenCalledWith(expect.anything(), expect.any(Function), expect.objectContaining({
       provider: "backup",
       model: "shared-model",
@@ -1701,8 +1701,10 @@ describe("runKyreiChat project context wiring", () => {
     expect(parentOptions["providerOptions"]).toEqual({
       "openai-chat": { effort: "high" },
     });
-    expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" });
-    expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" });
+    // The model id is threaded through so the Anthropic branch can pick the
+    // right thinking dialect (adaptive+effort vs legacy budgetTokens).
+    expect(buildProviderOptionsMock).toHaveBeenCalledWith("openai-chat", { effort: "high" }, undefined, "main-model");
+    expect(buildProviderOptionsMock).toHaveBeenCalledWith("anthropic-messages", { effort: "high" }, undefined, "worker-model");
     expect(acquire).toHaveBeenCalledOnce();
     expect(acquire).toHaveBeenCalledWith({
       providerId: "worker-provider",

@@ -64,11 +64,15 @@ function isUsableRulePattern(value: unknown): value is string {
  * while an unusable scope becomes deny-all because silently dropping a rule
  * could discard an intended denial.
  */
-function normalizePermissions(value: Record<string, unknown>, warnings: string[]): void {
+function normalizePermissions(
+  value: Record<string, unknown>,
+  warnings: string[],
+  reject: (path: string, message: string) => void,
+): void {
   if (!hasOwn(value, "permissions") || value.permissions === undefined) return;
 
   if (!isRecord(value.permissions)) {
-    warnings.push("config.permissions: expected an object — using conservative security defaults");
+    reject("permissions", "expected an object — using conservative security defaults");
     value.permissions = {
       terminal: "off",
       web: "off",
@@ -91,7 +95,7 @@ function normalizePermissions(value: Record<string, unknown>, warnings: string[]
       permissions[key] = parsed.data;
       return;
     }
-    warnings.push(`config.permissions.${key}: invalid security value — using conservative fallback '${fallback}'`);
+    reject(`permissions.${key}`, `invalid security value — using conservative fallback '${fallback}'`);
     permissions[key] = fallback;
   };
 
@@ -101,17 +105,17 @@ function normalizePermissions(value: Record<string, unknown>, warnings: string[]
 
   if (hasOwn(permissions, "rules") && permissions.rules !== undefined) {
     if (!Array.isArray(permissions.rules)) {
-      warnings.push("config.permissions.rules: expected an array — using deny-all fallback");
+      reject("permissions.rules", "expected an array — using deny-all fallback");
       permissions.rules = [{ ...DENY_ALL_RULE }];
     } else {
       permissions.rules = permissions.rules.map((rule, index) => {
         if (!isRecord(rule) || !isUsableRulePattern(rule.pattern)) {
-          warnings.push(`config.permissions.rules.${index}: invalid rule pattern — using deny-all fallback`);
+          reject(`permissions.rules.${index}`, "invalid rule pattern — using deny-all fallback");
           return { ...DENY_ALL_RULE };
         }
         const action = PermissionRuleSchema.shape.action.safeParse(rule.action);
         if (!action.success) {
-          warnings.push(`config.permissions.rules.${index}.action: invalid security value — using conservative fallback 'deny'`);
+          reject(`permissions.rules.${index}.action`, "invalid security value — using conservative fallback 'deny'");
           return { pattern: rule.pattern, action: "deny" as const };
         }
         return { pattern: rule.pattern, action: action.data };
@@ -444,9 +448,27 @@ export const EngineConfigSchema = z.object({
   }).default(DEFAULT_ENGINE_CONFIG.usageBudget),
 });
 
+/**
+ * A setting the user actually configured that was REFUSED and replaced by a
+ * default. Distinct from the migration notices that share `warnings`: those
+ * describe a successful rewrite and are noise to a user, while a rejection
+ * means the value on screen is not the value in force.
+ */
+export interface ConfigRejection {
+  /** Dotted path into the engine config, e.g. `memory.postgres.url`. */
+  path: string;
+  /** Why it was refused, in the validator's own words. */
+  message: string;
+}
+
 export interface ResolveResult {
   config: EngineConfig;
   warnings: string[];
+  /**
+   * Rejected settings, for surfacing to the user. `warnings` remains the full
+   * diagnostic log (migrations included) so existing consumers are unchanged.
+   */
+  rejections: ConfigRejection[];
 }
 
 /** Legacy → current shape migrations, applied before validation. */
@@ -706,49 +728,165 @@ function migrate(raw: unknown): { value: Record<string, unknown>; warnings: stri
  * EngineConfig. Invalid fields are dropped (replaced by defaults) with a
  * warning instead of throwing, so a bad setting can never brick the engine.
  */
+/** Plain-data deep clone that never throws on an exotic value. */
+function structuredCloneSafe<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    // Config arrives as parsed JSON, so this is a belt-and-braces path only.
+    try {
+      return JSON.parse(JSON.stringify(value)) as T;
+    } catch {
+      return value;
+    }
+  }
+}
+
+/** One planned removal: either an object property or an array element. */
+type PrunePlan = {
+  leaves: PropertyKey[][];
+  /** Array path (joined) → the array itself plus the indices to drop. */
+  elements: Map<string, { array: unknown[]; indices: Set<number> }>;
+};
+
+/**
+ * Decide what a zod issue points at, WITHOUT mutating anything yet.
+ *
+ * Planning is separated from applying because zod reports one issue per bad
+ * FIELD: a single malformed array element yields several issues at the same
+ * index. Splicing as each one arrived removed that index repeatedly, so the
+ * element's innocent NEIGHBOURS were deleted — and because the retry then
+ * succeeded, the truncated array was accepted and persisted with nothing in
+ * `warnings` or `rejections` to say a server had vanished.
+ */
+function planPrune(root: Record<string, unknown>, path: readonly PropertyKey[], plan: PrunePlan): boolean {
+  // For anything inside an array, the ELEMENT is the unit of salvage. Deleting
+  // the offending field would leave the element missing a required key and the
+  // retry would fail anyway, collapsing back to the coarse whole-block prune —
+  // which is exactly what this exists to avoid. Cut at the outermost index so
+  // one bad MCP server or prompt profile is dropped and its siblings survive.
+  let cursor: unknown = root;
+  for (let i = 0; i < path.length; i += 1) {
+    if (cursor === null || typeof cursor !== "object") return false;
+    const key = path[i]!;
+    if (Array.isArray(cursor)) {
+      const index = Number(key);
+      if (!Number.isInteger(index) || index < 0 || index >= cursor.length) return false;
+      const arrayKey = path.slice(0, i).join(".");
+      const existing = plan.elements.get(arrayKey);
+      if (existing) existing.indices.add(index);
+      else plan.elements.set(arrayKey, { array: cursor, indices: new Set([index]) });
+      return true;
+    }
+    if (i === path.length - 1) {
+      const record = cursor as Record<PropertyKey, unknown>;
+      if (!Object.hasOwn(record, key)) return false;
+      plan.leaves.push([...path]);
+      return true;
+    }
+    cursor = (cursor as Record<PropertyKey, unknown>)[key];
+  }
+  return false;
+}
+
+/** Apply a plan. Leaves first (they shift nothing), then indices descending. */
+function applyPrune(root: Record<string, unknown>, plan: PrunePlan): void {
+  for (const path of plan.leaves) {
+    let cursor: unknown = root;
+    for (let i = 0; i < path.length - 1; i += 1) {
+      if (cursor === null || typeof cursor !== "object") break;
+      cursor = (cursor as Record<PropertyKey, unknown>)[path[i]!];
+    }
+    if (cursor && typeof cursor === "object") delete (cursor as Record<PropertyKey, unknown>)[path[path.length - 1]!];
+  }
+  for (const { array, indices } of plan.elements.values()) {
+    // Descending, so an earlier removal cannot shift a later index.
+    for (const index of [...indices].sort((left, right) => right - left)) array.splice(index, 1);
+  }
+}
+
 export function resolveEngineConfig(raw?: unknown): ResolveResult {
   const { value, warnings } = migrate(raw);
-  normalizePermissions(value, warnings);
+  const rejections: ConfigRejection[] = [];
+  /** Record a refusal in both channels: the log line and the user-facing list. */
+  const reject = (path: string, message: string) => {
+    warnings.push(path ? `config.${path}: ${message}` : `config: ${message}`);
+    rejections.push({ path, message });
+  };
+  // Permission refusals go through `reject` too. They used to reach `warnings`
+  // only, so the most security-relevant rejections — a permissions block that
+  // silently became deny-all, a terminal setting forced to "off" — were exactly
+  // the ones the UI banner never showed.
+  normalizePermissions(value, warnings, reject);
   const parsed = EngineConfigSchema.safeParse(value);
   if (parsed.success) {
     const cfg = parsed.data;
     // Enforce invariant: soft budget must be below hard budget.
     if (cfg.contextBudget.softPct >= cfg.contextBudget.hardPct) {
-      warnings.push("contextBudget.softPct >= hardPct — reset to defaults");
+      reject("contextBudget.softPct", "must be below contextBudget.hardPct — reset to defaults");
       cfg.contextBudget = { ...DEFAULT_ENGINE_CONFIG.contextBudget };
     }
     if (cfg.delegation.maxParallel > cfg.delegation.maxTasks) {
-      warnings.push("delegation.maxParallel > maxTasks - clamped to maxTasks");
+      reject("delegation.maxParallel", "cannot exceed delegation.maxTasks — clamped to maxTasks");
       cfg.delegation = { ...cfg.delegation, maxParallel: cfg.delegation.maxTasks };
     }
     if (cfg.delegation.idleTimeoutMs !== cfg.delegation.timeoutMs) {
+      // A rename, not a refusal: the configured value is still in force.
       warnings.push("delegation.timeoutMs is a legacy alias - normalized to delegation.idleTimeoutMs");
       cfg.delegation = { ...cfg.delegation, timeoutMs: cfg.delegation.idleTimeoutMs };
     }
     if (cfg.delegation.maxRuntimeMs < cfg.delegation.idleTimeoutMs) {
-      warnings.push("delegation.maxRuntimeMs < idleTimeoutMs - clamped to idleTimeoutMs");
+      reject("delegation.maxRuntimeMs", "cannot be below delegation.idleTimeoutMs — clamped to idleTimeoutMs");
       cfg.delegation = { ...cfg.delegation, maxRuntimeMs: cfg.delegation.idleTimeoutMs };
     }
     if (cfg.activePromptProfileId && !cfg.promptProfiles.some((profile) => profile.id === cfg.activePromptProfileId)) {
-      warnings.push("activePromptProfileId does not reference an available prompt profile - cleared");
+      reject("activePromptProfileId", "does not reference an available prompt profile — cleared");
       cfg.activePromptProfileId = "";
     }
-    return { config: cfg as EngineConfig, warnings };
+    return { config: cfg as EngineConfig, warnings, rejections };
   }
 
   // Partial recovery: keep valid fields, default the invalid ones.
+  // (see planPrune below for why this is leaf-granular)
   for (const issue of parsed.error.issues) {
-    warnings.push(`config.${issue.path.join(".") || "(root)"}: ${issue.message} — using default`);
+    reject(issue.path.join("."), `${issue.message} — using default`);
   }
-  const salvaged: Record<string, unknown> = {};
+  // Prune the offending LEAVES first. Pruning by `issue.path[0]` reset an
+  // entire top-level block, so one bad value took a whole subsystem with it:
+  // clearing the Postgres connection string writes `""`, which fails
+  // `z.string().min(1)`, and reverted every `memory.*` setting — index backend,
+  // gbrain, curator, vault, recall, decay, citeOrRefuse — on every turn, with
+  // the only signal a console warning nothing surfaces. Zod's own `.default()`
+  // then refills just the pruned leaf.
+  let config: EngineConfig | undefined;
   if (value && typeof value === "object") {
-    const badTop = new Set(parsed.error.issues.map((i) => String(i.path[0] ?? "")));
-    for (const [k, val] of Object.entries(value)) if (!badTop.has(k)) salvaged[k] = val;
+    const leafPruned = structuredCloneSafe(value as Record<string, unknown>);
+    // Plan every removal against the UNMUTATED clone, then apply once. Pruning
+    // as each issue arrived made later issue paths point into an array that had
+    // already shifted underneath them.
+    const plan: PrunePlan = { leaves: [], elements: new Map() };
+    let prunedAny = false;
+    for (const issue of parsed.error.issues) {
+      if (issue.path.length > 0 && planPrune(leafPruned, issue.path, plan)) prunedAny = true;
+    }
+    if (prunedAny) {
+      applyPrune(leafPruned, plan);
+      const leafRetry = EngineConfigSchema.safeParse(leafPruned);
+      if (leafRetry.success) config = leafRetry.data as EngineConfig;
+    }
   }
-  const retry = EngineConfigSchema.safeParse(salvaged);
-  const config = (retry.success ? retry.data : EngineConfigSchema.parse({})) as EngineConfig;
+  // Fall back to the coarse top-level prune, then to bare defaults.
+  if (!config) {
+    const salvaged: Record<string, unknown> = {};
+    if (value && typeof value === "object") {
+      const badTop = new Set(parsed.error.issues.map((i) => String(i.path[0] ?? "")));
+      for (const [k, val] of Object.entries(value)) if (!badTop.has(k)) salvaged[k] = val;
+    }
+    const retry = EngineConfigSchema.safeParse(salvaged);
+    config = (retry.success ? retry.data : EngineConfigSchema.parse({})) as EngineConfig;
+  }
   if (config.activePromptProfileId && !config.promptProfiles.some((profile) => profile.id === config.activePromptProfileId)) {
     config.activePromptProfileId = "";
   }
-  return { config, warnings };
+  return { config, warnings, rejections };
 }
