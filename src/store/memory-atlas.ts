@@ -3,8 +3,11 @@ import { normalizeViewport, type AtlasViewport, type Point } from "@/components/
 const KEY = "kyrei.memory-atlas.v2";
 const MAX_WORKSPACES = 20;
 
+export type MemoryAtlasViewMode = "2d" | "3d";
+
 export interface MemoryAtlasPreferences {
   viewport: AtlasViewport;
+  viewMode: MemoryAtlasViewMode;
   expandedTreeIds: string[];
   pinned: Record<string, Point>;
   paneWidths: { left: number; right: number };
@@ -13,6 +16,7 @@ export interface MemoryAtlasPreferences {
 
 const defaults = (): MemoryAtlasPreferences => ({
   viewport: { scale: 1, x: 0, y: 0 },
+  viewMode: "2d",
   expandedTreeIds: [],
   pinned: {},
   paneWidths: { left: 240, right: 300 },
@@ -38,6 +42,7 @@ function normalize(value: unknown): MemoryAtlasPreferences {
   }
   return {
     viewport: normalizeViewport(record.viewport as Partial<AtlasViewport> | undefined),
+    viewMode: record.viewMode === "3d" ? "3d" : "2d",
     expandedTreeIds: Array.isArray(record.expandedTreeIds)
       ? [...new Set(record.expandedTreeIds.filter((id): id is string => typeof id === "string").slice(0, 2_000))]
       : [],

@@ -142,6 +142,9 @@ export async function getWorkspaceMemoryGraph(input: {
     }
     return memoryAtlasToGraphV1(await buildMemoryAtlas({
       workspace: input.workspace,
+      // The v1 projection drops `related` edges, so computing them here would
+      // pay the full embedding cost for a result that is thrown away.
+      relatedEdges: false,
       ...(stores?.memory ? { memory: stores.memory } : {}),
     }));
   } finally {

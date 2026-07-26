@@ -4,6 +4,7 @@ import { Button } from "@/components/ui";
 import { useI18n } from "@/i18n";
 import type { MemoryAtlasNode, MemoryAtlasSnapshot } from "@/lib/types";
 import { layoutMemoryGraph } from "./memory-graph-layout";
+import { atlasNodeColorVar } from "./memory-atlas-colors";
 import { fitViewport, panViewport, zoomViewportAt, type AtlasViewport, type Point } from "./memory-atlas-viewport";
 
 type DragState = { kind: "pan"; pointerId: number; x: number; y: number } | { kind: "node"; pointerId: number; id: string };
@@ -12,17 +13,7 @@ function graphGroup(kind: MemoryAtlasNode["kind"]): "project" | "code" | "docume
   return kind === "skill" || kind === "evolution" ? "memory" : kind;
 }
 
-function color(node: MemoryAtlasNode): string {
-  if (node.kind === "project") return "var(--color-foreground)";
-  if (node.kind === "code") return "var(--color-muted)";
-  if (node.kind === "document") return "var(--color-primary)";
-  if (node.kind === "decision") return "var(--color-success)";
-  if (node.kind === "plan") return "var(--color-warning)";
-  if (node.kind === "handoff") return "var(--color-danger)";
-  if (node.kind === "skill") return "var(--color-primary)";
-  if (node.kind === "session") return "var(--color-secondary)";
-  return "var(--color-faint)";
-}
+const color = (node: MemoryAtlasNode): string => atlasNodeColorVar(node.kind);
 
 export function MemoryAtlasCanvas({
   nodes,
@@ -50,7 +41,10 @@ export function MemoryAtlasCanvas({
   const [drag, setDrag] = useState<DragState | null>(null);
   const [minimap, setMinimap] = useState(true);
   const graphNodes = useMemo(() => nodes.map((node) => ({ ...node, group: graphGroup(node.kind) })), [nodes]);
+  // Structural edges drive the static layout; `related` edges are semantic
+  // overlays that don't influence positions, so they render as a separate pass.
   const graphEdges = useMemo(() => edges.filter((edge) => edge.type !== "related").map((edge) => ({ source: edge.source, target: edge.target, type: edge.type as "imports" | "contains" | "references" })), [edges]);
+  const relatedEdges = useMemo(() => edges.filter((edge) => edge.type === "related"), [edges]);
   const layout = useMemo(() => layoutMemoryGraph(graphNodes, graphEdges), [graphEdges, graphNodes]);
   const positioned = useMemo(() => layout.nodes.map((node) => ({ ...node, ...(pinned[node.id] ?? {}) })), [layout.nodes, pinned]);
   const positions = useMemo(() => new Map(positioned.map((node) => [node.id, node])), [positioned]);
@@ -141,6 +135,12 @@ export function MemoryAtlasCanvas({
         onDoubleClick={(event) => { if (event.target === event.currentTarget) fit(); }}
       >
         <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.scale})`}>
+          {relatedEdges.map((edge, index) => {
+            const source = positions.get(edge.source);
+            const target = positions.get(edge.target);
+            if (!source || !target) return null;
+            return <line key={`rel-${edge.source}-${edge.target}-${index}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} stroke="var(--color-secondary)" strokeOpacity={0.22} strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />;
+          })}
           {layout.edges.map((edge, index) => {
             const source = positions.get(edge.source);
             const target = positions.get(edge.target);
