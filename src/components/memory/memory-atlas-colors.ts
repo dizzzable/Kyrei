@@ -25,6 +25,12 @@ const ATLAS_NODE_COLORS: Record<MemoryAtlasNodeKind, string> = {
   // The root of the workspace: brightest, exactly one per graph.
   project: "#f5f3ff",
 
+  // Scaffolding. This entry is only a fallback: a folder is drawn in its
+  // REGION's colour (see ATLAS_REGION_COLORS), because the useful question
+  // about a directory is which part of the workspace it belongs to, not that
+  // it happens to be a directory.
+  folder: "#8ea3c4",
+
   // ── What the project IS — cool blues. ──────────────────────────────────
   code: "#16f2c8", // teal, and the largest population
   document: "#4ea8ff", // blue
@@ -49,16 +55,47 @@ export function atlasNodeColorVar(kind: MemoryAtlasNodeKind): string {
  * Edge palette. Structural and semantic links used to be near-identical greys,
  * so the graph showed connections without showing what KIND of connection.
  */
+/**
+ * SOLID colours on purpose. `react-force-graph` multiplies its own
+ * `linkOpacity` by the alpha of the colour it is given, so an `rgba(…, 0.45)`
+ * against the library default of 0.2 landed at 0.09 — measured live on every
+ * one of 1 500 link cylinders, which is why the edges were invisible even
+ * after they were coloured and widened. Transparency belongs in exactly one
+ * place: the `linkOpacity` prop.
+ */
 export const ATLAS_EDGE_COLORS = {
-  contains: "rgba(154, 168, 189, 0.35)", // structure: present but quiet
-  imports: "rgba(22, 242, 200, 0.45)", // code → code, matches the code hue
-  references: "rgba(199, 146, 234, 0.5)", // a document pointing at something
-  related: "rgba(255, 93, 158, 0.45)", // semantic similarity
+  contains: "#9aa8bd", // structure; usually overridden by the child's own hue
+  imports: "#16f2c8", // code → code, matches the code hue
+  references: "#c792ea", // a document pointing at something
+  related: "#ff5d9e", // semantic similarity
 } as const;
+
+/**
+ * Region palette, keyed by `sourceId` — the category a node was indexed under.
+ *
+ * Distinct from the node palette because `kind` and category are not the same
+ * question. A `document` node can belong to the Documents region or sit under
+ * a Skill; a folder has no kind of its own at all. This is the key the sidebar
+ * legend shows, so it is what tells the eye which part of space is which.
+ */
+export const ATLAS_REGION_COLORS: Record<string, string> = {
+  project: "#f5f3ff",
+  code: "#16f2c8",
+  documents: "#4ea8ff",
+  sessions: "#b98cff",
+  memory: "#e879f9",
+  skills: "#7c6cf5",
+  evolution: "#ffd166",
+};
+
+/** Region colour, falling back to the neutral scaffolding tint. */
+export function atlasRegionColor(sourceId: string | undefined): string {
+  return (sourceId && ATLAS_REGION_COLORS[sourceId]) || ATLAS_NODE_COLORS.folder;
+}
 
 /** Every node kind, so a renderer can resolve the whole palette in one pass. */
 export const ATLAS_NODE_KINDS: readonly MemoryAtlasNodeKind[] = [
-  "project", "code", "document", "decision", "plan", "handoff", "session", "memory", "skill", "evolution",
+  "project", "folder", "code", "document", "decision", "plan", "handoff", "session", "memory", "skill", "evolution",
 ];
 
 /** Neutral grey used when a variable is unset or cannot be resolved. */

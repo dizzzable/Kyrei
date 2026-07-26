@@ -9,8 +9,27 @@ import { fitViewport, panViewport, zoomViewportAt, type AtlasViewport, type Poin
 
 type DragState = { kind: "pan"; pointerId: number; x: number; y: number } | { kind: "node"; pointerId: number; id: string };
 
-function graphGroup(kind: MemoryAtlasNode["kind"]): "project" | "code" | "document" | "decision" | "plan" | "handoff" | "session" | "memory" {
-  return kind === "skill" || kind === "evolution" ? "memory" : kind;
+type GraphGroup = "project" | "code" | "document" | "decision" | "plan" | "handoff" | "session" | "memory";
+
+/**
+ * The 2D layout places nodes by group, and it has no scaffolding group of its
+ * own. A folder therefore joins the cluster it holds — by the region it was
+ * indexed under, which is the only thing that says whether a directory belongs
+ * to the code index or to the agent's own memory.
+ */
+const FOLDER_GROUP: Record<string, GraphGroup> = {
+  code: "code",
+  documents: "document",
+  sessions: "session",
+  memory: "memory",
+  skills: "memory",
+  evolution: "memory",
+  project: "project",
+};
+
+function graphGroup(node: MemoryAtlasNode): GraphGroup {
+  if (node.kind === "folder") return FOLDER_GROUP[node.sourceId] ?? "memory";
+  return node.kind === "skill" || node.kind === "evolution" ? "memory" : node.kind;
 }
 
 const color = (node: MemoryAtlasNode): string => atlasNodeColorVar(node.kind);
@@ -40,7 +59,7 @@ export function MemoryAtlasCanvas({
   const svgRef = useRef<SVGSVGElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [minimap, setMinimap] = useState(true);
-  const graphNodes = useMemo(() => nodes.map((node) => ({ ...node, group: graphGroup(node.kind) })), [nodes]);
+  const graphNodes = useMemo(() => nodes.map((node) => ({ ...node, group: graphGroup(node) })), [nodes]);
   // Structural edges drive the static layout; `related` edges are semantic
   // overlays that don't influence positions, so they render as a separate pass.
   const graphEdges = useMemo(() => edges.filter((edge) => edge.type !== "related").map((edge) => ({ source: edge.source, target: edge.target, type: edge.type as "imports" | "contains" | "references" })), [edges]);

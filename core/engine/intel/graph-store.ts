@@ -76,6 +76,18 @@ export function hashFileContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+/** Read a `graph_meta` value, or undefined when the key was never written. */
+export function readGraphMeta(db: GraphDB, key: string): string | undefined {
+  const row = db.prepare("SELECT value FROM graph_meta WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+/** Write a `graph_meta` value. */
+export function writeGraphMeta(db: GraphDB, key: string, value: string): void {
+  db.prepare("INSERT INTO graph_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    .run(key, value);
+}
+
 /** Check if a file needs re-indexing (hash changed or not in DB). */
 export function needsReindex(db: GraphDB, path: string, contentHash: string): boolean {
   const row = db.prepare("SELECT content_hash FROM graph_nodes WHERE path = ?").get(path) as { content_hash: string } | undefined;

@@ -1044,7 +1044,8 @@ export interface WorkspaceMemoryGraph {
 
 export type MemoryAtlasSourceCapability = "browse" | "search-only" | "health-only";
 export type MemoryAtlasSourceHealth = "ready" | "degraded" | "stale" | "unavailable";
-export type MemoryAtlasNodeKind = MemoryGraphGroup | "skill" | "evolution";
+/** `folder` is atlas-only scaffolding (see core/engine/memory/atlas-types.ts). */
+export type MemoryAtlasNodeKind = MemoryGraphGroup | "skill" | "evolution" | "folder";
 
 export interface MemoryAtlasSourceDescriptor {
   id: string;

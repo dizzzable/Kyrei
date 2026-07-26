@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_FRAMEABLE_EXTENT, atlasCameraPlan, fitViewport, panViewport, zoomViewportAt } from "./memory-atlas-viewport";
+import { FIT_MARGIN, MIN_FRAMEABLE_EXTENT, atlasCameraPlan, atlasFitDistance, fitViewport, panViewport, zoomViewportAt } from "./memory-atlas-viewport";
 
 describe("memory atlas viewport", () => {
   it("keeps the graph point under the cursor while zooming", () => {
@@ -19,6 +19,38 @@ describe("memory atlas viewport", () => {
       x: -175,
       y: -150,
     });
+  });
+});
+
+describe("atlasFitDistance", () => {
+  /** What fraction of the viewport height a graph occupies at a given distance. */
+  const fillAt = (distance: number, halfExtent: number, fovDeg: number) =>
+    halfExtent / (distance * Math.tan((fovDeg * Math.PI) / 360));
+
+  it("actually fills the viewport", () => {
+    // The regression: the library's `zoomToFit` placed the camera 4 028 units
+    // from a graph 1 976 across, so the finished layout filled 40% of the
+    // width and sat marooned in the middle of the view.
+    const distance = atlasFitDistance(1976 / 2, 50, 868 / 684);
+    expect(fillAt(distance, 1976 / 2, 50)).toBeCloseTo(1 / FIT_MARGIN, 5);
+    expect(distance).toBeLessThan(2600);
+  });
+
+  it("pulls back on a tall viewport so nothing is cropped sideways", () => {
+    // When the window is narrower than it is tall, width is the binding
+    // constraint and the camera has to retreat further, not less.
+    expect(atlasFitDistance(1000, 50, 0.5)).toBeGreaterThan(atlasFitDistance(1000, 50, 1));
+    expect(atlasFitDistance(1000, 50, 2)).toBe(atlasFitDistance(1000, 50, 1));
+  });
+
+  it("scales linearly with the graph and never returns a negative distance", () => {
+    expect(atlasFitDistance(2000, 50, 1)).toBeCloseTo(atlasFitDistance(1000, 50, 1) * 2, 6);
+    expect(atlasFitDistance(0, 50, 1)).toBe(0);
+    expect(atlasFitDistance(-50, 50, 1)).toBe(0);
+  });
+
+  it("survives a degenerate camera or viewport instead of dividing by zero", () => {
+    expect(Number.isFinite(atlasFitDistance(1000, 0, 0))).toBe(true);
   });
 });
 
@@ -46,6 +78,26 @@ describe("atlasCameraPlan", () => {
 
   it("does nothing for an empty graph", () => {
     expect(atlasCameraPlan({ nodeCount: 0, fittedForCount: -1, selectedInGraph: false, graphExtent: 2600 })).toBe("skip");
+  });
+
+  it("re-frames a graph that outgrew the framing it was given", () => {
+    // The early fit runs on a timer, seconds before the simulation settles, so
+    // it measures a layout that is still contracting. Latching on that left the
+    // finished graph occupying a fraction of the viewport.
+    expect(atlasCameraPlan({ nodeCount: 1791, fittedForCount: 1791, selectedInGraph: false, graphExtent: 2600, fittedExtent: 400 })).toBe("fit");
+  });
+
+  it("re-frames a graph that contracted onto its anchors", () => {
+    // Measured live: the library seeds nodes over a sphere sized by node count
+    // and the category anchors then pull the whole graph inward, so a
+    // growth-only rule left a 2 000-unit graph framed from 3 800 away, filling
+    // 43% of the width, with no later pass correcting it.
+    expect(atlasCameraPlan({ nodeCount: 2494, fittedForCount: 2494, selectedInGraph: false, graphExtent: 1973, fittedExtent: 4200 })).toBe("fit");
+  });
+
+  it("ignores a graph that merely jiggled", () => {
+    // Re-fitting on small drift would fight the user's own pan and zoom.
+    expect(atlasCameraPlan({ nodeCount: 1791, fittedForCount: 1791, selectedInGraph: false, graphExtent: 2700, fittedExtent: 2600 })).toBe("skip");
   });
 
   it("waits for the layout to spread before framing", () => {

@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.7.13",
+  "version": "0.7.14",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
@@ -62,6 +62,7 @@
     "ai": "7.0.26",
     "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
+    "d3-force-3d": "^3.0.6",
     "electron-updater": "^6.8.9",
     "fast-glob": "^3.3.3",
     "gpt-tokenizer": "3.4.0",
@@ -73,6 +74,7 @@
     "react-force-graph-3d": "^1.29.1",
     "remark-math": "^6.0.0",
     "sqlite-vec": "^0.1.9",
+    "three": "^0.185.1",
     "unist-util-visit-parents": "^6.0.2",
     "zod": "4.4.3"
   },
@@ -87,6 +89,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^6.0.3",
     "clsx": "^2.1.1",
     "electron": "^43.1.0",

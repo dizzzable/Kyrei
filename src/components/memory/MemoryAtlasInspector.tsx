@@ -5,6 +5,7 @@ import type { EvolutionCandidate, EvolutionRuntimeConfig, MemoryAtlasNode, Memor
 import { useI18n } from "@/i18n";
 import { gateway } from "@/lib/gateway";
 import { selectSkillForNextRequest } from "@/store/composer-skills";
+import { atlasRegionColor } from "./memory-atlas-colors";
 
 export function MemoryAtlasInspector({ selected, atlas }: { selected: MemoryAtlasNode | null; atlas: MemoryAtlasSnapshot | null }) {
   const { t, number } = useI18n();
@@ -126,7 +127,12 @@ export function MemoryAtlasInspector({ selected, atlas }: { selected: MemoryAtla
         <Stat label={t("shell.memory.stat.sources")} value={atlas?.sources.length ?? 0} />
       </div>
       <div className="mt-5 space-y-2 border-t border-border-soft pt-4">
-        {atlas?.sources.map((source) => <div key={source.id} className="flex items-center gap-2 text-[9.5px]"><span className={`size-1.5 rounded-full ${source.health === "ready" ? "bg-success" : source.health === "unavailable" ? "bg-danger" : "bg-warning"}`} /><span className="min-w-0 flex-1 truncate text-secondary">{source.label}</span><span className="text-faint">{source.capability}</span></div>)}
+        {/* The swatch is the graph's key: every source shows the colour its
+            region is drawn in, so this list reads as a legend rather than as
+            six identical dots. Health moves to the ring around it — it was the
+            only thing the dot encoded before, which left the view with no
+            colour key at all. */}
+        {atlas?.sources.map((source) => <div key={source.id} className="flex items-center gap-2 text-[9.5px]"><span aria-hidden className={`size-2 shrink-0 rounded-full ring-1 ${source.health === "ready" ? "ring-transparent" : source.health === "unavailable" ? "ring-danger" : "ring-warning"}`} style={{ backgroundColor: atlasRegionColor(source.id) }} /><span className="min-w-0 flex-1 truncate text-secondary">{source.label}</span><span className="text-faint">{source.capability}</span></div>)}
       </div>
       <div className="mt-5 border-t border-border-soft pt-4"><h4 className="text-[9px] font-medium uppercase tracking-[0.12em] text-muted">{t("shell.memory.howItWorks")}</h4><ol className="mt-3 space-y-3 text-[10px] leading-4 text-secondary"><li className="flex gap-2"><FileJson2 className="mt-0.5 size-3.5 shrink-0 text-primary" />{t("shell.memory.howSessions")}</li><li className="flex gap-2"><FileText className="mt-0.5 size-3.5 shrink-0 text-primary" />{t("shell.memory.howDocuments")}</li><li className="flex gap-2"><Sparkles className="mt-0.5 size-3.5 shrink-0 text-primary" />{t("shell.memory.howSkills")}</li></ol></div>
     </div>

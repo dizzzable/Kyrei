@@ -8,10 +8,19 @@
  */
 
 import fg from "fast-glob";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 
 const INDEX_VERSION = 1;
+
+/**
+ * Bump when import extraction or resolution changes in a way that would give a
+ * different answer for the SAME file content. It is one half of the cache key
+ * that keeps the incremental index honest; see `extractorSignature`.
+ */
+const EXTRACTOR_VERSION = 2;
+const EXTRACTOR_SIGNATURE_KEY = "extractor_signature";
 const MAX_FILES = 10_000;
 const MAX_SOURCE_BYTES = 750_000;
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java", ".kt", ".cs", ".rb", ".php"];
@@ -85,12 +94,108 @@ function languageFor(path: string): string {
   return "Other";
 }
 
-function extractRelativeSpecifiers(source: string): string[] {
+/**
+ * A `compilerOptions.paths` entry, reduced to what resolution needs: the
+ * literal text before the `*`, and the workspace-relative prefixes it maps to.
+ */
+export interface AliasRule {
+  prefix: string;
+  targets: string[];
+}
+
+/**
+ * Strip comments and trailing commas from JSONC.
+ *
+ * `tsconfig.json` is JSONC by convention, so `JSON.parse` alone fails on most
+ * real projects. This scans character by character rather than running a regex
+ * over the text, because a naive one mangles any string containing `//` — a
+ * URL in a comment, or a path — and would silently produce a wrong config.
+ */
+function parseJsonc(text: string): unknown {
+  let out = "";
+  let inString = false;
+  let quote = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    const next = text[i + 1];
+    if (inString) {
+      out += char;
+      if (char === "\\") { out += next ?? ""; i += 1; continue; }
+      if (char === quote) inString = false;
+      continue;
+    }
+    if (char === '"' || char === "'") { inString = true; quote = char; out += char; continue; }
+    if (char === "/" && next === "/") { while (i < text.length && text[i] !== "\n") i += 1; out += "\n"; continue; }
+    if (char === "/" && next === "*") { i += 2; while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1; i += 1; continue; }
+    out += char;
+  }
+  try {
+    return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Import aliases declared by the workspace, e.g. `"@/*": ["./src/*"]`.
+ *
+ * Without these the extractor sees only relative specifiers, so a project that
+ * imports through an alias has that whole layer missing from its dependency
+ * graph — measured on this repository: 880 of 8 306 internal imports, all of
+ * them in the renderer, which is exactly the part `project_impact` was then
+ * least able to answer for.
+ *
+ * Read from `tsconfig.json`, falling back to `jsconfig.json`. Build-tool
+ * aliases (Vite, webpack) live in executable config and are deliberately NOT
+ * evaluated — this index stays offline and deterministic.
+ */
+export async function loadAliasRules(workspace: string): Promise<AliasRule[]> {
+  for (const file of ["tsconfig.json", "jsconfig.json"]) {
+    let raw: string;
+    try {
+      raw = await readFile(join(workspace, file), "utf8");
+    } catch {
+      continue;
+    }
+    const config = parseJsonc(raw) as { compilerOptions?: { baseUrl?: unknown; paths?: unknown } } | null;
+    const paths = config?.compilerOptions?.paths;
+    if (!paths || typeof paths !== "object") continue;
+    const baseUrl = typeof config?.compilerOptions?.baseUrl === "string" ? config.compilerOptions.baseUrl : ".";
+    const rules: AliasRule[] = [];
+    for (const [pattern, replacements] of Object.entries(paths as Record<string, unknown>)) {
+      if (!Array.isArray(replacements)) continue;
+      // Only the trailing-wildcard form is resolvable to a file prefix; an
+      // exact mapping without `*` maps one specifier to one file and is
+      // handled by the same code with an empty remainder.
+      const prefix = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
+      const targets = replacements
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => normalizeRel(posix.join(baseUrl.replace(/\\/g, "/"), (value.endsWith("*") ? value.slice(0, -1) : value))))
+        .filter((value) => value !== "" && !value.startsWith(".."));
+      if (prefix && targets.length > 0) rules.push({ prefix, targets });
+    }
+    // Longest prefix first, so `@/lib/` wins over `@/` when both are declared.
+    if (rules.length > 0) return rules.sort((left, right) => right.prefix.length - left.prefix.length);
+  }
+  return [];
+}
+
+/**
+ * Everything outside a file's own bytes that can change the edges extracted
+ * from it: the extractor's own version, and the workspace's alias table.
+ */
+function extractorSignature(aliases: readonly AliasRule[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ version: EXTRACTOR_VERSION, aliases }))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function extractImportSpecifiers(source: string): string[] {
   const specs = new Set<string>();
   const jsPattern = /(?:\bimport\s+(?:[^'"\n]*?\s+from\s+)?|\bexport\s+(?:[^'"\n]*?\s+from\s+)?|\brequire\s*\(|\bimport\s*\()\s*["']([^"']+)["']/g;
   for (const match of source.matchAll(jsPattern)) {
-    const specifier = match[1];
-    if (specifier?.startsWith(".")) specs.add(specifier);
+    if (match[1]) specs.add(match[1]);
   }
   const pythonPattern = /^\s*from\s+(\.[\w.]*)\s+import\s+/gm;
   for (const match of source.matchAll(pythonPattern)) {
@@ -100,8 +205,8 @@ function extractRelativeSpecifiers(source: string): string[] {
   return [...specs];
 }
 
-function resolveRelativeSpecifier(from: string, specifier: string, knownFiles: Set<string>): string | null {
-  const base = posix.normalize(posix.join(posix.dirname(from), specifier));
+/** Try every known extension and index form for a workspace-relative base. */
+function resolveBase(base: string, knownFiles: Set<string>): string | null {
   if (!base || base === "." || base.startsWith("../") || posix.isAbsolute(base)) return null;
   const candidates = [
     base,
@@ -110,6 +215,33 @@ function resolveRelativeSpecifier(from: string, specifier: string, knownFiles: S
     `${base}/__init__.py`,
   ];
   return candidates.find((candidate) => knownFiles.has(candidate)) ?? null;
+}
+
+/**
+ * Resolve one import specifier to a workspace file, or null when it points
+ * outside the workspace — a package, a URL, an unmapped alias.
+ */
+function resolveSpecifier(
+  from: string,
+  specifier: string,
+  knownFiles: Set<string>,
+  aliases: readonly AliasRule[],
+): string | null {
+  if (specifier.startsWith(".")) {
+    return resolveBase(posix.normalize(posix.join(posix.dirname(from), specifier)), knownFiles);
+  }
+  for (const rule of aliases) {
+    if (!specifier.startsWith(rule.prefix)) continue;
+    const remainder = specifier.slice(rule.prefix.length);
+    for (const target of rule.targets) {
+      const resolved = resolveBase(posix.normalize(remainder ? posix.join(target, remainder) : target), knownFiles);
+      if (resolved) return resolved;
+    }
+    // A matching alias that resolves nowhere is still not a package; stop here
+    // rather than letting a shorter rule claim it.
+    return null;
+  }
+  return null;
 }
 
 async function readSource(workspace: string, path: string): Promise<string> {
@@ -144,12 +276,13 @@ export async function buildProjectIndex(workspace: string): Promise<ProjectIndex
   const languages: Record<string, number> = {};
   for (const node of nodes) languages[node.language] = (languages[node.language] ?? 0) + 1;
 
+  const aliases = await loadAliasRules(workspace);
   const edges: ProjectEdge[] = [];
   for (const node of nodes) {
     if (!SOURCE_EXTENSIONS.some((extension) => node.path.toLowerCase().endsWith(extension))) continue;
     const source = await readSource(workspace, node.path);
-    for (const specifier of extractRelativeSpecifiers(source)) {
-      const target = resolveRelativeSpecifier(node.path, specifier, knownFiles);
+    for (const specifier of extractImportSpecifiers(source)) {
+      const target = resolveSpecifier(node.path, specifier, knownFiles, aliases);
       if (target && target !== node.path && !edges.some((edge) => edge.from === node.path && edge.to === target)) {
         edges.push({ from: node.path, to: target, type: "imports", provenance: "EXTRACTED" });
       }
@@ -267,6 +400,8 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
       saveGraphState,
       hashFileContent,
       deleteNodes,
+      readGraphMeta,
+      writeGraphMeta,
     } = await import("./graph-store.js");
     const dbPath = join(workspace, ".kyrei", "intel", "project-graph.db");
     db = openGraphDb(dbPath);
@@ -324,6 +459,20 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
     const newNodes: Array<{ path: string; language: string; contentHash: string }> = [];
     const newEdges: ProjectEdge[] = [];
     const knownFiles = new Set(files);
+    // Read once per rebuild, not per file: the alias table is workspace-wide.
+    const aliases = await loadAliasRules(workspace);
+
+    // Cached edges are keyed by file CONTENT, so nothing invalidates them when
+    // the meaning of that content changes: editing `tsconfig.json` paths, or
+    // shipping a smarter extractor, left every unchanged file holding the edges
+    // the old rules produced. Alias support would have stayed invisible on
+    // every existing workspace until each file happened to be touched. The
+    // signature covers both inputs, so either one changing forces a re-parse.
+    const signature = extractorSignature(aliases);
+    if (readGraphMeta(db, EXTRACTOR_SIGNATURE_KEY) !== signature) {
+      toReindex.splice(0, toReindex.length, ...files);
+      writeGraphMeta(db, EXTRACTOR_SIGNATURE_KEY, signature);
+    }
 
     for (const path of toReindex) {
       const language = languageFor(path);
@@ -334,8 +483,8 @@ export async function buildProjectIndexIncremental(workspace: string): Promise<P
 
       try {
         const source = sourceCache.get(path) ?? await readSource(workspace, path);
-        for (const specifier of extractRelativeSpecifiers(source)) {
-          const target = resolveRelativeSpecifier(path, specifier, knownFiles);
+        for (const specifier of extractImportSpecifiers(source)) {
+          const target = resolveSpecifier(path, specifier, knownFiles, aliases);
           if (target && target !== path) {
             newEdges.push({ from: path, to: target, type: "imports", provenance: "EXTRACTED" });
           }

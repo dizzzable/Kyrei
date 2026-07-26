@@ -239,4 +239,114 @@ describe("buildMemoryAtlas", () => {
       expect(graph.edges.some((edge) => (edge as { type: string }).type === "related")).toBe(false);
     });
   });
+
+  describe("containment", () => {
+    async function workspaceWithCode(files: string[], imports: Array<{ from: string; to: string }> = []): Promise<string> {
+      const workspace = await mkdtemp(join(tmpdir(), "kyrei-atlas-contains-"));
+      roots.push(workspace);
+      await mkdir(join(workspace, ".kyrei", "intel"), { recursive: true });
+      await writeFile(join(workspace, ".kyrei", "intel", "project-index.json"), JSON.stringify({
+        version: 1,
+        generatedAt: "2026-07-18T00:00:00.000Z",
+        workspace,
+        fileCount: files.length,
+        truncated: false,
+        languages: { TypeScript: files.length },
+        // Deliberately only ONE entry candidate: under the rule this replaces,
+        // a code file was connected only if it was an entry point or an import
+        // target, which left the rest of the index unreachable.
+        entryCandidates: ["src/main.ts"],
+        nodes: files.map((path) => ({ path, language: "TypeScript" })),
+        edges: imports,
+      }), "utf8");
+      return workspace;
+    }
+
+    it("leaves no node without a path back to the workspace root", async () => {
+      // The defect this guards: 426 of 696 code files had no edge at all, so a
+      // quarter of the graph rendered as unattached dots and the directory
+      // structure was invisible.
+      const workspace = await workspaceWithCode([
+        "src/main.ts", "src/lib/deep/nested/util.ts", "core/engine/index.ts", "standalone.ts",
+      ]);
+      const atlas = await buildMemoryAtlas({ workspace, memory: memoryStore([{
+        id: "doc-1", scope: "project", kind: "memory", path: ".kyrei/memory/notes.md",
+        title: "Notes", body: "n", sourceRef: "tier-a:memory", contentHash: "h",
+      }], []) });
+
+      const parent = new Map<string, string>();
+      for (const edge of atlas.edges) if (edge.type === "contains") parent.set(edge.target, edge.source);
+      for (const node of atlas.nodes) {
+        if (node.id === "project:root") continue;
+        let current: string | undefined = node.id;
+        const seen = new Set<string>();
+        while (current && current !== "project:root" && !seen.has(current)) {
+          seen.add(current);
+          current = parent.get(current);
+        }
+        expect(current, `${node.id} has no path to the root`).toBe("project:root");
+      }
+    });
+
+    it("nests a file under each of its real directories", async () => {
+      const workspace = await workspaceWithCode(["src/lib/deep/util.ts"]);
+      const atlas = await buildMemoryAtlas({ workspace, memory: memoryStore([], []) });
+
+      const byId = new Map(atlas.nodes.map((node) => [node.id, node]));
+      const parent = new Map<string, string>();
+      for (const edge of atlas.edges) if (edge.type === "contains") parent.set(edge.target, edge.source);
+      const chain: string[] = [];
+      let current: string | undefined = "code:src/lib/deep/util.ts";
+      while (current) {
+        chain.unshift(byId.get(current)?.title ?? current);
+        current = parent.get(current);
+      }
+      expect(chain.slice(1)).toEqual(["Code", "src", "lib", "deep", "util.ts"]);
+    });
+
+    it("gives every folder the region of what it holds", async () => {
+      const workspace = await workspaceWithCode(["src/main.ts"]);
+      const atlas = await buildMemoryAtlas({ workspace, memory: memoryStore([], [{
+        id: "session-1", scope: "session", kind: "memory", path: "session/s-1/msg-1",
+        title: "Chat", body: "b", sourceRef: "session:s-1", contentHash: "h",
+      }]) });
+
+      const folders = atlas.nodes.filter((node) => node.kind === "folder");
+      expect(folders.length).toBeGreaterThan(0);
+      expect(new Set(folders.map((node) => node.sourceId))).toEqual(new Set(["code", "sessions"]));
+    });
+
+    it("agrees with the tree about which category a node belongs to", async () => {
+      // These disagreed: a memory-derived `document` claimed sourceId "memory"
+      // while living under the Documents root, so no node anywhere carried the
+      // "documents" id its own edges referenced.
+      const workspace = await workspaceWithCode(["src/main.ts"]);
+      const atlas = await buildMemoryAtlas({ workspace, memory: memoryStore([{
+        id: "doc-1", scope: "project", kind: "memory", path: ".kyrei/memory/imports/guide.md",
+        title: "Guide", body: "b", sourceRef: "tier-a:imported-doc", contentHash: "h",
+      }], []) });
+
+      const byNodeId = new Map(atlas.tree.filter((row) => row.nodeId).map((row) => [row.nodeId!, row]));
+      for (const node of atlas.nodes) {
+        const row = byNodeId.get(node.id);
+        if (row) expect(node.sourceId, node.id).toBe(row.sourceId);
+      }
+      expect(atlas.nodes.find((node) => node.id === "memory:doc-1")?.sourceId).toBe("documents");
+    });
+
+    it("spends the budget on the skeleton before any overlay", async () => {
+      const files = Array.from({ length: 120 }, (_, i) => `src/mod${i}/file.ts`);
+      const imports = files.slice(1).map((path) => ({ from: files[0]!, to: path }));
+      const workspace = await workspaceWithCode(files, imports);
+      const atlas = await buildMemoryAtlas({ workspace, memory: memoryStore([], []), maxEdges: 100 });
+
+      expect(atlas.edges.length).toBeLessThanOrEqual(100);
+      // Containment fills the budget first: an import is worth less than the
+      // directory edge that gives a file a place to be at all.
+      expect(atlas.edges.every((edge) => edge.type === "contains")).toBe(true);
+      // A dropped structural edge is reported, never dropped in silence — the
+      // rule this replaces cut 19 of them without a word.
+      expect(atlas.stats.truncationReasons.some((reason) => reason.startsWith("edges:"))).toBe(true);
+    });
+  });
 });

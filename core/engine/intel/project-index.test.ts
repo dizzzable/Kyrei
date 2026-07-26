@@ -110,3 +110,94 @@ describe("project intelligence index", () => {
     expect(index2.generatedAt).not.toBe(gen1);
   });
 });
+
+describe("import alias resolution", () => {
+  /** Overwrite the fixture's entry so it imports through an alias. */
+  async function withAlias(tsconfig: string): Promise<void> {
+    await writeFile(join(workspace, "tsconfig.json"), tsconfig, "utf8");
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from '@/service';\nrun();\n", "utf8");
+  }
+
+  it("follows a path alias into the workspace", async () => {
+    // Without this, a specifier that does not start with "." was discarded, so
+    // an alias-importing layer had NO edges at all. Measured on Kyrei itself:
+    // 880 of 8 306 internal imports invisible, every one of them in the
+    // renderer — precisely where `project_impact` was least able to answer.
+    await withAlias(`{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}`);
+    const index = await buildProjectIndex(workspace);
+
+    expect(index.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: "src/entry.ts", to: "src/service.ts", provenance: "EXTRACTED" }),
+    ]));
+    expect(analyzeProjectImpact(index, "src/service.ts").directDependents).toContain("src/entry.ts");
+  });
+
+  it("reads a tsconfig that contains comments and a trailing comma", async () => {
+    // tsconfig.json is JSONC by convention, so a plain JSON.parse fails on most
+    // real projects and would silently leave every alias unresolved.
+    await withAlias(`{
+      // paths for the renderer
+      "compilerOptions": {
+        /* wildcard mapping */
+        "paths": { "@/*": ["./src/*"], },
+      },
+    }`);
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(true);
+  });
+
+  it("honours baseUrl when the mapping is relative to it", async () => {
+    await withAlias(`{"compilerOptions":{"baseUrl":"./src","paths":{"@/*":["./*"]}}}`);
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(true);
+  });
+
+  it("prefers the longest matching prefix", async () => {
+    await mkdir(join(workspace, "src", "deep"), { recursive: true });
+    await writeFile(join(workspace, "src", "deep", "service.ts"), "export const run = () => 2;\n", "utf8");
+    await writeFile(join(workspace, "tsconfig.json"), `{"compilerOptions":{"paths":{"@/*":["./src/*"],"@/service":["./src/deep/service.ts"]}}}`, "utf8");
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from '@/service';\nrun();\n", "utf8");
+
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/deep/service.ts")).toBe(true);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(false);
+  });
+
+  it("still ignores package imports and unresolvable aliases", async () => {
+    await writeFile(join(workspace, "tsconfig.json"), `{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}`, "utf8");
+    await writeFile(join(workspace, "src", "entry.ts"), "import React from 'react';\nimport x from '@/does-not-exist';\nexport default [React, x];\n", "utf8");
+
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.filter((edge) => edge.from === "src/entry.ts")).toEqual([]);
+  });
+
+  it("resolves nothing when the workspace declares no aliases", async () => {
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from '@/service';\nrun();\n", "utf8");
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts")).toBe(false);
+  });
+
+  it("resolves aliases on the incremental path too", async () => {
+    // The two builders duplicate the extraction loop, so an alias fix applied
+    // to only one of them would work on a full rebuild and vanish on the next
+    // incremental one — which is the path the tool actually calls.
+    await withAlias(`{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}`);
+    const index = await buildProjectIndexIncremental(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(true);
+  });
+
+  it("re-parses when the alias table changes, without any file changing", async () => {
+    // Incremental caching keys edges by file CONTENT, so nothing invalidated
+    // them when the MEANING of that content changed. Editing tsconfig paths —
+    // or shipping a smarter extractor — left every untouched file holding the
+    // edges the old rules produced, indefinitely.
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from '@/service';\nrun();\n", "utf8");
+    await writeFile(join(workspace, "tsconfig.json"), `{"compilerOptions":{"paths":{"@/*":["./nowhere/*"]}}}`, "utf8");
+    const before = await buildProjectIndexIncremental(workspace);
+    expect(before.edges.some((edge) => edge.from === "src/entry.ts")).toBe(false);
+
+    await writeFile(join(workspace, "tsconfig.json"), `{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}`, "utf8");
+    const after = await buildProjectIndexIncremental(workspace);
+    expect(after.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(true);
+  });
+});

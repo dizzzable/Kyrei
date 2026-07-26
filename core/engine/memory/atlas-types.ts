@@ -13,8 +13,17 @@ export interface MemoryAtlasSourceDescriptor {
   omitted?: number;
 }
 
+/**
+ * `folder` is scaffolding, not content: one node per directory / source root,
+ * derived from the tree so the graph and the sidebar describe the same
+ * structure. Before it existed, 426 of 696 code files had no edge at all —
+ * a file was only connected if it happened to be an entry point or the target
+ * of an import — so the graph showed a cloud of unattached dots instead of a
+ * project. Scaffolding is never a filter category; it is kept or dropped
+ * according to whether anything below it survived the filter.
+ */
 export type MemoryAtlasNodeKind =
-  | "project" | "code" | "document" | "decision" | "plan"
+  | "project" | "folder" | "code" | "document" | "decision" | "plan"
   | "handoff" | "session" | "memory" | "skill" | "evolution";
 
 export interface MemoryAtlasNode {

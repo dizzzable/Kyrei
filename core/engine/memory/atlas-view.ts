@@ -42,6 +42,13 @@ export interface GetWorkspaceMemoryAtlasInput extends Omit<BuildMemoryAtlasInput
   config?: MemoryIndexConfig;
 }
 
+/**
+ * Share of the edge budget held back for semantic `related` edges, so the
+ * similarity layer survives a workspace whose structural edges alone fill the
+ * budget. Capped by `RELATED_MAX_EDGES`.
+ */
+const RELATED_BUDGET_SHARE = 0.15;
+
 function memoryKind(doc: MemoryDoc): MemoryAtlasNodeKind {
   if (doc.sourceRef === "tier-a:imported-doc" || doc.sourceRef === "vault:markdown") return "document";
   if (doc.kind === "decision") return "decision";
@@ -134,7 +141,10 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
   const generatedAt = (input.now?.() ?? new Date()).toISOString();
   const codeLimit = Math.max(50, Math.min(2_000, input.maxCodeNodes ?? 700));
   const docLimit = Math.max(20, Math.min(2_000, input.maxDocs ?? 500));
-  const edgeLimit = Math.max(100, Math.min(5_000, input.maxEdges ?? 1_500));
+  // Every node now carries its containment chain, so the floor for a complete
+  // skeleton is roughly one edge per node plus the folders above them. At the
+  // old 1 500 the skeleton alone overflowed and the overlays were starved.
+  const edgeLimit = Math.max(100, Math.min(5_000, input.maxEdges ?? 4_000));
   const project = await loadProjectIndex(workspace);
   const allCodeNodes = project?.nodes ?? [];
   const codeNodes = allCodeNodes.slice(0, codeLimit);
@@ -166,9 +176,6 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
   for (const edge of (project?.edges ?? [])) {
     if (!codePaths.has(edge.from) || !codePaths.has(edge.to)) continue;
     edges.push({ source: `code:${edge.from}`, target: `code:${edge.to}`, type: "imports", sourceId: "code" });
-  }
-  for (const path of (project?.entryCandidates ?? []).filter((path) => codePaths.has(path)).slice(0, 40)) {
-    edges.push({ source: "project:root", target: `code:${path}`, type: "contains", sourceId: "project" });
   }
 
   const loadedMemory = await memoryDocs(input.memory, workspace);
@@ -224,7 +231,6 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
       ? normalizedPath(doc.path).replace(/^\.kyrei\/memory\//, "")
       : normalizedPath(doc.path);
     addTreePath(tree, sourceId, sourceLabel, displayPath || `${doc.id}.md`, id, doc.title || basename(doc.path));
-    edges.push({ source: "project:root", target: id, type: "contains", sourceId });
     for (const path of entryCandidates) {
       if (doc.body.includes(path)) edges.push({ source: id, target: `code:${path}`, type: "references", sourceId });
     }
@@ -250,7 +256,6 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
       compatible: skill.compatible,
     });
     addTreePath(tree, "skills", "Skills", path, id, skill.name);
-    edges.push({ source: "project:root", target: id, type: "contains", sourceId: "skills" });
     for (const document of skill.linkedDocuments ?? []) {
       const documentId = `skill-document:${createHash("sha1").update(`${skill.id}:${document.id}`).digest("hex").slice(0, 20)}`;
       const documentPath = normalizedPath(document.path || document.title || document.id);
@@ -271,7 +276,6 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
         documentId,
         document.title || basename(documentPath) || document.id,
       );
-      edges.push({ source: id, target: documentId, type: "contains", sourceId: "skills" });
     }
   }
 
@@ -298,7 +302,6 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
       digest: candidate.digest,
     });
     addTreePath(tree, "evolution", "Evolution", path, id, candidate.title);
-    edges.push({ source: "project:root", target: id, type: "contains", sourceId: "evolution" });
     if (candidate.targetKind === "skill") {
       const targetNodeId = `skill:${candidate.targetId}`;
       if (nodeIds.has(targetNodeId)) {
@@ -336,27 +339,73 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
     }
   }
 
-  // Semantic `related` edges between memory docs. They get only the budget the
-  // structural edges left behind, so they can never displace a structural edge
-  // nor push the snapshot over `edgeLimit` — which would otherwise report the
-  // atlas as truncated because of a purely cosmetic enhancement. Fail-open: a
-  // bad embedder must never discard an otherwise valid snapshot.
-  const relatedBudget = Math.min(RELATED_MAX_EDGES, Math.max(0, edgeLimit - edges.length));
-  if (input.relatedEdges !== false && relatedInputs.length > 1 && relatedBudget > 0) {
+  // Containment is DERIVED from the tree rather than pushed alongside it, so
+  // the graph and the sidebar cannot drift apart: every folder in the tree is a
+  // node, and every row hangs off its own parent. The hand-rolled version this
+  // replaces attached items straight to `project:root` and gave code files no
+  // parent at all beyond ≤40 entry points, which left 426 of 696 files with no
+  // edge whatsoever — a quarter of the graph rendered as unattached dots.
+  const containment: MemoryAtlasEdge[] = [];
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  for (const row of tree.values()) {
+    if (row.kind === "item") {
+      if (!row.nodeId) continue;
+      const node = nodeById.get(row.nodeId);
+      if (!node) continue;
+      // The tree is authoritative for placement, so it is authoritative for the
+      // category too. These disagreed: every memory-derived `document` claimed
+      // `sourceId: "memory"` while living under the Documents root, so no node
+      // anywhere carried the `documents` id its own edges referenced.
+      node.sourceId = row.sourceId;
+      containment.push({ source: row.parentId ?? "project:root", target: row.nodeId, type: "contains", sourceId: row.sourceId });
+      continue;
+    }
+    nodes.push({
+      id: row.id,
+      sourceId: row.sourceId,
+      kind: "folder",
+      title: row.label,
+      ...(row.path ? { path: row.path, subtitle: row.path } : {}),
+    });
+    containment.push({ source: row.parentId ?? "project:root", target: row.id, type: "contains", sourceId: row.sourceId });
+  }
+
+  // Edge budget, in strict priority order.
+  //
+  // Containment is the skeleton — it is what gives every node a place — so it
+  // is spent first and is never displaced by anything below it. Overlays go
+  // next. Semantic `related` edges get a RESERVED slice, but only out of room
+  // the skeleton did not need: reserving ahead of the skeleton would drop
+  // directory edges to make space for similarity, which is exactly backwards.
+  //
+  // The rule this replaces gave `related` only the leftovers — `edgeLimit -
+  // edges.length` — and on a real workspace the structural edges alone
+  // overflowed the limit, so the reserve evaluated to zero and the similarity
+  // pass never ran once. Not a disabled feature; an arithmetic starvation.
+  const keptContainment = containment.slice(0, edgeLimit);
+  const afterSkeleton = Math.max(0, edgeLimit - keptContainment.length);
+  const relatedReserve = input.relatedEdges === false
+    ? 0
+    : Math.min(RELATED_MAX_EDGES, Math.floor(edgeLimit * RELATED_BUDGET_SHARE), afterSkeleton);
+  const keptOverlays = edges.slice(0, Math.max(0, afterSkeleton - relatedReserve));
+  const relatedBudget = Math.min(relatedReserve, afterSkeleton - keptOverlays.length);
+  const relatedEdges: MemoryAtlasEdge[] = [];
+  if (relatedBudget > 0 && relatedInputs.length > 1) {
     try {
-      const related = await computeRelatedEdges(relatedInputs, { maxEdges: relatedBudget });
-      edges.push(...related);
+      relatedEdges.push(...await computeRelatedEdges(relatedInputs, { maxEdges: relatedBudget }));
     } catch {
-      // Related edges are an enhancement, not a requirement.
+      // Related edges are an enhancement, not a requirement. Fail-open: a bad
+      // embedder must never discard an otherwise valid snapshot.
     }
   }
 
-  const boundedEdges = edges.slice(0, edgeLimit);
+  const boundedEdges = [...keptContainment, ...keptOverlays, ...relatedEdges];
+  const droppedEdges = (containment.length - keptContainment.length) + (edges.length - keptOverlays.length);
   const truncationReasons = [
     ...(Boolean(project?.truncated) ? ["project_index_truncated"] : []),
     ...(allCodeNodes.length > codeNodes.length ? [`code_nodes:${allCodeNodes.length - codeNodes.length}`] : []),
     ...(allDocs.length > docs.length ? [`memory_docs:${allDocs.length - docs.length}`] : []),
-    ...(edges.length > boundedEdges.length ? [`edges:${edges.length - boundedEdges.length}`] : []),
+    ...(droppedEdges > 0 ? [`edges:${droppedEdges}`] : []),
     ...sources.filter((source) => source.truncated).map((source) => `source:${source.id}:${source.omitted ?? 0}`),
   ];
   const snapshotSeed = JSON.stringify({ workspace, generatedAt, nodes: nodes.map((node) => node.id), sources });
@@ -385,7 +434,9 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
 }
 
 function v1Group(kind: MemoryAtlasNodeKind): MemoryGraphGroup | undefined {
-  return kind === "skill" || kind === "evolution" ? undefined : kind;
+  // v1 has no scaffolding concept, so folders are dropped rather than mapped —
+  // the same treatment skills and evolution candidates already get.
+  return kind === "skill" || kind === "evolution" || kind === "folder" ? undefined : kind;
 }
 
 export function memoryAtlasToGraphV1(atlas: MemoryAtlasSnapshot): WorkspaceMemoryGraph {

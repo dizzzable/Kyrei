@@ -12,6 +12,7 @@ import { MemoryAtlasCanvas } from "./MemoryAtlasCanvas";
 import { MemoryAtlasCanvas3DBoundary } from "./MemoryAtlasCanvas3DBoundary";
 import { MemoryAtlasInspector } from "./MemoryAtlasInspector";
 import { MemoryAtlasTree } from "./MemoryAtlasTree";
+import { atlasScaffoldClosure } from "./memory-atlas-layout";
 import type { AtlasViewport, Point } from "./memory-atlas-viewport";
 
 // three.js is heavy — only pull the 3D bundle when the user opens that mode.
@@ -204,15 +205,27 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
   }, [query, debouncedQuery]);
 
   const normalizedQuery = debouncedQuery.trim().toLocaleLowerCase();
-  const visibleNodes = useMemo(() => (atlas?.nodes ?? []).filter((node) => {
-    if (node.kind === "project") return true;
-    if (activeGroup !== "all" && node.kind !== activeGroup) return false;
-    if (!normalizedQuery) return true;
-    return `${node.title} ${node.path ?? ""} ${node.subtitle ?? ""} ${node.preview ?? ""}`.toLocaleLowerCase().includes(normalizedQuery);
-  }), [activeGroup, atlas?.nodes, normalizedQuery]);
-  const visibleIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  // Content nodes that pass the filter. Scaffolding is excluded here and added
+  // back below: a folder should be shown because something under it survived,
+  // never because its own name happened to match.
+  const keptIds = useMemo(() => {
+    const kept = new Set<string>();
+    for (const node of atlas?.nodes ?? []) {
+      if (node.kind === "project" || node.kind === "folder") continue;
+      if (activeGroup !== "all" && node.kind !== activeGroup) continue;
+      if (normalizedQuery && !`${node.title} ${node.path ?? ""} ${node.subtitle ?? ""} ${node.preview ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)) continue;
+      kept.add(node.id);
+    }
+    return kept;
+  }, [activeGroup, atlas?.nodes, normalizedQuery]);
+  const visibleIds = useMemo(() => {
+    const visible = atlasScaffoldClosure(keptIds, atlas?.edges ?? []);
+    visible.add("project:root");
+    return visible;
+  }, [atlas?.edges, keptIds]);
+  const visibleNodes = useMemo(() => (atlas?.nodes ?? []).filter((node) => visibleIds.has(node.id)), [atlas?.nodes, visibleIds]);
   const visibleEdges = useMemo(() => (atlas?.edges ?? []).filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)), [atlas?.edges, visibleIds]);
-  const matchedIds = useMemo(() => new Set(normalizedQuery ? visibleNodes.filter((node) => node.kind !== "project").map((node) => node.id) : []), [normalizedQuery, visibleNodes]);
+  const matchedIds = useMemo(() => new Set(normalizedQuery ? keptIds : []), [normalizedQuery, keptIds]);
   const selected = atlas?.nodes.find((node) => node.id === selectedId) ?? null;
   const sourceWarnings = atlas?.sources.filter((source) => source.health !== "ready") ?? [];
 
@@ -246,7 +259,9 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
 
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border-soft px-4 py-2 sm:px-5">
-            <FilterChip active={activeGroup === "all"} onClick={() => setActiveGroup("all")} label={t("shell.memory.group.all")} count={atlas?.nodes.length ?? 0} />
+            {/* Counts content, not scaffolding: folders are structure the view
+                adds, so including them would inflate "how much is indexed". */}
+            <FilterChip active={activeGroup === "all"} onClick={() => setActiveGroup("all")} label={t("shell.memory.group.all")} count={atlas?.nodes.filter((node) => node.kind !== "folder").length ?? 0} />
             {GROUPS.map((group) => <FilterChip key={group} active={activeGroup === group} onClick={() => setActiveGroup(group)} label={group === "skill" ? t("shell.memory.group.skill") : group === "evolution" ? t("shell.memory.group.evolution") : groupLabel(group, t)} count={atlas?.nodes.filter((node) => node.kind === group).length ?? 0} />)}
             <span className="ml-auto hidden font-mono text-[9px] text-faint md:inline">{atlas ? t("shell.memory.generated", { value: date(Date.parse(atlas.generatedAt), { timeStyle: "short" }) }) : ""}</span>
             <div className="flex items-center rounded-md border border-border-soft p-0.5" role="group" aria-label={t("shell.memory.viewModeToggle")}>
