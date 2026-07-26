@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitViewport, panViewport, zoomViewportAt } from "./memory-atlas-viewport";
+import { MIN_FRAMEABLE_EXTENT, atlasCameraPlan, fitViewport, panViewport, zoomViewportAt } from "./memory-atlas-viewport";
 
 describe("memory atlas viewport", () => {
   it("keeps the graph point under the cursor while zooming", () => {
@@ -19,5 +19,41 @@ describe("memory atlas viewport", () => {
       x: -175,
       y: -150,
     });
+  });
+});
+
+describe("atlasCameraPlan", () => {
+  // Regression: the 3D view never framed its camera. `focusNode` bails when the
+  // node has no coordinates yet — exactly the case on first render — and
+  // nothing called zoomToFit, so a large graph rendered as a black viewport
+  // with a perfectly healthy scene just out of view.
+  it("fits an unframed graph", () => {
+    expect(atlasCameraPlan({ nodeCount: 1791, fittedForCount: -1, selectedInGraph: false, graphExtent: 2600 })).toBe("fit");
+  });
+
+  it("prefers the selection over an overview fit", () => {
+    expect(atlasCameraPlan({ nodeCount: 1791, fittedForCount: -1, selectedInGraph: true, graphExtent: 2600 })).toBe("focus-selection");
+  });
+
+  it("does not re-frame a graph it already framed", () => {
+    // Re-fitting would fight the user's own pan/zoom on every engine tick.
+    expect(atlasCameraPlan({ nodeCount: 1791, fittedForCount: 1791, selectedInGraph: false, graphExtent: 2600 })).toBe("skip");
+  });
+
+  it("frames again when the node set changes", () => {
+    expect(atlasCameraPlan({ nodeCount: 300, fittedForCount: 1791, selectedInGraph: false, graphExtent: 2600 })).toBe("fit");
+  });
+
+  it("does nothing for an empty graph", () => {
+    expect(atlasCameraPlan({ nodeCount: 0, fittedForCount: -1, selectedInGraph: false, graphExtent: 2600 })).toBe("skip");
+  });
+
+  it("waits for the layout to spread before framing", () => {
+    // The layout starts collapsed at the origin. Framing it then fits a POINT:
+    // the camera lands metres from the centre and stays there while the graph
+    // expands around it — which is exactly how the view went black.
+    expect(atlasCameraPlan({ nodeCount: 1898, fittedForCount: -1, selectedInGraph: false, graphExtent: 0 })).toBe("skip");
+    expect(atlasCameraPlan({ nodeCount: 1898, fittedForCount: -1, selectedInGraph: false, graphExtent: 5 })).toBe("skip");
+    expect(atlasCameraPlan({ nodeCount: 1898, fittedForCount: -1, selectedInGraph: false, graphExtent: MIN_FRAMEABLE_EXTENT })).toBe("fit");
   });
 });

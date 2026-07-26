@@ -4,7 +4,8 @@ import ForceGraph3D, { type ForceGraphMethods, type NodeObject } from "react-for
 import { useI18n } from "@/i18n";
 import { useThemeId } from "@/lib/theme";
 import type { MemoryAtlasNode, MemoryAtlasSnapshot } from "@/lib/types";
-import { atlasNodePalette, resolveThemeColor } from "./memory-atlas-colors";
+import { ATLAS_EDGE_COLORS, atlasNodePalette } from "./memory-atlas-colors";
+import { atlasCameraPlan } from "./memory-atlas-viewport";
 
 type AtlasEdgeType = MemoryAtlasSnapshot["edges"][number]["type"];
 type AtlasGraphNode = NodeObject<{ node: MemoryAtlasNode; degree: number }>;
@@ -79,7 +80,7 @@ export function MemoryAtlasCanvas3D({
   // (where `applyTheme` sets the theme), so it is correct on the first render,
   // before the container ref is attached.
   const palette = useMemo(
-    () => ({ nodes: atlasNodePalette(), related: resolveThemeColor("--color-secondary") }),
+    () => ({ nodes: atlasNodePalette() }),
     [themeId],
   );
 
@@ -100,13 +101,39 @@ export function MemoryAtlasCanvas3D({
     return matchedIds.size > 0 ? matchedIds : null;
   }, [focusId, graphData.links, matchedIds]);
 
-  // Container-driven sizing; the component does not auto-fit.
+  // Container-driven sizing. The camera is framed separately once the graph
+  // settles — see fitToGraph.
   useEffect(() => {
     const element = containerRef.current;
     if (!element) return;
+    /**
+     * Measure directly first.
+     *
+     * `ResizeObserver` delivery is part of the rendering lifecycle, so it does
+     * not fire while the document has no frames — a window that is hidden,
+     * minimised or occluded when the Atlas opens. `size` then stayed {0,0}
+     * forever and the guard below never mounted the graph at all: measured
+     * live, a container of 868×685 with zero canvases. A direct read has no
+     * such dependency, and the observer still handles later resizes.
+     */
+    const measure = () => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
+        return true;
+      }
+      return false;
+    };
+    if (!measure()) {
+      // Laid out on a later frame (dialog open animation): retry briefly.
+      const retry = setInterval(() => { if (measure()) clearInterval(retry); }, 120);
+      setTimeout(() => clearInterval(retry), 5_000);
+    }
     const observer = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect;
-      if (rect) setSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
+      if (rect && rect.width > 0 && rect.height > 0) {
+        setSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
+      }
     });
     observer.observe(element);
     return () => observer.disconnect();
@@ -129,19 +156,68 @@ export function MemoryAtlasCanvas3D({
   // Release the WebGL context on unmount. three's `dispose()` frees JS caches
   // but leaves the GPU context alive until the canvas is collected, and browsers
   // cap live contexts — enough 2D/3D toggles would blank the view.
-  useEffect(() => {
+  //
+  // The dependency array MUST stay empty. It used to be `[size.width,
+  // size.height]`, and React runs a cleanup on every dependency change, not
+  // only on unmount — so the second ResizeObserver report (there is always one:
+  // 0 → measured) tore down the renderer of a graph that was still mounted.
+  // `dispose()` freed every GPU resource and the animation loop died with it,
+  // which is why the view showed a full scene of 3 398 meshes with zero draw
+  // calls, zero uploaded geometries, and every node object still sitting at the
+  // origin because no tick ever ran to apply its coordinates.
+  //
+  // The ref is read inside the cleanup, so an empty array is also correct: it
+  // resolves at teardown time rather than capturing an early undefined.
+  useEffect(() => () => {
+    try {
+      const renderer = graphRef.current?.renderer() as
+        { forceContextLoss?: () => void; dispose?: () => void } | undefined;
+      renderer?.forceContextLoss?.();
+      renderer?.dispose?.();
+    } catch {
+      // Teardown is best-effort; a failure here must not break unmounting.
+    }
+  }, []);
+
+  /**
+   * Revive the render loop when it is stuck.
+   *
+   * `requestAnimationFrame` does not fire while the document is hidden, and the
+   * library schedules its loop at mount. If that happens while the window is
+   * hidden, minimised, or occluded, its internal "running" flag stays set while
+   * no frame is ever queued — and it never recovers, because `resumeAnimation()`
+   * early-returns on that flag. The result is a full scene of thousands of
+   * meshes with ZERO draw calls: every node object still sits at the origin
+   * because no tick ran to apply its simulated coordinates. Measured live: the
+   * renderer sat on frame 1 with 0 uploaded geometries, and one manual
+   * `render()` immediately produced 3 398 draw calls.
+   *
+   * Pausing first is what makes the resume take effect — clearing the flag is
+   * the whole point, so this is not a redundant pair.
+   */
+  const kickRenderLoop = useCallback(() => {
     const graph = graphRef.current;
-    if (!graph || !(size.width > 0 && size.height > 0)) return;
+    if (!graph) return;
+    try {
+      graph.pauseAnimation();
+      graph.resumeAnimation();
+    } catch {
+      // Best-effort recovery; never break the view trying to repair it.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!(size.width > 0 && size.height > 0)) return;
+    // Once the graph has mounted, and again whenever the window becomes
+    // visible — the two moments a stalled loop can be observed.
+    const onVisible = () => { if (document.visibilityState === "visible") kickRenderLoop(); };
+    const timer = setTimeout(kickRenderLoop, 300);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      try {
-        const renderer = graph.renderer() as { forceContextLoss?: () => void; dispose?: () => void } | undefined;
-        renderer?.forceContextLoss?.();
-        renderer?.dispose?.();
-      } catch {
-        // Teardown is best-effort; a failure here must not break unmounting.
-      }
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [size.width, size.height]);
+  }, [kickRenderLoop, size.width, size.height]);
 
   const nodeColor = useCallback((node: AtlasGraphNode) => {
     if (highlighted && !highlighted.has(node.id as string)) return DIMMED_COLOR;
@@ -157,11 +233,11 @@ export function MemoryAtlasCanvas3D({
   const nodeLabel = useCallback((node: AtlasGraphNode) =>
     `${node.node.title}${node.node.subtitle ? ` · ${node.node.subtitle}` : ""}`, []);
 
-  const linkColor = useCallback((link: AtlasLink) => {
-    if (link.type === "related") return palette.related;
-    if (link.type === "references") return "rgba(99,102,241,0.4)";
-    return "rgba(120,120,130,0.28)";
-  }, [palette]);
+  // One colour per edge type, so an edge says WHAT KIND of connection it is.
+  // `contains`, `imports` and `references` used to share two near-identical
+  // greys, which showed that things were connected but never how.
+  const linkColor = useCallback((link: AtlasLink) =>
+    ATLAS_EDGE_COLORS[link.type] ?? ATLAS_EDGE_COLORS.contains, []);
 
   const focusNode = useCallback((node: AtlasGraphNode | null) => {
     const graph = graphRef.current;
@@ -187,6 +263,50 @@ export function MemoryAtlasCanvas3D({
     if (node) focusNode(node);
   }, [selectedId, nodesById, focusNode]);
 
+  /**
+   * Fit the camera to the graph once the simulation settles.
+   *
+   * Nothing used to do this: the camera stayed at the library's default
+   * distance while d3-force spread a large graph across thousands of units, so
+   * a big Atlas rendered as an empty black viewport — the scene was fine, the
+   * camera was simply nowhere near it. `focusNode` did not cover the gap
+   * either: it bails when the node has no coordinates yet, which is exactly the
+   * case on first render.
+   *
+   * Fires once per node set, and never over a deliberate selection.
+   */
+  const fittedFor = useRef<number>(-1);
+  useEffect(() => {
+    fittedFor.current = -1; // a new node set has to be framed again
+  }, [graphData.nodes]);
+
+  const fitToGraph = useCallback(() => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const bbox = graph.getGraphBbox?.();
+    const extent = bbox
+      ? Math.max(bbox.x[1] - bbox.x[0], bbox.y[1] - bbox.y[0], bbox.z[1] - bbox.z[0])
+      : 0;
+    const plan = atlasCameraPlan({
+      nodeCount: graphData.nodes.length,
+      fittedForCount: fittedFor.current,
+      selectedInGraph: Boolean(selectedId && nodesById.has(selectedId)),
+      graphExtent: extent,
+    });
+    if (plan === "skip") return;
+    fittedFor.current = graphData.nodes.length;
+    if (plan === "focus-selection") focusNode(nodesById.get(selectedId!) ?? null);
+    else graph.zoomToFit(400, 60);
+  }, [graphData.nodes.length, selectedId, nodesById, focusNode]);
+
+  // `onEngineStop` is the reliable signal, but a heavy graph can keep ticking
+  // for a long time — fit early too so the user is never left facing a void.
+  useEffect(() => {
+    if (!(size.width > 0 && size.height > 0) || graphData.nodes.length === 0) return;
+    const timer = setTimeout(fitToGraph, 1_200);
+    return () => clearTimeout(timer);
+  }, [fitToGraph, graphData.nodes.length, size.width, size.height]);
+
   return (
     <div
       ref={containerRef}
@@ -207,11 +327,18 @@ export function MemoryAtlasCanvas3D({
           nodeVal={nodeVal}
           nodeLabel={nodeLabel}
           nodeOpacity={0.92}
+          // Sphere radius is `cbrt(nodeVal) * nodeRelSize` in WORLD units, so
+          // it has to be read against the layout's scale. A graph of this size
+          // spreads across ~2 600 units; at the library default of 4 a node is
+          // under a pixel once the camera frames the whole thing, which reads
+          // as an empty canvas even though everything is drawn correctly.
+          nodeRelSize={12}
           nodeResolution={heavy ? 6 : 12}
           linkColor={linkColor}
           linkWidth={linkWidth}
           enableNodeDrag={!heavy}
           warmupTicks={heavy ? 20 : 40}
+          onEngineStop={fitToGraph}
           onNodeClick={(node: AtlasGraphNode) => { onSelect(node.id as string); focusNode(node); }}
           onNodeHover={(node: AtlasGraphNode | null) => setHoverId(node ? (node.id as string) : null)}
           onBackgroundClick={() => onSelect(null)}
