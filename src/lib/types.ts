@@ -204,7 +204,8 @@ export interface GatewayStatus {
   };
 }
 
-export type SkillProvenance = "global" | "workspace" | "custom" | "kiro";
+/** `kiro` and `claude` are foreign vendor roots — discovered, never written. */
+export type SkillProvenance = "global" | "workspace" | "custom" | "kiro" | "claude";
 
 export interface SkillReference {
   id: string;
@@ -232,6 +233,12 @@ export interface SkillInfo {
   owned: boolean;
   enabled: boolean;
   usage: number;
+  /**
+   * A higher-precedence skill of the same NAME exists, so this copy is listed
+   * but never injected at runtime. The catalog shows every source on purpose;
+   * without this flag a duplicate row reads as a bug rather than as a shadow.
+   */
+  shadowed?: boolean;
   lastUsedAt?: string;
   relativePath: string;
   content?: string;

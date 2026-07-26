@@ -529,3 +529,79 @@ author: !!js/function function(){}
     expect(exact.skills[1]?.content).toContain("SECOND");
   });
 });
+
+describe("SkillsStore — foreign Claude skills root", () => {
+  it("discovers ~/.claude/skills read-only, so an existing library works without importing it", async () => {
+    // SKILL.md is the cross-vendor format now — Copilot, Devin, Junie, Zed,
+    // OpenHands and Amp all read it — and a user arriving with a library keeps
+    // it in ~/.claude/skills. Kyrei already reads a foreign vendor's root this
+    // way for Kiro; this is the same shape.
+    const claudeRoot = join(root, ".claude");
+    await writeSkill(join(claudeRoot, "skills", "graphify"), "graphify", "code knowledge graph");
+
+    const store = new SkillsStore({ dataDir, claudeRoot });
+    const roots = await store.rootsInternal();
+    const claude = roots.find((entry: { provenance: string }) => entry.provenance === "claude");
+
+    expect(claude?.available).toBe(true);
+    // Read-only: nothing here is ever rewritten by the curator or the
+    // evolution executor.
+    expect(claude?.owned).toBe(false);
+    expect((await store.list()).map((s: { name: string }) => s.name)).toContain("graphify");
+  });
+
+  it("marks the foreign copy as shadowed when an owned skill has the same name", async () => {
+    // `list()` deliberately exposes every source, so a duplicate name shows
+    // twice — and without a marker that is just confusing. Measured on a real
+    // machine: reading ~/.claude/skills took the catalog from 97 entries with
+    // 41 shadowed copies to 152 with 94, while the RUNTIME catalog stayed at 58
+    // with none. The listing looked broken; the injection path never was.
+    const claudeRoot = join(root, ".claude");
+    await writeSkill(join(dataDir, "skills", "shared"), "shared", "the owned copy");
+    await writeSkill(join(claudeRoot, "skills", "shared"), "shared", "the foreign copy");
+    await writeSkill(join(claudeRoot, "skills", "only-here"), "only-here", "not owned anywhere");
+
+    const skills = await new SkillsStore({ dataDir, claudeRoot }).list();
+    const shared = skills.filter((s: { name: string }) => s.name === "shared");
+
+    expect(shared).toHaveLength(2);
+    // The owned copy wins: it is the one the user and the curator can edit.
+    const active = shared.find((s: { shadowed?: boolean }) => !s.shadowed);
+    expect(active?.provenance).toBe("global");
+    expect(shared.find((s: { provenance: string }) => s.provenance === "claude")?.shadowed).toBe(true);
+    // A skill that exists only in the foreign root is not shadowed by anything.
+    const only = skills.find((s: { name: string }) => s.name === "only-here");
+    expect(only?.provenance).toBe("claude");
+    expect(only?.shadowed).toBeUndefined();
+  });
+
+  it("keeps a shadowed copy out of the runtime catalog entirely", async () => {
+    const claudeRoot = join(root, ".claude");
+    await writeSkill(join(dataDir, "skills", "shared"), "shared", "the owned copy");
+    await writeSkill(join(claudeRoot, "skills", "shared"), "shared", "the foreign copy");
+
+    const runtime = await new SkillsStore({ dataDir, claudeRoot })
+      .runtimeSkills({ maxSkills: 10, maxChars: 100_000 });
+    expect(runtime.skills.filter((s: { name: string }) => s.name === "shared")).toHaveLength(1);
+  });
+
+  it("ranks every known provenance, so the precedence stays a total order", async () => {
+    // A provenance missing from the table subtracts to NaN, the comparator
+    // stops being a total order, and which copy "wins" becomes
+    // implementation-defined — including, possibly, the foreign one.
+    const claudeRoot = join(root, ".claude");
+    await writeSkill(join(dataDir, "skills", "b-owned"), "b-owned");
+    await writeSkill(join(claudeRoot, "skills", "a-foreign"), "a-foreign");
+
+    const skills = await new SkillsStore({ dataDir, claudeRoot }).list();
+    // Owned first despite sorting later alphabetically.
+    expect(skills.map((s: { name: string }) => s.name)).toEqual(["b-owned", "a-foreign"]);
+  });
+
+  it("is silent when there is no Claude directory at all", async () => {
+    const store = new SkillsStore({ dataDir, claudeRoot: join(root, "nope", ".claude") });
+    const claude = (await store.rootsInternal()).find((entry: { provenance: string }) => entry.provenance === "claude");
+    expect(claude?.available).toBe(false);
+    await expect(store.list()).resolves.toEqual([]);
+  });
+});

@@ -964,7 +964,8 @@ export interface RuntimeSkill {
   id: string;
   name: string;
   description: string;
-  provenance: "global" | "project" | "custom" | "kiro";
+  /** `kiro` and `claude` are foreign, read-only vendor roots. */
+  provenance: "global" | "project" | "custom" | "kiro" | "claude";
   content?: string;
   owned?: boolean;
   enabled?: boolean;

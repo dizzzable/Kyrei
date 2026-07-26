@@ -705,7 +705,18 @@ export function SkillsSettings({
             ) : filtered.map((skill) => (
               <div key={skill.id} className={cn("flex min-w-0 items-center gap-2 border-b border-border-soft px-2.5 py-2", selectedId === skill.id && "bg-(--ui-row-active)")}>
                 <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setSelectedId(skill.id)}>
-                  <div className="truncate text-[11px] font-medium text-secondary">{skill.name}</div>
+                  {/* A shadowed copy is dimmed and labelled. The catalog lists
+                      every source on purpose — knowing a skill exists in two
+                      roots is useful — but a duplicate row with no explanation
+                      just reads as a bug. */}
+                  <div className={cn("flex min-w-0 items-center gap-1.5 text-[11px] font-medium", skill.shadowed ? "text-muted" : "text-secondary")}>
+                    <span className="truncate">{skill.name}</span>
+                    {skill.shadowed && (
+                      <span className="shrink-0 rounded border border-border-soft px-1 text-[8.5px] font-normal text-faint">
+                        {t("settings.skills.shadowed")}
+                      </span>
+                    )}
+                  </div>
                   <div className="mt-0.5 truncate text-[9px] text-muted">{skill.description || provenanceLabel(skill.provenance, t)}</div>
                 </button>
                 <Switch checked={skill.enabled} disabled={busyId === skill.id} size="xs" aria-label={skill.name} onCheckedChange={(enabled) => void toggle(skill, enabled)} />
@@ -866,6 +877,10 @@ function provenanceLabel(provenance: SkillProvenance, t: ReturnType<typeof useI1
     case "workspace": return t("settings.skills.workspace");
     case "custom": return t("settings.skills.custom");
     case "kiro": return t("settings.skills.documentKiro");
+    case "claude": return t("settings.skills.claude");
+    // `global` is the only remaining case, but a future provenance falling
+    // through to it would be mislabelled rather than merely unlabelled — which
+    // is how a read-only foreign root would have been shown as Kyrei's own.
     default: return t("settings.skills.global");
   }
 }

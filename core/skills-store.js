@@ -331,6 +331,27 @@ async function inspectKiroSkillsRoot(kiroRoot) {
   return { rootCanonical, skillsCanonical, docsCanonical };
 }
 
+/**
+ * A `.claude/skills` directory, if it is a real directory we can safely read.
+ *
+ * `SKILL.md` has become the cross-vendor format — Copilot, Devin, Junie, Zed,
+ * OpenHands and Amp all read it, several citing the open spec directly — and a
+ * user arriving with an existing library keeps it in `~/.claude/skills`. Kyrei
+ * already reads a foreign vendor's root this way for Kiro; this is the same
+ * shape, and like Kiro it is READ-ONLY: `owned: false`, so nothing here is ever
+ * rewritten by the curator or the evolution executor.
+ *
+ * Unlike Kiro there is no sibling `docs/` convention, so linked references
+ * resolve within the skills root itself.
+ */
+async function inspectClaudeSkillsRoot(claudeRoot) {
+  const rootCanonical = await secureDirectory(resolve(claudeRoot));
+  if (!rootCanonical) return null;
+  const skillsCanonical = await canonicalDirectChild(rootCanonical, join(rootCanonical, "skills"));
+  if (!skillsCanonical) return null;
+  return { rootCanonical, skillsCanonical };
+}
+
 async function ensureDirectoryComponent(path) {
   try {
     await mkdir(path);
@@ -592,6 +613,18 @@ function publicSkill(skill, includeContent = false) {
     usage: skill.usage,
     compatible: skill.compatible,
     availability: skill.availability,
+    /**
+     * Another skill of the same NAME outranks this one, so runtime injection
+     * will use that one and never this.
+     *
+     * `list()` deliberately exposes every source — knowing a skill exists in
+     * two roots is useful — but without this flag the duplication is just
+     * confusing. Measured on a real machine: 41 of 97 catalog entries were
+     * already shadowed copies before the Claude root was read at all, and
+     * reading it takes that to 94 of 152. The runtime catalog was correct in
+     * every case; only the listing looked broken.
+     */
+    ...(skill._shadowed ? { shadowed: true } : {}),
     ...(skill.reasonCode ? { reasonCode: skill.reasonCode } : {}),
     ...(skill.lastUsedAt ? { lastUsedAt: skill.lastUsedAt } : {}),
     rootId: skill.rootId,
@@ -643,6 +676,7 @@ export class SkillsStore {
     workspace = "",
     maxSkillBytes = DEFAULT_MAX_SKILL_BYTES,
     kiroRoot = process.env.NODE_ENV === "test" ? "" : join(homedir(), ".kiro"),
+    claudeRoot = process.env.NODE_ENV === "test" ? "" : join(homedir(), ".claude"),
   } = {}) {
     if (typeof dataDir !== "string" || !dataDir.trim() || dataDir.includes("\0")) {
       fail("invalid_data_dir", "SkillsStore requires a dataDir");
@@ -653,6 +687,9 @@ export class SkillsStore {
     this.workspace = typeof workspace === "string" && workspace.trim() ? resolve(workspace) : "";
     this.kiroRoot = typeof kiroRoot === "string" && kiroRoot.trim() && !kiroRoot.includes("\0")
       ? resolve(kiroRoot)
+      : "";
+    this.claudeRoot = typeof claudeRoot === "string" && claudeRoot.trim() && !claudeRoot.includes("\0")
+      ? resolve(claudeRoot)
       : "";
     this.maxSkillBytes = Math.max(1_024, Math.min(HARD_MAX_SKILL_BYTES, Number(maxSkillBytes) || DEFAULT_MAX_SKILL_BYTES));
     this.state = normalizeState({});
@@ -789,6 +826,33 @@ export class SkillsStore {
     };
   }
 
+  async #claudeRootDescriptor() {
+    const configuredPath = join(this.claudeRoot, "skills");
+    const inspected = await inspectClaudeSkillsRoot(this.claudeRoot);
+    if (!inspected) {
+      return {
+        id: stableRootId("claude", configuredPath),
+        path: resolve(configuredPath),
+        canonical: null,
+        docsCanonical: null,
+        provenance: "claude",
+        owned: false,
+        available: false,
+      };
+    }
+    return {
+      id: stableRootId("claude", inspected.skillsCanonical),
+      path: inspected.skillsCanonical,
+      canonical: inspected.skillsCanonical,
+      // No sibling `docs/` convention here, so linked references resolve
+      // inside the skills root itself.
+      docsCanonical: null,
+      provenance: "claude",
+      owned: false,
+      available: true,
+    };
+  }
+
   async #kiroRootDescriptor() {
     const configuredPath = join(this.kiroRoot, "skills");
     const inspected = await inspectKiroSkillsRoot(this.kiroRoot);
@@ -820,6 +884,7 @@ export class SkillsStore {
       roots.push(await this.#workspaceRootDescriptor());
     }
     if (this.kiroRoot) roots.push(await this.#kiroRootDescriptor());
+    if (this.claudeRoot) roots.push(await this.#claudeRootDescriptor());
     for (const path of this.state.customRoots) {
       roots.push(await this.#rootDescriptor(path, "custom", false));
     }
@@ -937,11 +1002,37 @@ export class SkillsStore {
         found.push(skill);
       }
     }
-    const provenanceOrder = { workspace: 0, global: 1, kiro: 2, custom: 3 };
+    /**
+     * Precedence when the same skill NAME exists in more than one root.
+     *
+     * Owned roots first: those are the ones the user and the curator can edit,
+     * so a workspace or global copy is the authoritative one. Foreign vendor
+     * roots — Kiro, Claude — come last and are suppressed when they duplicate a
+     * name that is already present.
+     *
+     * An unknown provenance must not land here as `undefined`: subtracting it
+     * yields NaN, the comparator stops being a total order, and the sort result
+     * becomes implementation-defined.
+     */
+    const provenanceOrder = { workspace: 0, global: 1, custom: 2, kiro: 3, claude: 4 };
+    const rank = (provenance) => provenanceOrder[provenance] ?? Number.MAX_SAFE_INTEGER;
     found.sort((left, right) =>
-      (provenanceOrder[left.provenance] - provenanceOrder[right.provenance]) ||
+      (rank(left.provenance) - rank(right.provenance)) ||
       left.name.localeCompare(right.name) ||
       left.id.localeCompare(right.id));
+
+    // Deliberately NOT collapsed by name here. `#discover` is the identity
+    // layer: `create()` looks its own new skill up through it, and
+    // `runtimeSkills({ ids })` must be able to materialise two same-named
+    // skills by their distinct ids. Name collapsing belongs to the ambient
+    // catalog, where it already happens — this only MARKS the losers, so a
+    // listing can show why a copy will never be injected.
+    const winners = new Set();
+    for (const skill of found) {
+      const key = skill.name.toLowerCase();
+      if (winners.has(key)) skill._shadowed = true;
+      else winners.add(key);
+    }
     return found;
   }
 

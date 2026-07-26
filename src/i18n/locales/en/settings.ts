@@ -1599,6 +1599,8 @@ export const enSettings = {
   "settings.skills.noLinkedDocs": "No linked documents",
   "settings.skills.documentLocal": "Skill document",
   "settings.skills.documentKiro": "Kiro documentation",
+  "settings.skills.claude": "Claude (read-only)",
+  "settings.skills.shadowed": "shadowed",
   "settings.evolution.title": "Self-improvement journal",
   "settings.evolution.hint": "Proposal-first. At-rest, Kyrei distills observation-only candidates (repeated tool failures, self-heal escalations) into a review journal. Nothing is applied automatically.",
   "settings.evolution.harvest.label": "Harvest candidates",

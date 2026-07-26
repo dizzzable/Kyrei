@@ -1608,6 +1608,8 @@ export const ruSettings = {
   "settings.skills.noLinkedDocs": "Связанных документов нет",
   "settings.skills.documentLocal": "Документ навыка",
   "settings.skills.documentKiro": "Документация Kiro",
+  "settings.skills.claude": "Claude (только чтение)",
+  "settings.skills.shadowed": "перекрыт",
   "settings.evolution.title": "Журнал самоулучшения",
   "settings.evolution.hint": "Только предложения. В покое Kyrei дистиллирует наблюдения (повторные сбои тулов, эскалации self-heal) в журнал на ревью. Ничего не применяется автоматически.",
   "settings.evolution.harvest.label": "Собирать кандидатов",
