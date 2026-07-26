@@ -15,6 +15,16 @@ export interface Usage {
   totalTokens?: number;
   /** Provider-reported prompt tokens served from its cache, when available. */
   cachedInputTokens?: number;
+  /**
+   * Prompt tokens WRITTEN into the provider's cache this request.
+   *
+   * Captured because reads alone cannot distinguish "caching is working" from
+   * "writing a fresh entry every step and never reading one" — the two look
+   * identical if you only count reads, and the second is what a cache
+   * invalidated mid-turn actually does. It is also the more expensive half: a
+   * write bills at 1.25× base against a read's 0.1×.
+   */
+  cacheWriteTokens?: number;
   /** Provider-reported hidden/reasoning output tokens, when available. */
   reasoningTokens?: number;
   costUsd?: number;

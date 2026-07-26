@@ -206,3 +206,45 @@ describe("evaluatePendingCandidates — the decision that gates a self-modificat
     expect(evidence.metrics.promotable).toBe(true);
   });
 });
+
+describe("risk is a property of what the candidate WRITES", () => {
+  it("holds a drafted skill for review, and says why accurately", () => {
+    // A skill draft creates a file the agent will load and act on; a
+    // reliability hint is a note in the journal. Marking both "low" made every
+    // downstream gate keyed on `risk === "low"` vacuous — including the canary
+    // check — because no harvested candidate was ever anything else.
+    const draft = {
+      target: { kind: "skill", id: "playbook:read_file" },
+      title: "Playbook draft for read_file failures",
+      summary: "Repeated failures with no matching skill.",
+      risk: "medium",
+      proposal: {
+        kind: "trajectory-playbook",
+        tool: "read_file",
+        name: "read-file-recovery",
+        content: "# Recovery\n\nRe-read the file before editing.\n",
+        samples: ["ENOENT a.ts", "ENOENT b.ts"],
+      },
+    };
+    const admission = admitCandidate(draft);
+    expect(admission.admissible).toBe(false);
+    // The reason must be the true one. Before `trajectory-playbook` was
+    // recognised, this same candidate was rejected as unevidenced — a correct
+    // outcome reached for the wrong stated reason, which is worse than useless
+    // in an audit trail.
+    expect(admission.reasons).toContain("risk_requires_review:medium");
+    expect(admission.reasons.join(" ")).not.toContain("evidence_insufficient");
+    expect(admission.strength).toBeGreaterThan(0);
+  });
+
+  it("still admits a journal-only hint automatically", () => {
+    const hint = {
+      target: { kind: "reliability-hint", id: "tool:read_file" },
+      title: "Repeated read_file failures",
+      summary: "Failed twice.",
+      risk: "low",
+      proposal: { kind: "tool-failure-pattern", tool: "read_file", occurrences: 2, samples: ["ENOENT"] },
+    };
+    expect(admitCandidate(hint).admissible).toBe(true);
+  });
+});

@@ -96,6 +96,13 @@ export function evidenceStrength(proposal) {
     // still has to name the tools involved, or there is nothing to act on.
     return Array.isArray(proposal.tools) && proposal.tools.length > 0 ? MIN_EVIDENCE_OCCURRENCES : 0;
   }
+  if (kind === "trajectory-playbook") {
+    // A drafted skill body. Recognised so its rejection reason is the accurate
+    // one — it is held back for review because of its risk, not because it
+    // failed to cite anything.
+    const samples = Array.isArray(proposal.samples) ? proposal.samples.filter((s) => text(s).trim()).length : 0;
+    return text(proposal.content).trim() && samples > 0 ? samples : 0;
+  }
   return 0;
 }
 

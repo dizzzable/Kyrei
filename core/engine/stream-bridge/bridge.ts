@@ -92,6 +92,15 @@ function toUsage(u: unknown): Usage | undefined {
     "cacheRead",
     "cacheReadTokens",
   ) ?? tokenDetail(source["inputTokenDetails"], "cacheRead", "cacheReadTokens");
+  // The provider already reports this — `@ai-sdk/anthropic` emits
+  // `inputTokens: { total, noCache, cacheRead, cacheWrite }` — and it was being
+  // dropped on the floor, leaving no way to tell a working cache from one that
+  // is rewritten every step.
+  const cacheWriteTokens = tokenDetail(
+    inputRaw,
+    "cacheWrite",
+    "cacheWriteTokens",
+  ) ?? tokenDetail(source["inputTokenDetails"], "cacheWrite", "cacheWriteTokens");
   const reasoningTokens = tokenDetail(
     outputRaw,
     "reasoning",
@@ -103,6 +112,7 @@ function toUsage(u: unknown): Usage | undefined {
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   };
   return Object.keys(usage).length ? usage : undefined;

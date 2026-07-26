@@ -197,7 +197,18 @@ export function harvestCandidatesFromTrajectory(trajectory, existingDigests, opt
         `Repeated "${tool}" failures with no matching skill. Draft recovery playbook — review, tighten, and promote to create the skill.`,
         4000,
       ),
-      risk: "low",
+      /**
+       * A skill draft creates a FILE the agent will load and act on. That is a
+       * different thing from a note in the journal, and marking both `low` made
+       * the risk field carry no information — every downstream gate keyed on
+       * `risk === "low"` was therefore vacuous, including the canary check.
+       *
+       * `medium` routes it to a human, which is also where the evidence points:
+       * machine-generated policy text derived from an agent's own trajectories
+       * has not been shown to beat fixed prompting, and nothing here can
+       * measure whether it did.
+       */
+      risk: "medium",
       proposal,
       provenance: { via: "evolution_harvest", version: EVOLUTION_HARVEST_VERSION, ...(sessionId ? { sessionId } : {}) },
     });

@@ -2433,6 +2433,21 @@ export async function startGateway({
       return Number.isFinite(x) && x >= 0 ? x : 0;
     };
     const s = (v, max = 64) => (typeof v === "string" ? v.trim().slice(0, max) : undefined);
+    /**
+     * A bounded {label: count} map. Labels are engine-generated (`ApplyErrorCode`,
+     * `level0..3`) but are sanitised anyway — this object is serialised into an
+     * API response, and a whitelist that trusted its input would be the wrong
+     * shape of whitelist.
+     */
+    const counters = (v) => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+      const out = {};
+      for (const [key, value] of Object.entries(v).slice(0, 24)) {
+        const label = s(key, 40);
+        if (label) out[label] = n(value);
+      }
+      return out;
+    };
     return {
       sessionId: s(raw.sessionId, 120),
       turns: n(raw.turns),
@@ -2452,6 +2467,19 @@ export async function startGateway({
       postEditFailures: n(raw.postEditFailures),
       symbolMapCacheHits: n(raw.symbolMapCacheHits),
       cacheBreakpoints: raw.cacheBreakpoints === true,
+      // Cache and patch counters. The whitelist is the reason a metric can be
+      // recorded correctly by the engine and still never appear in /api/usage:
+      // anything not named here is dropped silently, which is exactly what
+      // happened to the patch-outcome metrics after they were added.
+      cacheReadTokens: n(raw.cacheReadTokens),
+      cacheWriteTokens: n(raw.cacheWriteTokens),
+      uncachedInputTokens: n(raw.uncachedInputTokens),
+      cacheHitRate: Number.isFinite(Number(raw.cacheHitRate)) ? Number(raw.cacheHitRate) : undefined,
+      patchApplies: n(raw.patchApplies),
+      patchFailures: n(raw.patchFailures),
+      patchFailureRate: Number.isFinite(Number(raw.patchFailureRate)) ? Number(raw.patchFailureRate) : undefined,
+      patchFailureCodes: counters(raw.patchFailureCodes),
+      patchMatchLevels: counters(raw.patchMatchLevels),
       wasteRatio: Number.isFinite(Number(raw.wasteRatio)) ? Number(raw.wasteRatio) : undefined,
       updatedAt: s(raw.updatedAt, 40),
     };

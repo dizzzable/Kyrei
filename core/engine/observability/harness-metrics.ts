@@ -22,7 +22,27 @@ export interface HarnessMetricsSnapshot {
   postEditVerifies: number;
   postEditFailures: number;
   symbolMapCacheHits: number;
+  /**
+   * Whether cache breakpoints were ATTACHED. Kept, but it is not a measurement:
+   * it is a static packing flag, so it answers "did we ask for caching" and
+   * never "did caching happen". The token counters below are the measurement.
+   */
   cacheBreakpoints: boolean;
+  /** Prompt tokens served from the provider's cache across the turn. */
+  cacheReadTokens: number;
+  /** Prompt tokens written INTO the provider's cache across the turn. */
+  cacheWriteTokens: number;
+  /** Prompt tokens that were neither read from nor written to the cache. */
+  uncachedInputTokens: number;
+  /**
+   * Reads ÷ all prompt tokens, when any were seen.
+   *
+   * This is the number that distinguishes a working cache from one that is
+   * rewritten every step — the failure a moving breakpoint produces when a turn
+   * emits more content blocks than the provider's lookback window. Reads alone
+   * cannot show it: they simply stay near zero while writes climb.
+   */
+  cacheHitRate?: number;
   /**
    * Patch application outcomes.
    *
@@ -68,6 +88,9 @@ export function createHarnessMetrics(seed: { sessionId?: string } = {}) {
     postEditFailures: 0,
     symbolMapCacheHits: 0,
     cacheBreakpoints: false,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    uncachedInputTokens: 0,
     patchApplies: 0,
     patchFailures: 0,
     patchFailureCodes: {},
@@ -80,8 +103,12 @@ export function createHarnessMetrics(seed: { sessionId?: string } = {}) {
         ? (1 - snap.toolBytesShown / snap.toolBytesRaw)
         : undefined;
       const patchAttempts = snap.patchApplies + snap.patchFailures;
+      const promptTokens = snap.cacheReadTokens + snap.cacheWriteTokens + snap.uncachedInputTokens;
       return {
         ...snap,
+        ...(promptTokens > 0
+          ? { cacheHitRate: Math.round((snap.cacheReadTokens / promptTokens) * 1000) / 1000 }
+          : {}),
         patchFailureCodes: { ...snap.patchFailureCodes },
         patchMatchLevels: { ...snap.patchMatchLevels },
         ...(waste !== undefined ? { wasteRatio: Math.round(waste * 1000) / 1000 } : {}),
@@ -138,6 +165,18 @@ export function createHarnessMetrics(seed: { sessionId?: string } = {}) {
     recordPatchFailure(code: string) {
       snap.patchFailures += 1;
       snap.patchFailureCodes[code] = (snap.patchFailureCodes[code] ?? 0) + 1;
+    },
+    /**
+     * Record one request's prompt-token split. Called per model call, so a
+     * multi-step turn accumulates — which is the level the 20-block lookback
+     * failure shows up at.
+     */
+    recordPromptTokens({ input = 0, cacheRead = 0, cacheWrite = 0 }: { input?: number; cacheRead?: number; cacheWrite?: number }) {
+      const read = Math.max(0, cacheRead);
+      const written = Math.max(0, Math.min(Math.max(0, input - read), cacheWrite));
+      snap.cacheReadTokens += read;
+      snap.cacheWriteTokens += written;
+      snap.uncachedInputTokens += Math.max(0, input - read - written);
     },
     recordCacheBreakpoints(enabled: boolean) {
       snap.cacheBreakpoints = enabled;

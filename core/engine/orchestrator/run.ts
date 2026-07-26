@@ -219,6 +219,17 @@ async function executeHostEnforcedDiagnostic(
 // request can be rejected before AI SDK ever invokes prepareStep.
 const CONTEXT_PROTOCOL_RESERVE_TOKENS = 8_192;
 
+/**
+ * Prompt-cache price multipliers against the base input rate.
+ *
+ * These are Anthropic's published figures for the 5-minute TTL and are the
+ * common shape across providers that discount cache reads by ~90%: a read is a
+ * tenth, a write is a quarter more than fresh. A provider without caching
+ * simply reports neither token count, so both terms fall out.
+ */
+const CACHE_READ_RATE = 0.1;
+const CACHE_WRITE_RATE = 1.25;
+
 function inputContextWindow(contextWindow: number, maxOutputTokens: number | undefined): number {
   const reserved = Math.min(
     Math.max(0, contextWindow - MODEL_OVERRIDE_BOUNDS.contextWindow.min),
@@ -1535,10 +1546,35 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     }
   }
   const usageFromBridge = bridged.usage;
+  if (usageFromBridge) {
+    harnessMetrics.recordPromptTokens({
+      input: usageFromBridge.inputTokens ?? 0,
+      cacheRead: usageFromBridge.cachedInputTokens ?? 0,
+      cacheWrite: usageFromBridge.cacheWriteTokens ?? 0,
+    });
+  }
+  /**
+   * Cost, priced against what caching actually costs.
+   *
+   * Every input token used to be billed at the full rate, so a cached prefix —
+   * which bills at a TENTH — was overstated by up to 10×, and a cache WRITE,
+   * which bills at 1.25×, was understated. The ledger therefore could not be
+   * used to judge whether a caching change helped, which is the one question it
+   * would be most useful for.
+   *
+   * `inputTokens` is the provider's total, so the cached and written portions
+   * are subtracted out before the remainder is charged at full rate.
+   */
   const costUsd = usageFromBridge
     && (usageFromBridge.inputTokens !== undefined || usageFromBridge.outputTokens !== undefined)
-    ? ((usageFromBridge.inputTokens ?? 0) * selected.entry.cost.inputPerM
-      + (usageFromBridge.outputTokens ?? 0) * selected.entry.cost.outputPerM) / 1_000_000
+    ? (() => {
+      const input = usageFromBridge.inputTokens ?? 0;
+      const cached = Math.min(input, usageFromBridge.cachedInputTokens ?? 0);
+      const written = Math.min(Math.max(0, input - cached), usageFromBridge.cacheWriteTokens ?? 0);
+      const fresh = Math.max(0, input - cached - written);
+      const inputCost = (fresh + cached * CACHE_READ_RATE + written * CACHE_WRITE_RATE) * selected.entry.cost.inputPerM;
+      return (inputCost + (usageFromBridge.outputTokens ?? 0) * selected.entry.cost.outputPerM) / 1_000_000;
+    })()
     : undefined;
   const usage = usageFromBridge
     ? { ...usageFromBridge, ...(costUsd !== undefined ? { costUsd } : {}) }
