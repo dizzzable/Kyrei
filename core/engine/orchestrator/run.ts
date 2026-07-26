@@ -483,6 +483,10 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         smartCompress: true,
         codingMode: normalizeCodingMode(cfg.codingMode),
         onPostEditVerify: (ok) => harnessMetrics.recordPostEditVerify(ok),
+        onPatchApply: (outcome) => {
+          if (outcome.ok) harnessMetrics.recordPatchApply(`level${outcome.matchLevel}`);
+          else harnessMetrics.recordPatchFailure(outcome.code);
+        },
       })
     : undefined;
   const retrieveTools: ToolSet = ccr ? { retrieve: makeRetrieveTool(ccr) } : {};

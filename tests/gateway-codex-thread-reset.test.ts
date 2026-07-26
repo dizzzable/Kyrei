@@ -113,6 +113,15 @@ describe("Codex thread loss", () => {
     // A brand-new session has nothing to replay.
     expect(turns[0]!.threadId).toBeFalsy();
 
+    // Wait for the turn to be FINISHED, not merely started. `turns` is pushed
+    // from inside the connector while the run is still in flight, and the
+    // gateway refuses a second prompt for a session that still has a live
+    // controller (`session_busy`). Under a loaded parallel suite that window is
+    // wide enough to hit: this test failed in the full run and passed in
+    // isolation. The persisted thread id is the completion signal — the same
+    // one the sibling test below already waits on.
+    await vi.waitFor(async () => expect((await storedSession(session.id))?.codexThreadId).toBe("thread-alpha"));
+
     await request("/api/prompt", {
       method: "POST",
       body: JSON.stringify({ session: session.id, text: "what number did I say?" }),

@@ -26,24 +26,25 @@ export class ApplyError extends Error {
   }
 }
 
-function seekWithAnchor(lines: string[], hunk: PatchHunk): { index: number; matches: number[] } {
+function seekWithAnchor(lines: string[], hunk: PatchHunk): { index: number; matches: number[]; level: 0 | 1 | 2 | 3 } {
   const res = seekSequence(lines, hunk.needle);
-  if (res.matches.length <= 1 || !hunk.anchor) return { index: res.index, matches: res.matches };
+  if (res.matches.length <= 1 || !hunk.anchor) return { index: res.index, matches: res.matches, level: res.level };
   // Narrow by anchor: keep needle matches at/after the first anchor occurrence.
   const anchorRes = seekSequence(lines, [hunk.anchor]);
   if (anchorRes.matches.length >= 1) {
     const from = anchorRes.matches[0]!;
     const filtered = res.matches.filter((m) => m >= from);
-    if (filtered.length === 1) return { index: filtered[0]!, matches: filtered };
+    if (filtered.length === 1) return { index: filtered[0]!, matches: filtered, level: res.level };
   }
-  return { index: res.index, matches: res.matches };
+  return { index: res.index, matches: res.matches, level: res.level };
 }
 
-function applyHunk(lines: string[], hunk: PatchHunk, file: string): string[] {
+function applyHunk(lines: string[], hunk: PatchHunk, file: string, seen: { level: 0 | 1 | 2 | 3 }): string[] {
   if (hunk.needle.length === 0) {
     throw new ApplyError("NOT_FOUND", file, "Hunk has no context lines to locate the insertion point.");
   }
-  const { index, matches } = seekWithAnchor(lines, hunk);
+  const { index, matches, level } = seekWithAnchor(lines, hunk);
+  if (matches.length === 1 && level > seen.level) seen.level = level;
   if (matches.length === 0) {
     throw new ApplyError(
       "NOT_FOUND",
@@ -87,6 +88,14 @@ export interface StagedFile {
 export interface ApplyReport {
   snapshotId: string;
   files: Array<{ rel: string; op: FilePatch["op"]; oldText: string; newText: string }>;
+  /**
+   * Loosest anchor-matching level any hunk in this patch needed: 0 exact, 1
+   * trailing whitespace, 2 trim + collapse, 3 Unicode fold. Reported so the
+   * caller can measure how far tolerance is actually being stretched — a rising
+   * level is the early warning that a model's context lines are drifting, and
+   * without it the only signal is an outright failure.
+   */
+  maxMatchLevel: 0 | 1 | 2 | 3;
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -121,6 +130,7 @@ export async function applyPatch(
   abortSignal?.throwIfAborted();
   // ── Phase 1: stage in memory (no writes). Any failure throws before disk. ──
   const staged: StagedFile[] = [];
+  const seen: { level: 0 | 1 | 2 | 3 } = { level: 0 };
   for (const p of patches) {
     abortSignal?.throwIfAborted();
     const absTarget = await validateWriteTarget(workspace, p.file);
@@ -152,7 +162,7 @@ export async function applyPatch(
     }
     const oldLines = decodeToLines(buf, meta);
     let cur = oldLines;
-    for (const h of p.hunks) cur = applyHunk(cur, h, p.file);
+    for (const h of p.hunks) cur = applyHunk(cur, h, p.file, seen);
     const oldText = oldLines.join("\n");
     const newText = cur.join("\n");
     if (newText === oldText && p.op === "update") throw new ApplyError("NOOP", p.file, `Edit leaves the file unchanged (no-op): ${rel}`);
@@ -226,5 +236,6 @@ export async function applyPatch(
   return {
     snapshotId,
     files: staged.map((s) => ({ rel: s.rel, op: s.op, oldText: s.oldText, newText: s.newText })),
+    maxMatchLevel: seen.level,
   };
 }

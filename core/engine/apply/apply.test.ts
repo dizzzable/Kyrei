@@ -112,3 +112,32 @@ describe("snapshot store gc (retention cap)", () => {
     expect(kept).not.toContain(ids[0]);
   });
 });
+
+describe("applyPatch — match level is reported", () => {
+  it("reports level 0 when the context matches byte-for-byte", async () => {
+    await writeFile(join(ws, "exact.txt"), "alpha\nbeta\ngamma\n", "utf8");
+    const patch = "*** Update File: exact.txt\n alpha\n-beta\n+BETA\n gamma\n";
+    const report = await applyPatch(ws, parsePatch(patch), createSnapshotStore(ws));
+    expect(report.maxMatchLevel).toBe(0);
+  });
+
+  it("reports the loosened level when tolerance had to rescue the hunk", async () => {
+    // Trailing whitespace in the file that the model's context lines omit. The
+    // edit still lands — that tolerance is deliberate — but the caller now
+    // learns the anchor did NOT match exactly, which is the early warning that
+    // a model's context lines are drifting. Previously the only signal was an
+    // outright failure.
+    await writeFile(join(ws, "loose.txt"), "alpha   \nbeta\ngamma\n", "utf8");
+    const patch = "*** Update File: loose.txt\n alpha\n-beta\n+BETA\n gamma\n";
+    const report = await applyPatch(ws, parsePatch(patch), createSnapshotStore(ws));
+    expect(report.maxMatchLevel).toBeGreaterThan(0);
+    expect(await readFile(join(ws, "loose.txt"), "utf8")).toContain("BETA");
+  });
+
+  it("keeps the loosest level across several hunks, not the last one", async () => {
+    await writeFile(join(ws, "mixed.txt"), "one\ntwo   \nthree\nfour\nfive\n", "utf8");
+    const patch = "*** Update File: mixed.txt\n one\n-two\n+TWO\n three\n@@\n four\n-five\n+FIVE\n";
+    const report = await applyPatch(ws, parsePatch(patch), createSnapshotStore(ws));
+    expect(report.maxMatchLevel).toBeGreaterThan(0);
+  });
+});

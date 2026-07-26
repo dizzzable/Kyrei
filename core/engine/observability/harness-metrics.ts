@@ -23,6 +23,28 @@ export interface HarnessMetricsSnapshot {
   postEditFailures: number;
   symbolMapCacheHits: number;
   cacheBreakpoints: boolean;
+  /**
+   * Patch application outcomes.
+   *
+   * Editing is the most failure-prone surface in the harness and was the one
+   * thing this file did not measure: fifteen counters for turns, prunes and
+   * verification, and nothing at all for whether an edit actually landed.
+   * Every decision downstream — which patch grammar to use per provider, how
+   * far to let fuzzy matching stretch, whether a failed hunk should be retried
+   * or surfaced — is a guess until these exist.
+   */
+  patchApplies: number;
+  patchFailures: number;
+  /** Failures by `ApplyErrorCode`, e.g. `{ NOT_FOUND: 3, AMBIGUOUS: 1 }`. */
+  patchFailureCodes: Record<string, number>;
+  /**
+   * How often each fuzzy-match level rescued a hunk, by level name. Level 0 is
+   * an exact match; anything above it means the model's context lines did not
+   * match the file byte-for-byte.
+   */
+  patchMatchLevels: Record<string, number>;
+  /** 0–1 when patchApplies + patchFailures > 0. */
+  patchFailureRate?: number;
   /** 0–1 when toolBytesRaw > 0 */
   wasteRatio?: number;
   updatedAt?: string;
@@ -46,6 +68,10 @@ export function createHarnessMetrics(seed: { sessionId?: string } = {}) {
     postEditFailures: 0,
     symbolMapCacheHits: 0,
     cacheBreakpoints: false,
+    patchApplies: 0,
+    patchFailures: 0,
+    patchFailureCodes: {},
+    patchMatchLevels: {},
   };
 
   return {
@@ -53,9 +79,15 @@ export function createHarnessMetrics(seed: { sessionId?: string } = {}) {
       const waste = snap.toolBytesRaw > 0
         ? (1 - snap.toolBytesShown / snap.toolBytesRaw)
         : undefined;
+      const patchAttempts = snap.patchApplies + snap.patchFailures;
       return {
         ...snap,
+        patchFailureCodes: { ...snap.patchFailureCodes },
+        patchMatchLevels: { ...snap.patchMatchLevels },
         ...(waste !== undefined ? { wasteRatio: Math.round(waste * 1000) / 1000 } : {}),
+        ...(patchAttempts > 0
+          ? { patchFailureRate: Math.round((snap.patchFailures / patchAttempts) * 1000) / 1000 }
+          : {}),
         updatedAt: new Date().toISOString(),
       };
     },
@@ -96,6 +128,16 @@ export function createHarnessMetrics(seed: { sessionId?: string } = {}) {
     },
     recordSymbolMapCacheHit() {
       snap.symbolMapCacheHits += 1;
+    },
+    /** One patch application that landed. `matchLevel` names the strategy that found the hunk. */
+    recordPatchApply(matchLevel?: string) {
+      snap.patchApplies += 1;
+      if (matchLevel) snap.patchMatchLevels[matchLevel] = (snap.patchMatchLevels[matchLevel] ?? 0) + 1;
+    },
+    /** One patch application that did not land, keyed by `ApplyErrorCode`. */
+    recordPatchFailure(code: string) {
+      snap.patchFailures += 1;
+      snap.patchFailureCodes[code] = (snap.patchFailureCodes[code] ?? 0) + 1;
     },
     recordCacheBreakpoints(enabled: boolean) {
       snap.cacheBreakpoints = enabled;

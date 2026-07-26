@@ -19,7 +19,7 @@ const INDEX_VERSION = 1;
  * different answer for the SAME file content. It is one half of the cache key
  * that keeps the incremental index honest; see `extractorSignature`.
  */
-const EXTRACTOR_VERSION = 2;
+const EXTRACTOR_VERSION = 3;
 const EXTRACTOR_SIGNATURE_KEY = "extractor_signature";
 const MAX_FILES = 10_000;
 const MAX_SOURCE_BYTES = 750_000;
@@ -205,6 +205,12 @@ function extractImportSpecifiers(source: string): string[] {
   return [...specs];
 }
 
+/**
+ * Compiled extensions TypeScript's own resolver maps back to source, under
+ * `"module": "NodeNext"` / `"nodenext"`.
+ */
+const COMPILED_EXTENSION = /\.(js|mjs|cjs)$/;
+
 /** Try every known extension and index form for a workspace-relative base. */
 function resolveBase(base: string, knownFiles: Set<string>): string | null {
   if (!base || base === "." || base.startsWith("../") || posix.isAbsolute(base)) return null;
@@ -214,7 +220,27 @@ function resolveBase(base: string, knownFiles: Set<string>): string | null {
     ...SOURCE_EXTENSIONS.map((extension) => `${base}/index${extension}`),
     `${base}/__init__.py`,
   ];
-  return candidates.find((candidate) => knownFiles.has(candidate)) ?? null;
+  const direct = candidates.find((candidate) => knownFiles.has(candidate));
+  if (direct) return direct;
+  /**
+   * Fall back to the SOURCE file a compiled specifier refers to.
+   *
+   * Under NodeNext, TypeScript requires the emitted extension in the import
+   * itself: `import … from "../data/ports.js"` while the file on disk is
+   * `ports.ts`. The candidate list above can only ever produce `ports.js`,
+   * `ports.js.ts`, `ports.js/index.ts` — never `ports.ts` — so every one of
+   * these resolved to nothing.
+   *
+   * That is not an edge case here: measured on this repository, 794 of 796
+   * relative `.js` specifiers were unresolvable, and `core/engine` — 269 files,
+   * the largest directory in the project — had FOUR import edges in total. The
+   * agent's whole picture of the engine's dependencies was missing.
+   *
+   * Tried only after the literal path fails, so a workspace that genuinely
+   * ships a `.js` next to a `.ts` still resolves to the `.js` it asked for.
+   */
+  if (!COMPILED_EXTENSION.test(base)) return null;
+  return resolveBase(base.replace(COMPILED_EXTENSION, ""), knownFiles);
 }
 
 /**

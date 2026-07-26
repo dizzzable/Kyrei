@@ -93,6 +93,15 @@ export interface BuildToolsOptions {
   codingMode?: string;
   /** Wave E: optional metrics sink for post-edit verify counts. */
   onPostEditVerify?: (ok: boolean) => void;
+  /**
+   * Metrics sink for patch application outcomes.
+   *
+   * Editing is the most failure-prone surface in the harness and was the only
+   * one with no counter at all. Every downstream decision — which patch grammar
+   * suits which provider, how far anchor tolerance should stretch, whether a
+   * rejected hunk deserves an automatic retry — is guesswork without it.
+   */
+  onPatchApply?: (outcome: { ok: true; matchLevel: number } | { ok: false; code: string }) => void;
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -894,6 +903,7 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
         return executeGuarded("edit_file", toolCallId, actions, { patch }, { paths, targetCount: paths.length, patchLength: patch.length }, async () => {
           try {
             const report = await applyPatch(workspace, patches, snapshots, abortSignal);
+            options.onPatchApply?.({ ok: true, matchLevel: report.maxMatchLevel });
             const rendered = report.files.map((f) => renderFileDiff(f.op === "add" ? "add" : f.op === "delete" ? "delete" : "modify", f.rel, f.oldText, f.newText));
             const combined = rendered.map((r) => `${r.header} (${r.counter})\n${r.body}`).join("\n---\n");
             toolMeta.set(toolCallId, {
@@ -958,7 +968,10 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
             const base = rendered.map((r) => `${r.header} (${r.counter})`).join("\n");
             return appendPostEditVerify(base);
           } catch (e) {
-            if (e instanceof ApplyError) throw new Error(`Edit rejected [${e.code}]: ${e.message}`);
+            if (e instanceof ApplyError) {
+              options.onPatchApply?.({ ok: false, code: e.code });
+              throw new Error(`Edit rejected [${e.code}]: ${e.message}`);
+            }
             throw e;
           }
         });

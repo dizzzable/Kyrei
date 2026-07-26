@@ -104,6 +104,51 @@ function clip(s: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
 }
 
+/**
+ * Sentences that state a standing rule rather than a task.
+ *
+ * Deliberately narrow: prohibitions and hard requirements, the things whose
+ * loss changes what the agent is ALLOWED to do rather than what it was doing.
+ */
+const CONSTRAINT_PATTERN =
+  /\b(never|always|must not|must never|do not|don't|dont|cannot|can't|avoid|forbidden|not allowed|under no circumstances|only ever|make sure (?:to|not)|нельзя|никогда|не трогай|не меняй|не удаляй|запрещено|обязательно|только)\b/i;
+
+/** Section header carrying constraints forward across compaction cycles. */
+export const CONSTRAINTS_HEADER = "### Standing constraints (carried forward)";
+
+/**
+ * Pull standing constraints out of prose.
+ *
+ * Called ONLY on user turns. Tool output, web pages and file contents are
+ * untrusted data — lifting a "you must always…" sentence out of a fetched page
+ * into a section the model reads as standing policy is exactly the injection
+ * path the rest of this codebase is careful to avoid.
+ */
+function extractConstraints(text: string): string[] {
+  const found: string[] = [];
+  for (const raw of text.split(/(?<=[.!?;\n])\s+/)) {
+    const sentence = raw.replace(/^[-*•]\s*/, "").trim();
+    if (sentence.length < 8 || sentence.length > 240) continue;
+    if (!CONSTRAINT_PATTERN.test(sentence)) continue;
+    // "I don't know" / "can't reproduce" are reports, not rules.
+    if (/^(i|we|it|that|this)\s+(don'?t|do not|can'?t|cannot)\s+(know|think|see|remember|understand|reproduce)\b/i.test(sentence)) continue;
+    found.push(clip(sentence, 200));
+  }
+  return found;
+}
+
+/** Read one bullet section back out of a previously rendered summary. */
+function parseSummarySection(summary: string, header: string): string[] {
+  const start = summary.indexOf(header);
+  if (start < 0) return [];
+  const rest = summary.slice(start + header.length);
+  const end = rest.search(/\n(?:###|---|## )/);
+  return (end >= 0 ? rest.slice(0, end) : rest)
+    .split("\n")
+    .map((line) => line.replace(/^[-*•]\s*/, "").trim())
+    .filter(Boolean);
+}
+
 function flattenPreviousSummary(previousSummary: string): string {
   const normalized = previousSummary.replace(/\r\n/g, "\n").trim();
   if (!normalized) return "";
@@ -421,6 +466,7 @@ export function buildHeuristicSummary(
   const nexts: string[] = [];
   const files: string[] = [];
   const notes: string[] = [];
+  const constraints: string[] = [];
   const toolFindings: string[] = [];
   const toolCounts = new Map<string, number>();
 
@@ -429,6 +475,7 @@ export function buildHeuristicSummary(
     if (!text.trim()) continue;
     if (m.role === "user") {
       tasks.push(clip(text, 240));
+      constraints.push(...extractConstraints(text));
     } else if (m.role === "assistant") {
       for (const line of text.split(/\n+/)) {
         const bare = line.replace(/^[-*•]\s*/, "").trim();
@@ -483,6 +530,29 @@ export function buildHeuristicSummary(
     "_This is historical context for the model. Prefer the latest user message and live tool results. Do not re-execute completed work unless the user asks._",
     "",
   ];
+  /**
+   * Constraints are carried by an EXPLICIT parse of the previous summary's own
+   * constraint section, not by the generic flatten below.
+   *
+   * The flatten keeps roughly one generation: it slices from the last `### Task
+   * snapshot` and clips to 1 200 chars, which is deliberate — it stops the
+   * summary nesting into itself without bound. The side effect, measured over
+   * six cycles, was that a rule the user stated once ("never run migrations
+   * against prod") survived exactly ONE compaction and was gone by the second.
+   * A task that gets forgotten is re-asked; a prohibition that gets forgotten
+   * is violated, and this agent can write files and run commands.
+   *
+   * Emitted before the rolling summary so the next cycle's flatten cannot pick
+   * them up twice, and capped separately so a long history of rules is never
+   * squeezed out by a verbose recent turn.
+   */
+  const carriedConstraints = opts.previousSummary
+    ? parseSummarySection(opts.previousSummary, CONSTRAINTS_HEADER)
+    : [];
+  const allConstraints = uniq([...carriedConstraints, ...constraints], 16);
+  if (allConstraints.length) {
+    lines.push(CONSTRAINTS_HEADER, ...allConstraints.map((t) => `- ${t}`), "");
+  }
   if (opts.previousSummary?.trim()) {
     const previous = flattenPreviousSummary(opts.previousSummary);
     if (previous) {

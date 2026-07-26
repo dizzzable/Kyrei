@@ -111,6 +111,62 @@ describe("project intelligence index", () => {
   });
 });
 
+describe("NodeNext compiled-extension specifiers", () => {
+  it("resolves a .js specifier to the .ts file it refers to", async () => {
+    // Under NodeNext, TypeScript REQUIRES the emitted extension in the import
+    // while the file on disk is .ts. Measured on Kyrei itself: 794 of 796 such
+    // specifiers were unresolvable, and core/engine — 269 files, the largest
+    // directory in the project — had four import edges in total.
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from './service.js';\nrun();\n", "utf8");
+    const index = await buildProjectIndex(workspace);
+
+    expect(index.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: "src/entry.ts", to: "src/service.ts" }),
+    ]));
+  });
+
+  it("handles .mjs and .cjs the same way", async () => {
+    await writeFile(join(workspace, "src", "entry.ts"), "import a from './service.mjs';\nimport b from './util.cjs';\nexport default [a, b];\n", "utf8");
+    const index = await buildProjectIndex(workspace);
+    const targets = index.edges.filter((edge) => edge.from === "src/entry.ts").map((edge) => edge.to).sort();
+    expect(targets).toEqual(["src/service.ts", "src/util.ts"]);
+  });
+
+  it("resolves a directory specifier written with an extension", async () => {
+    await mkdir(join(workspace, "src", "pkg"), { recursive: true });
+    await writeFile(join(workspace, "src", "pkg", "index.ts"), "export const p = 1;\n", "utf8");
+    await writeFile(join(workspace, "src", "entry.ts"), "import { p } from './pkg/index.js';\nexport default p;\n", "utf8");
+
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/pkg/index.ts")).toBe(true);
+  });
+
+  it("still prefers a real .js file when one exists beside the .ts", async () => {
+    // The fallback runs only after the literal path fails, so a workspace that
+    // genuinely ships both keeps resolving to the file it asked for.
+    await writeFile(join(workspace, "src", "service.js"), "module.exports = {};\n", "utf8");
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from './service.js';\nrun();\n", "utf8");
+
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.js")).toBe(true);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(false);
+  });
+
+  it("does not invent an edge for a .js specifier that matches nothing", async () => {
+    await writeFile(join(workspace, "src", "entry.ts"), "import x from './missing.js';\nexport default x;\n", "utf8");
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.filter((edge) => edge.from === "src/entry.ts")).toEqual([]);
+  });
+
+  it("applies to alias specifiers too", async () => {
+    await writeFile(join(workspace, "tsconfig.json"), `{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}`, "utf8");
+    await writeFile(join(workspace, "src", "entry.ts"), "import { run } from '@/service.js';\nrun();\n", "utf8");
+
+    const index = await buildProjectIndex(workspace);
+    expect(index.edges.some((edge) => edge.from === "src/entry.ts" && edge.to === "src/service.ts")).toBe(true);
+  });
+});
+
 describe("import alias resolution", () => {
   /** Overwrite the fixture's entry so it imports through an alias. */
   async function withAlias(tsconfig: string): Promise<void> {
