@@ -1,5 +1,5 @@
-import { BrainCircuit, FileJson2, FolderUp, LoaderCircle, RefreshCw, Search, Upload, X } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Box, BrainCircuit, FileJson2, FolderUp, LoaderCircle, RefreshCw, Search, Share2, Upload, X } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 
 import { Button, Dialog, DialogContent, DialogTitle } from "@/components/ui";
 import { useI18n } from "@/i18n";
@@ -7,11 +7,23 @@ import { gateway, GatewayRequestError } from "@/lib/gateway";
 import { bufferToBase64, importConversationFile } from "@/lib/session-import-api";
 import type { MemoryAtlasNodeKind, MemoryAtlasSnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { loadMemoryAtlasPreferences, saveMemoryAtlasPreferences } from "@/store/memory-atlas";
+import { loadMemoryAtlasPreferences, saveMemoryAtlasPreferences, type MemoryAtlasViewMode } from "@/store/memory-atlas";
 import { MemoryAtlasCanvas } from "./MemoryAtlasCanvas";
+import { MemoryAtlasCanvas3DBoundary } from "./MemoryAtlasCanvas3DBoundary";
 import { MemoryAtlasInspector } from "./MemoryAtlasInspector";
 import { MemoryAtlasTree } from "./MemoryAtlasTree";
 import type { AtlasViewport, Point } from "./memory-atlas-viewport";
+
+// three.js is heavy — only pull the 3D bundle when the user opens that mode.
+const MemoryAtlasCanvas3D = lazy(() => import("./MemoryAtlasCanvas3D").then((mod) => ({ default: mod.MemoryAtlasCanvas3D })));
+
+/**
+ * Search debounce. The 2D layout is deterministic and cheap to recompute, but
+ * the 3D view rebuilds its node objects and restarts the force simulation for
+ * every new node set — so an undebounced query makes the graph explode and
+ * reflow on each keystroke.
+ */
+const SEARCH_DEBOUNCE_MS = 200;
 
 interface MemoryGraphPanelProps {
   open: boolean;
@@ -40,6 +52,7 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
   const [activeGroup, setActiveGroup] = useState<MemoryAtlasNodeKind | "all">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [viewport, setViewport] = useState<AtlasViewport>({ scale: 1, x: 0, y: 0 });
+  const [viewMode, setViewMode] = useState<MemoryAtlasViewMode>("2d");
   const [pinned, setPinned] = useState<Record<string, Point>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [paneWidths, setPaneWidths] = useState({ left: 240, right: 300 });
@@ -58,6 +71,7 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
         const preference = loadMemoryAtlasPreferences(next.workspace);
         loadedWorkspace.current = next.workspace;
         setViewport(preference.viewport);
+        setViewMode(preference.viewMode);
         setPaneWidths(preference.paneWidths);
         setPinned(Object.fromEntries(Object.entries(preference.pinned).filter(([id]) => next.nodes.some((node) => node.id === id))));
         setExpanded(new Set(preference.expandedTreeIds.length
@@ -91,12 +105,13 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
     if (!loadedWorkspace.current) return;
     const timer = window.setTimeout(() => saveMemoryAtlasPreferences(loadedWorkspace.current, {
       viewport,
+      viewMode,
       expandedTreeIds: [...expanded],
       pinned,
       paneWidths,
     }), 180);
     return () => window.clearTimeout(timer);
-  }, [expanded, paneWidths, pinned, viewport]);
+  }, [expanded, paneWidths, pinned, viewport, viewMode]);
 
   useEffect(() => {
     if (!selectedId || !atlas?.tree.length) return;
@@ -181,7 +196,14 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
     }
   }, [busy, number, onOpenSession, refresh, t]);
 
-  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    if (query === debouncedQuery) return;
+    const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, debouncedQuery]);
+
+  const normalizedQuery = debouncedQuery.trim().toLocaleLowerCase();
   const visibleNodes = useMemo(() => (atlas?.nodes ?? []).filter((node) => {
     if (node.kind === "project") return true;
     if (activeGroup !== "all" && node.kind !== activeGroup) return false;
@@ -227,6 +249,10 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
             <FilterChip active={activeGroup === "all"} onClick={() => setActiveGroup("all")} label={t("shell.memory.group.all")} count={atlas?.nodes.length ?? 0} />
             {GROUPS.map((group) => <FilterChip key={group} active={activeGroup === group} onClick={() => setActiveGroup(group)} label={group === "skill" ? t("shell.memory.group.skill") : group === "evolution" ? t("shell.memory.group.evolution") : groupLabel(group, t)} count={atlas?.nodes.filter((node) => node.kind === group).length ?? 0} />)}
             <span className="ml-auto hidden font-mono text-[9px] text-faint md:inline">{atlas ? t("shell.memory.generated", { value: date(Date.parse(atlas.generatedAt), { timeStyle: "short" }) }) : ""}</span>
+            <div className="flex items-center rounded-md border border-border-soft p-0.5" role="group" aria-label={t("shell.memory.viewModeToggle")}>
+              <button type="button" aria-pressed={viewMode === "2d"} onClick={() => setViewMode("2d")} className={cn("flex h-5 items-center gap-1 rounded px-1.5 text-[9px] transition-colors", viewMode === "2d" ? "bg-primary/15 text-foreground" : "text-muted hover:text-secondary")}><Share2 className="size-3" />{t("shell.memory.viewMode2d")}</button>
+              <button type="button" aria-pressed={viewMode === "3d"} onClick={() => setViewMode("3d")} className={cn("flex h-5 items-center gap-1 rounded px-1.5 text-[9px] transition-colors", viewMode === "3d" ? "bg-primary/15 text-foreground" : "text-muted hover:text-secondary")}><Box className="size-3" />{t("shell.memory.viewMode3d")}</button>
+            </div>
             <Button size="icon-xs" variant="ghost" onClick={() => void refresh()} disabled={loading} aria-label={t("shell.memory.refresh")}><RefreshCw className={cn("size-3.5", loading && "animate-spin")} /></Button>
           </div>
 
@@ -237,7 +263,14 @@ export function MemoryGraphPanel({ open, onClose, onOpenSession }: MemoryGraphPa
             <aside className="memory-atlas-tree min-h-0 border-r border-border bg-surface"><MemoryAtlasTree nodes={atlas?.tree ?? []} expanded={expanded} selectedNodeId={selectedId} onExpandedChange={setExpanded} onSelectNode={setSelectedId} /></aside>
             <div className="memory-atlas-resizer" role="separator" aria-orientation="vertical" aria-label={t("shell.memory.resizeTree")} onPointerDown={(event) => beginPaneResize("left", event)} />
             <div className={cn("relative min-h-[24rem] overflow-hidden", dragging && "ring-2 ring-inset ring-primary/60")} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }} onDrop={onDrop}>
-              {loading && !atlas ? <div className="absolute inset-0 z-10 grid place-items-center"><LoaderCircle className="size-5 animate-spin text-muted" /></div> : <MemoryAtlasCanvas nodes={visibleNodes} edges={visibleEdges} selectedId={selectedId} matchedIds={matchedIds} viewport={viewport} pinned={pinned} onSelect={setSelectedId} onViewportChange={setViewport} onPinnedChange={setPinned} />}
+              {loading && !atlas ? <div className="absolute inset-0 z-10 grid place-items-center"><LoaderCircle className="size-5 animate-spin text-muted" /></div> : viewMode === "3d"
+                ? <MemoryAtlasCanvas3DBoundary
+                    onError={() => { setViewMode("2d"); setError(t("shell.memory.view3dFailed")); }}
+                    fallback={<MemoryAtlasCanvas nodes={visibleNodes} edges={visibleEdges} selectedId={selectedId} matchedIds={matchedIds} viewport={viewport} pinned={pinned} onSelect={setSelectedId} onViewportChange={setViewport} onPinnedChange={setPinned} />}
+                  >
+                    <Suspense fallback={<div className="absolute inset-0 grid place-items-center"><LoaderCircle className="size-5 animate-spin text-muted" /></div>}><MemoryAtlasCanvas3D nodes={visibleNodes} edges={visibleEdges} selectedId={selectedId} matchedIds={matchedIds} onSelect={setSelectedId} /></Suspense>
+                  </MemoryAtlasCanvas3DBoundary>
+                : <MemoryAtlasCanvas nodes={visibleNodes} edges={visibleEdges} selectedId={selectedId} matchedIds={matchedIds} viewport={viewport} pinned={pinned} onSelect={setSelectedId} onViewportChange={setViewport} onPinnedChange={setPinned} />}
               {dragging && <div className="pointer-events-none absolute inset-4 z-20 grid place-items-center rounded-xl border border-dashed border-primary/70 bg-bg/90"><div className="text-center"><Upload className="mx-auto size-6 text-primary" /><p className="mt-2 text-[12px] font-medium text-foreground">{t("shell.memory.dropDocuments")}</p><p className="mt-1 text-[10px] text-muted">{t("shell.memory.documentFormats")}</p></div></div>}
               {!loading && visibleNodes.length <= 1 && <div className="pointer-events-none absolute inset-0 grid place-items-center"><div className="max-w-sm text-center"><BrainCircuit className="mx-auto size-6 text-muted" /><p className="mt-2 text-[12px] font-medium text-secondary">{t(workspaceMissing ? "shell.memory.workspaceRequiredTitle" : "shell.memory.empty")}</p><p className="mt-1 text-[10px] leading-4 text-muted">{t(workspaceMissing ? "shell.memory.workspaceRequiredHint" : "shell.memory.emptyHint")}</p></div></div>}
             </div>

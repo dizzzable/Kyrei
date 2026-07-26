@@ -33,3 +33,6 @@ ltm/runtime/*
 ltm/reports/*
 ltm/snapshots/*
 # --- /ltm-power ---
+
+# Generated knowledge-graph tool output
+graphify-out/

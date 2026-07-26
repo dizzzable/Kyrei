@@ -1,6 +1,6 @@
 {
   "name": "kyrei-agent-desktop",
-  "version": "0.7.10",
+  "version": "0.7.11",
   "private": true,
   "description": "Kyrei — cross-platform AI coding agent desktop app",
   "desktopName": "kyrei.desktop",
@@ -94,6 +94,7 @@
     "png-to-ico": "^3.0.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-force-graph-3d": "^1.29.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.0",
     "shiki": "^4.3.1",

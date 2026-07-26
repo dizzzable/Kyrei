@@ -17,6 +17,7 @@ import {
   type MemoryAtlasTreeNode,
 } from "./atlas-types.js";
 import { normalizeWorkspaceTag, sameWorkspaceTag } from "./workspace-id.js";
+import { computeRelatedEdges, RELATED_MAX_EDGES, type RelatedNodeInput } from "./atlas-similarity.js";
 
 export interface OptionalMemoryAtlasSource {
   descriptor: Pick<MemoryAtlasSourceDescriptor, "id" | "label" | "capability">;
@@ -32,6 +33,8 @@ export interface BuildMemoryAtlasInput {
   maxCodeNodes?: number;
   maxDocs?: number;
   maxEdges?: number;
+  /** Emit semantic `related` edges between memory docs (default true). */
+  relatedEdges?: boolean;
   now?: () => Date;
 }
 
@@ -198,9 +201,12 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
     generatedAt,
   });
   const entryCandidates = (project?.entryCandidates ?? []).filter((path) => codePaths.has(path)).slice(0, 40);
+  // Accumulate embeddable text per memory-doc node for semantic `related` edges.
+  const relatedInputs: RelatedNodeInput[] = [];
   for (const doc of docs) {
     const id = `memory:${doc.id}`;
     const kind = memoryKind(doc);
+    relatedInputs.push({ id, text: `${doc.title || basename(doc.path)} ${doc.body}`.slice(0, 1_200) });
     nodes.push({
       id,
       sourceId: kind === "session" ? "sessions" : "memory",
@@ -271,6 +277,11 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
 
   const evolution = [...(input.evolution ?? [])];
   sources.push({ id: "evolution", label: "Evolution", capability: "browse", health: "ready", generatedAt });
+  // Resolve an evolution candidate's target to a concrete node id when one
+  // exists. Only skill targets currently have an atlas node (skill:<id>);
+  // prompt-profile / memory-ranking / reliability-hint targets have none, so
+  // they get no target edge (silently — the candidate still shows as a node).
+  const nodeIds = new Set(nodes.map((node) => node.id));
   for (const candidate of evolution) {
     const id = `evolution:${candidate.id}`;
     const path = `${candidate.status}/${candidate.targetKind}/${candidate.id}`;
@@ -288,6 +299,12 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
     });
     addTreePath(tree, "evolution", "Evolution", path, id, candidate.title);
     edges.push({ source: "project:root", target: id, type: "contains", sourceId: "evolution" });
+    if (candidate.targetKind === "skill") {
+      const targetNodeId = `skill:${candidate.targetId}`;
+      if (nodeIds.has(targetNodeId)) {
+        edges.push({ source: id, target: targetNodeId, type: "references", sourceId: "evolution" });
+      }
+    }
   }
 
   for (const optional of input.optionalSources ?? []) {
@@ -316,6 +333,21 @@ export async function buildMemoryAtlas(input: BuildMemoryAtlasInput): Promise<Me
       });
     } catch {
       sources.push({ ...optional.descriptor, health: "unavailable", reason: "source_load_failed", generatedAt });
+    }
+  }
+
+  // Semantic `related` edges between memory docs. They get only the budget the
+  // structural edges left behind, so they can never displace a structural edge
+  // nor push the snapshot over `edgeLimit` — which would otherwise report the
+  // atlas as truncated because of a purely cosmetic enhancement. Fail-open: a
+  // bad embedder must never discard an otherwise valid snapshot.
+  const relatedBudget = Math.min(RELATED_MAX_EDGES, Math.max(0, edgeLimit - edges.length));
+  if (input.relatedEdges !== false && relatedInputs.length > 1 && relatedBudget > 0) {
+    try {
+      const related = await computeRelatedEdges(relatedInputs, { maxEdges: relatedBudget });
+      edges.push(...related);
+    } catch {
+      // Related edges are an enhancement, not a requirement.
     }
   }
 
