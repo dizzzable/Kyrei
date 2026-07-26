@@ -6,7 +6,20 @@ import { describe, expect, it } from "vitest";
 import { EvolutionStore } from "../core/evolution-store.js";
 import { evaluatePendingCandidates, MIN_APPROVE_SCORE } from "../core/evolution-eval.js";
 
-async function storeWithPending(count: number, now = () => Date.parse("2026-07-26T10:00:00.000Z")) {
+/**
+ * Candidates shaped the way the harvester actually emits them.
+ *
+ * These fixtures used to carry `{ kind: "tool-failure-pattern", tool }` and
+ * NOTHING else — a claim of a repeated failure with no evidence of repetition —
+ * and the old gate approved them on a model's say-so. That is the defect the
+ * admissibility rule exists for, and it was visible in this suite's own
+ * fixtures. `evidenced: false` below preserves the old shape so the rejection
+ * is asserted rather than merely assumed.
+ */
+async function storeWithPending(
+  count: number,
+  { now = () => Date.parse("2026-07-26T10:00:00.000Z"), evidenced = true } = {},
+) {
   const dataDir = await mkdtemp(join(tmpdir(), "kyrei-evo-worker-"));
   const store = new EvolutionStore({ dataDir, now });
   for (let i = 0; i < count; i += 1) {
@@ -14,7 +27,11 @@ async function storeWithPending(count: number, now = () => Date.parse("2026-07-2
       target: { kind: "reliability-hint", id: `tool:t${i}` },
       title: `Repeated t${i} failures`,
       summary: `Tool t${i} failed repeatedly.`,
-      proposal: { kind: "tool-failure-pattern", tool: `t${i}` },
+      proposal: {
+        kind: "tool-failure-pattern",
+        tool: `t${i}`,
+        ...(evidenced ? { occurrences: 3, samples: [`t${i} ENOENT`, `t${i} EACCES`] } : {}),
+      },
     });
   }
   return { dataDir, store };
@@ -129,5 +146,35 @@ describe("evaluatePendingCandidates (evolution worker core)", () => {
     // cost is untracked → ceiling never trips → all three evaluated.
     expect(out.evaluated).toBe(3);
     expect(out.costTracked).toBe(false);
+  });
+
+  it("refuses an unevidenced candidate even when the model is certain", async () => {
+    // The shape these fixtures used to have: a claim of a repeated failure
+    // carrying no evidence of repetition. It was approvable, because the only
+    // gate was a model scoring its own confidence — and a judge's bias runs
+    // toward false PASSES, which here means a self-modification that ships.
+    const { store } = await storeWithPending(1, { evidenced: false });
+    const out = await evaluatePendingCandidates(store, {
+      generateText: cannedModel('{"verdict":"approve","score":1.0,"rationale":"absolutely certain"}'),
+      model: {},
+      costEntry: { inputPerM: 0, outputPerM: 0 },
+      abortMs: 0,
+    });
+
+    expect(out).toMatchObject({ ok: true, evaluated: 1, approved: 0, rejected: 1 });
+    const [candidate] = await store.list({ status: "rejected" });
+    expect(candidate.reason).toContain("evidence_insufficient");
+  });
+
+  it("does not spend a model call on a candidate that cannot be approved", async () => {
+    let calls = 0;
+    const { store } = await storeWithPending(1, { evidenced: false });
+    await evaluatePendingCandidates(store, {
+      generateText: async () => { calls += 1; return { text: '{"verdict":"approve","score":1}' } as never; },
+      model: {},
+      costEntry: { inputPerM: 0, outputPerM: 0 },
+      abortMs: 0,
+    });
+    expect(calls).toBe(0);
   });
 });

@@ -14,15 +14,20 @@
  * instructions, and the model's reply is defensively parsed and re-clipped.
  */
 
-export const EVOLUTION_EVAL_VERSION = 1;
-const VERIFIER_ID = "eval-v1";
+import { admitCandidate, decideCandidate } from "./evolution-admit.js";
+
+export const EVOLUTION_EVAL_VERSION = 2;
+const VERIFIER_ID = "eval-v2";
 
 /**
- * Minimum self-reported confidence for `approved`. The evaluator is a single
- * model call with no baseline and no replay, so the score is the only signal
- * separating a considered approval from a shrug. `approved` is also the sole
- * precondition promotion checks before rewriting an artifact on disk, so the
- * bar belongs here rather than in the UI.
+ * Score below which an "approve" verdict is treated as a veto.
+ *
+ * This is NO LONGER the thing that approves. The model's verdict is advisory
+ * and can only ever REJECT — approval requires `admitCandidate` to pass on
+ * deterministic, checkable grounds (see core/evolution-admit.js for why an
+ * LLM self-score is the wrong instrument for a decision that rewrites a file).
+ * The threshold survives as one more way to say no: a half-hearted approval is
+ * still a no.
  */
 export const MIN_APPROVE_SCORE = 0.5;
 
@@ -103,13 +108,19 @@ export function computeCostUsd(usage, cost) {
  * Shape the evidence for an `approved` transition. Receipts are short string
  * pointers (≤200c each); the rationale goes in notes, raw numbers in metrics.
  */
-export function evaluationEvidence({ score, rationale, costUsd, tracked, model }) {
+export function evaluationEvidence({ score, rationale, costUsd, tracked, model, strength = 0, promotable = false }) {
   const safeScore = Math.min(1, Math.max(0, Number(score) || 0));
+  const safeStrength = Math.max(0, Number(strength) || 0);
   return {
-    receipts: [`score:${safeScore.toFixed(2)} verifier:${VERIFIER_ID}`],
+    // The evidence count leads, because it is the thing that actually admitted
+    // the candidate. The model score is recorded for the audit trail, not
+    // because it carried the decision.
+    receipts: [`evidence:${safeStrength} score:${safeScore.toFixed(2)} verifier:${VERIFIER_ID}`],
     notes: clip(rationale, 4000),
     metrics: {
       score: safeScore,
+      evidenceStrength: safeStrength,
+      promotable: promotable === true,
       costUsd: tracked ? Number(costUsd) || 0 : 0,
       costTracked: tracked === true,
       verifier: VERIFIER_ID,
@@ -156,6 +167,27 @@ export async function evaluatePendingCandidates(store, {
         status: "evaluating",
         evidence: { notes: "Evaluation started." },
       });
+
+      // Deterministic gate first. An inadmissible candidate can never be
+      // approved whatever the model says, so asking is both pointless and paid
+      // for — and it keeps a malformed proposal from reaching a prompt at all.
+      const admission = admitCandidate(candidate);
+      if (!admission.admissible) {
+        const denial = decideCandidate(admission, null);
+        await store.transition(candidate.id, {
+          expectedRevision: evaluating.revision,
+          status: "rejected",
+          reason: denial.reason,
+          evidence: {
+            notes: "Rejected before evaluation: the candidate is not admissible.",
+            metrics: { evidenceStrength: admission.strength, promotable: false, costUsd: 0, costTracked: false },
+          },
+        });
+        evaluated += 1;
+        rejected += 1;
+        continue;
+      }
+
       let controller;
       let deadline;
       if (abortMs > 0) {
@@ -181,43 +213,48 @@ export async function evaluatePendingCandidates(store, {
       const { costUsd, tracked } = computeCostUsd(usage, costEntry);
       if (tracked) { spentUsd += costUsd; anyTracked = true; onSpend?.(costUsd); }
       evaluated += 1;
-      const verdict = parseEvaluationResult(text);
-      if (!verdict) {
-        await store.transition(candidate.id, {
-          expectedRevision: evaluating.revision,
-          status: "rejected",
-          reason: "eval_unparseable",
-          evidence: { notes: "Model returned no parseable verdict.", metrics: { costUsd: tracked ? costUsd : 0, costTracked: tracked } },
-        });
-        rejected += 1;
-      } else if (verdict.verdict === "approve" && verdict.score >= MIN_APPROVE_SCORE) {
+
+      const parsed = parseEvaluationResult(text);
+      // A weak "approve" is a no. The model can only ever subtract confidence
+      // here, so folding the low-score case into the veto costs nothing and
+      // removes a branch that used to have its own way of reaching `approved`.
+      const verdict = parsed && parsed.verdict === "approve" && parsed.score < MIN_APPROVE_SCORE
+        ? /** @type {{ verdict: "approve"|"reject", score: number, rationale: string }} */ ({
+          ...parsed,
+          verdict: "reject",
+          rationale: `eval_low_score:${parsed.score.toFixed(2)}<${MIN_APPROVE_SCORE}`,
+        })
+        : parsed;
+      const decision = decideCandidate(admission, verdict);
+      const metrics = {
+        ...(parsed ? { score: parsed.score } : {}),
+        evidenceStrength: admission.strength,
+        promotable: admission.promotable,
+        costUsd: tracked ? costUsd : 0,
+        costTracked: tracked,
+      };
+
+      if (decision.decision === "approved") {
         await store.transition(candidate.id, {
           expectedRevision: evaluating.revision,
           status: "approved",
-          evidence: evaluationEvidence({ score: verdict.score, rationale: verdict.rationale, costUsd, tracked, model: targetModel }),
+          evidence: evaluationEvidence({
+            score: parsed?.score ?? 0,
+            rationale: parsed?.rationale ?? "",
+            costUsd,
+            tracked,
+            model: targetModel,
+            strength: admission.strength,
+            promotable: admission.promotable,
+          }),
         });
         approved += 1;
-      } else if (verdict.verdict === "approve") {
-        // `approved` is the only precondition promotion checks, and promotion
-        // rewrites a real artifact on disk. A verdict of "approve" carrying a
-        // score below the bar used to sail through because score was read only
-        // for display — so a 0.0-confidence approval was promotable.
-        await store.transition(candidate.id, {
-          expectedRevision: evaluating.revision,
-          status: "rejected",
-          reason: `eval_low_score:${verdict.score.toFixed(2)}<${MIN_APPROVE_SCORE}`,
-          evidence: {
-            notes: verdict.rationale,
-            metrics: { score: verdict.score, costUsd: tracked ? costUsd : 0, costTracked: tracked },
-          },
-        });
-        rejected += 1;
       } else {
         await store.transition(candidate.id, {
           expectedRevision: evaluating.revision,
           status: "rejected",
-          reason: (verdict.rationale || "eval_rejected").slice(0, 2000),
-          evidence: { notes: verdict.rationale, metrics: { score: verdict.score, costUsd: tracked ? costUsd : 0, costTracked: tracked } },
+          reason: decision.reason,
+          evidence: { notes: parsed?.rationale ?? decision.reason, metrics },
         });
         rejected += 1;
       }
