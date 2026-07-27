@@ -38,6 +38,7 @@ import { buildProjectIntelTools } from "./project-intel.js";
 import { invalidateSymbolMapCache } from "../intel/repo-symbols.js";
 import { compressToolOutputSync } from "../context/tool-compress.js";
 import type { ReadMemo } from "../context/read-memo.js";
+import { TRUNCATED_TURN_REFUSAL } from "../provider/truncation-guard.js";
 
 export interface ToolMeta {
   inlineDiff?: string;
@@ -102,6 +103,11 @@ export interface BuildToolsOptions {
    * rejected hunk deserves an automatic retry — is guesswork without it.
    */
   onPatchApply?: (outcome: { ok: true; matchLevel: number } | { ok: false; code: string }) => void;
+  /**
+   * True once the current response was cut off at the output token limit, so
+   * any tool call it carries may have silently truncated arguments.
+   */
+  isTurnTruncated?: () => boolean;
 }
 
 const MAX_DIFF_LINES = 2000;
@@ -431,6 +437,28 @@ export function buildTools(workspace: string, cfg: EngineConfig, toolMeta: Map<s
     effect: () => Promise<string>,
   ): Promise<string> => {
     const started = Date.now();
+    /**
+     * Refuse anything mutating from a response the model never finished.
+     *
+     * A provider that stops at the output token limit can still emit tool
+     * calls whose arguments were cut off mid-stream. The SDK finalises what
+     * arrived, so a call whose JSON happens to close early parses, validates
+     * and runs. Reproduced against this loop: a truncated `write_file`
+     * executed and a file containing `ORIGINAL` became `TRUNCA`.
+     *
+     * Checked here rather than at the stream, because refusing through the
+     * normal tool-result path gives the model something it can act on — the
+     * call simply vanishing would leave it with no idea why.
+     */
+    if (options.isTurnTruncated?.()) {
+      await audit(toolName, toolCallId, {
+        decision: "deny",
+        status: "denied",
+        metadata: { ...metadata, reason: "response_truncated" },
+        durationS: (Date.now() - started) / 1000,
+      });
+      return TRUNCATED_TURN_REFUSAL;
+    }
     const decision = decideAll(cfg.permissions, actions);
     const approvalId = options.approvedToolCalls?.get(toolCallId);
     const consumeApproval = async (): Promise<void> => {

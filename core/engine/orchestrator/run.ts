@@ -29,6 +29,7 @@ import {
 } from "../provider/build.js";
 import { resolveEngineConfig } from "../config/schema.js";
 import { resolve as resolveModel } from "../provider/registry.js";
+import { createTruncationSignal, withTruncationGuard } from "../provider/truncation-guard.js";
 import {
   openStream,
   streamAttemptsFromError,
@@ -475,6 +476,12 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         ...(reviewFetch ? { fetch: reviewFetch } : {}),
       })
     : undefined;
+  /**
+   * Raised when a response stops at the output token limit, so the tool layer
+   * can refuse calls whose arguments may have been cut off mid-stream. Reset
+   * before every model call — it describes one response, not the turn.
+   */
+  const truncation = createTruncationSignal();
   const workspaceTools = workspaceReady
     ? buildTools(opts.workspace!, cfg, toolMeta, {
         abortSignal: opts.abortSignal,
@@ -494,6 +501,7 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
         smartCompress: true,
         codingMode: normalizeCodingMode(cfg.codingMode),
         onPostEditVerify: (ok) => harnessMetrics.recordPostEditVerify(ok),
+        isTurnTruncated: () => truncation.truncated,
         onPatchApply: (outcome) => {
           if (outcome.ok) harnessMetrics.recordPatchApply(`level${outcome.matchLevel}`);
           else harnessMetrics.recordPatchFailure(outcome.code);
@@ -1147,8 +1155,9 @@ async function runKyreiChatPass(opts: RunKyreiChatOpts): Promise<RunKyreiChatRes
     // Clones the last tool, so shared tool refs used by other fallback
     // candidates are never mutated. No-op for non-Anthropic protocols.
     const cachedTools = applyToolCacheBreakpoint(callTools, target.protocol);
+    truncation.truncated = false;
     const result = streamText({
-      model,
+      model: withTruncationGuard(model, truncation),
       ...(packedSystem.instructions ? { instructions: packedSystem.instructions } : {}),
       messages: streamMessages,
       ...(callTools

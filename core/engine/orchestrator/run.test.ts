@@ -35,6 +35,11 @@ vi.mock("ai", () => ({
     safeParse: (value: unknown) => ({ success: true, data: value }),
   },
   tool: (definition: unknown) => definition,
+  // The truncation guard wraps the model to watch for a length stop. These
+  // tests assert on what reaches `streamText`, so the wrapper is the identity
+  // here — its own behaviour is covered by provider/truncation-guard.test.ts
+  // against the real SDK.
+  wrapLanguageModel: ({ model }: { model: unknown }) => model,
 }));
 
 vi.mock("../config/schema.js", () => ({
