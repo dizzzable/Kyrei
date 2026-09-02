@@ -260,7 +260,19 @@ export type KyreiEvent =
     }
   | {
       type: "approval.consumed";
-      payload: { approval_id: string; tool_call_id: string };
+      payload: { approval_id: string; tool_call_id: string; reason?: string };
+    }
+  /**
+   * Non-fatal setup problem the user should know about before judging the run.
+   *
+   * Added because a silently degraded turn is indistinguishable from a broken
+   * feature: prompt-level skills are dropped under a team profile (role skills
+   * are configured per role), and with no signal at all the user concluded the
+   * skill itself produced nothing.
+   */
+  | {
+      type: "notice";
+      payload: { code: string; skill_ids?: string[]; team_profile_id?: string; message?: string };
     }
   | { type: "message.complete"; payload: { text: string; status: TurnStatus; usage?: Usage } }
   | { type: "error"; payload: { code?: string; message?: string } };

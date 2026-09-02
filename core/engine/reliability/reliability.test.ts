@@ -51,6 +51,71 @@ describe("cleanupIncomplete (Property 5/14)", () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.role).toBe("user");
   });
+
+  // A call parked on an approval has no result BY DESIGN. Pruning it made the
+  // SDK unable to correlate the stored approval request, which killed the
+  // continuation before the receipt could be consumed — and an unconsumed
+  // receipt refuses every later prompt in that session forever.
+  it("keeps a tool-call that is awaiting user approval", () => {
+    const messages = [
+      { role: "user", content: "delete the temp files" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "c1", toolName: "run_command", input: { command: "del /q tmp" } },
+          { type: "tool-approval-request", approvalId: "a1", toolCallId: "c1", signature: "sig" },
+        ],
+      },
+    ] as unknown as ModelMessage[];
+
+    const out = cleanupIncomplete(messages);
+
+    expect(out).toHaveLength(2);
+    const parts = out[1]!.content as unknown as Array<Record<string, unknown>>;
+    expect(parts.map((part) => part["type"]))
+      .toEqual(["tool-call", "tool-approval-request"]);
+  });
+
+  it("keeps an approved tool-call so the continuation can execute it", () => {
+    const messages = [
+      { role: "user", content: "delete the temp files" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "c1", toolName: "run_command", input: { command: "del /q tmp" } },
+          { type: "tool-approval-request", approvalId: "a1", toolCallId: "c1", signature: "sig" },
+        ],
+      },
+      { role: "tool", content: [{ type: "tool-approval-response", approvalId: "a1", approved: true }] },
+    ] as unknown as ModelMessage[];
+
+    const out = cleanupIncomplete(messages);
+
+    expect(out).toHaveLength(3);
+    const callParts = out[1]!.content as unknown as Array<Record<string, unknown>>;
+    expect(callParts.some((part) => part["type"] === "tool-call" && part["toolCallId"] === "c1")).toBe(true);
+    const responseParts = out[2]!.content as unknown as Array<Record<string, unknown>>;
+    expect(responseParts).toHaveLength(1);
+  });
+
+  it("still drops an unapproved, unanswered tool-call from a different turn", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "approved", toolName: "run_command", input: {} },
+          { type: "tool-approval-request", approvalId: "a1", toolCallId: "approved", signature: "sig" },
+        ],
+      },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "dangling", toolName: "x", input: {} }] },
+    ] as unknown as ModelMessage[];
+
+    const out = cleanupIncomplete(messages);
+
+    expect(out).toHaveLength(1);
+    const parts = out[0]!.content as unknown as Array<Record<string, unknown>>;
+    expect(parts.some((part) => part["toolCallId"] === "approved")).toBe(true);
+  });
 });
 
 describe("loop detection", () => {

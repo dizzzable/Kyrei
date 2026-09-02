@@ -504,6 +504,19 @@ export function App() {
           }
           break;
         }
+        case "notice": {
+          // A silently degraded turn is indistinguishable from a broken feature.
+          // Prompt-level skills are dropped under a team profile (role skills are
+          // configured per role), and with no signal the user concluded the skill
+          // itself had produced nothing.
+          if (payload.code !== "prompt_skills_ignored_under_team_profile") break;
+          const translate = translationRef.current;
+          updatePending((parts) => appendText(
+            parts,
+            `\n\n${translate("shell.notice.promptSkillsIgnoredUnderTeamProfile")}`,
+          ));
+          break;
+        }
         case "subagent.start":
         case "subagent.progress":
         case "subagent.complete":
@@ -1494,6 +1507,18 @@ export function App() {
         streaming={streaming}
         stopping={stopping}
         disabled={!config || !currentId || rewinding || approvalBlocked || fileReviewBlocked || sessionModelPendingIds.has(currentId)}
+        // Order matters: a blocked composer used to claim "Connecting", so an
+        // outstanding decision read as a network fault and the user just waited.
+        // The specific blockers are reported ahead of the generic startup state.
+        disabledReason={
+          approvalBlocked
+            ? "approval"
+            : fileReviewBlocked
+              ? "file_review"
+              : rewinding
+                ? "rewinding"
+                : "connecting"
+        }
         sessionId={currentId}
         messages={messages}
         model={currentModelId}

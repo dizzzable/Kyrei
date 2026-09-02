@@ -53,6 +53,16 @@ interface ComposerProps {
   streaming: boolean;
   stopping?: boolean;
   disabled?: boolean;
+  /**
+   * Why the composer is disabled, when the caller knows.
+   *
+   * The placeholder used to read "Connecting:" for every disabled state, which
+   * made an approval-blocked session look like a network problem: the user saw a
+   * connection message, waited, and had no idea a decision was outstanding or
+   * that the session needed releasing. The reason is passed in so the composer
+   * can say what is actually true.
+   */
+  disabledReason?: "approval" | "file_review" | "rewinding" | "connecting";
   sessionId?: string | null;
   /**
    * Live session messages, used to derive the up-arrow history ring.
@@ -96,6 +106,7 @@ export function Composer({
   streaming,
   stopping = false,
   disabled,
+  disabledReason = "connecting",
   sessionId,
   messages,
   model,
@@ -736,7 +747,17 @@ export function Composer({
             onPaste={onPaste}
             onDrop={onDrop}
             onBlur={() => window.setTimeout(() => setMention(null), 120)}
-            placeholder={disabled ? t("chat.composer.connecting") : t("chat.composer.placeholder")}
+            placeholder={disabled
+              ? t(
+                disabledReason === "approval"
+                  ? "chat.composer.blocked.approval"
+                  : disabledReason === "file_review"
+                    ? "chat.composer.blocked.fileReview"
+                    : disabledReason === "rewinding"
+                      ? "chat.composer.blocked.rewinding"
+                      : "chat.composer.connecting",
+              )
+              : t("chat.composer.placeholder")}
             className={cn(
               "w-full resize-none bg-transparent py-1.5 text-[14px] leading-relaxed text-foreground outline-none placeholder:text-muted",
               expanded ? "min-h-[40vh] max-h-[55vh]" : "min-h-[24px] max-h-[220px]",

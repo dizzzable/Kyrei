@@ -57,6 +57,59 @@ describe("session-mutations pure algorithms", () => {
     expect(c.approval.consumedAt).toBeTruthy();
   });
 
+  /**
+   * THE DEFECT THESE COVER
+   *
+   * `consumedAt` is written from exactly one place: the callback fired when the
+   * engine EXECUTES the approved tool. A continuation that died before the
+   * execution layer left the receipt open, and an open receipt refuses every
+   * later prompt in the session — with no TTL sweep, no startup sweep, and no UI
+   * action able to clear it. Re-deciding was rejected as a decision conflict, so
+   * approving a command bricked the conversation permanently.
+   */
+  it("refuses to re-decide an approved receipt without force", () => {
+    const approved = resolveApprovalInMessages(baseMessages, "appr-long-1", { approved: true });
+
+    expect(() => resolveApprovalInMessages(approved.messages, "appr-long-1", { approved: false }))
+      .toThrow(SessionMutationError);
+  });
+
+  it("force-releases a stranded approved receipt and consumes it in one step", () => {
+    const approved = resolveApprovalInMessages(baseMessages, "appr-long-1", { approved: true });
+    expect(approved.approval.consumedAt).toBeUndefined();
+
+    const released = resolveApprovalInMessages(approved.messages, "appr-long-1", {
+      approved: false,
+      reason: "approval_continuation_failed",
+      force: true,
+    });
+
+    expect(released.approval.status).toBe("denied");
+    // Consumed in the same step: no effect will run, so leaving the receipt open
+    // would keep the session blocked.
+    expect(released.approval.consumedAt).toBeTruthy();
+    expect(released.approval.decisionReason).toBe("approval_continuation_failed");
+  });
+
+  it("keeps a forced approval consumed so it cannot re-block the session", () => {
+    const approved = resolveApprovalInMessages(baseMessages, "appr-long-1", { approved: true });
+
+    const forcedApprove = resolveApprovalInMessages(approved.messages, "appr-long-1", {
+      approved: true,
+      force: true,
+    });
+
+    expect(forcedApprove.approval.status).toBe("approved");
+    expect(forcedApprove.approval.consumedAt).toBeTruthy();
+  });
+
+  it("still rejects a force applied to an already consumed receipt", () => {
+    const denied = resolveApprovalInMessages(baseMessages, "appr-long-1", { approved: false });
+
+    expect(() => resolveApprovalInMessages(denied.messages, "appr-long-1", { approved: true, force: true }))
+      .toThrow(SessionMutationError);
+  });
+
   it("plans and commits rewind at user message", () => {
     const msgs = [
       { id: "msg-1", role: "user", content: "a" },

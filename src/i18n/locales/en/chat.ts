@@ -16,6 +16,11 @@ export const enChat = {
   "chat.slash.mode.arg": "auto|plan|build|polish|deepreep",
   "chat.composer.placeholder": "Message Kyrei…",
   "chat.composer.connecting": "Connecting…",
+  // A blocked composer used to claim it was connecting, so an outstanding
+  // decision read as a network problem and the user simply waited.
+  "chat.composer.blocked.approval": "Waiting for your decision on the tool request above…",
+  "chat.composer.blocked.fileReview": "Accept or reject the pending file changes to continue…",
+  "chat.composer.blocked.rewinding": "Rewinding the conversation…",
   "chat.composer.addContext": "Add context",
   "chat.composer.attach": "Attach",
   "chat.composer.attachFiles": "Files…",
