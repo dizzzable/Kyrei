@@ -7149,6 +7149,12 @@ export async function startGateway({
     try {
       const activeTeamProfile = activeOrchestrationProfile(config);
       const explicitPromptSkills = Boolean(skillIds?.length && !activeTeamProfile);
+      // Skills picked in the composer are IGNORED under a team profile: role
+      // skills are configured per role in Team settings, so a prompt-level pin
+      // has nowhere to apply. That was correct but silent — a user selected
+      // skills, ran the turn, and nothing said the selection had been dropped.
+      // Runs looked like the skill had simply produced no output.
+      const droppedPromptSkills = Boolean(skillIds?.length && activeTeamProfile);
       let runtimeSkills;
       if (activeTeamProfile) {
         runtimeSkills = await runtimeSkillsForTeamProfile(activeTeamProfile);
@@ -7208,6 +7214,18 @@ export async function startGateway({
           )
         : undefined;
       if (activeTeamProfile && !team) throw new TeamConfigError("team_runtime_unavailable");
+      if (droppedPromptSkills) {
+        // Said once, before the turn runs, so the user can correct the setup
+        // instead of concluding the skill is broken.
+        emitActiveTurnEvent(turn, {
+          type: "notice",
+          payload: {
+            code: "prompt_skills_ignored_under_team_profile",
+            skill_ids: skillIds.slice(0, 32),
+            team_profile_id: activeTeamProfile.id,
+          },
+        });
+      }
       const providerAttemptLifecycle = providerAttemptLifecycleFor({
         generationSnapshot: runtimeGenerationSnapshot,
         sessionId,
@@ -11707,6 +11725,12 @@ export async function startGateway({
           const body = await readBody(req);
           assertGatewayAcceptingMutations();
           const promoteAlways = body.always === true || body.promote === true || body.scope === "always";
+          // Manual escape from a stranded receipt. Without it an approval whose
+          // continuation never reached the execution layer could not be
+          // re-decided (`approval_decision_conflict`), and an open receipt
+          // refuses every later prompt in the session — approving a command
+          // bricked the conversation for good.
+          const force = body.force === true;
           let resolved;
           let promotedRule = null;
           try {
@@ -11714,7 +11738,8 @@ export async function startGateway({
             const loaded = await loadMessagesForMutation(sessionId);
             const pure = resolveApprovalInMessages(loaded.messages, approvalId, {
               approved: body.approved,
-              reason: typeof body.reason === "string" ? body.reason : "",
+              reason: typeof body.reason === "string" ? body.reason : (force ? "approval_force_released" : ""),
+              force,
             });
             await persistMutatedMessages(sessionId, pure.messages);
             resolved = {
@@ -11803,6 +11828,56 @@ export async function startGateway({
               : {}),
           });
           void runReservedPrompt(sessionId, "", resolved.modelParams, undefined, { appendUser: false })
+            .then(async (outcome) => {
+              // A continuation that never reached the execution layer leaves the
+              // receipt open, and an open receipt refuses every later prompt in
+              // this session — with no TTL sweep and no UI action able to clear
+              // it. The receipt is therefore released here whenever the turn
+              // ended without consuming it.
+              //
+              // Fenced by the shutdown boundary first: a late continuation must
+              // never schedule a flush after close() has drained the stores, and
+              // a stranded receipt is recoverable on the next run either way.
+              if (gatewayClosing || shutdownController.signal.aborted) return;
+              // NOT swept when the turn itself ends awaiting another decision:
+              // a further continuation is expected, and it may still execute the
+              // approved call. Releasing early would cancel a live effect.
+              const turnStatus = outcome?.status ?? "unknown";
+              if (turnStatus === "awaiting_approval" || turnStatus === "awaiting_file_review") return;
+              // Only DECIDED receipts are touched. A still-pending one is waiting
+              // for the user, and sweeping it would decide on their behalf.
+              const stranded = store.strandedApprovals(sessionId);
+              if (stranded.length === 0) return;
+              for (const receipt of stranded) {
+                try {
+                  store.consumeApproval(sessionId, receipt.approvalId);
+                } catch {
+                  // An unresolved receipt cannot be consumed; force it closed so
+                  // the session is never left permanently unusable.
+                  try {
+                    store.resolveApproval(sessionId, receipt.approvalId, {
+                      approved: false,
+                      reason: "approval_continuation_failed",
+                      force: true,
+                    });
+                  } catch { /* already gone: nothing left to release */ }
+                }
+                emitTo(sessionId, {
+                  type: "approval.consumed",
+                  payload: {
+                    approval_id: receipt.approvalId,
+                    tool_call_id: receipt.toolCallId,
+                    reason: "approval_continuation_failed",
+                  },
+                });
+              }
+              await store.flush();
+              console.warn(
+                `[kyrei approvals] released ${stranded.length} receipt(s) after a continuation that executed nothing`,
+                { sessionId, outcome: turnStatus },
+              );
+            })
+            .catch(() => undefined)
             .finally(() => {
               if (sessionReservations.get(sessionId) === reservationToken) {
                 sessionReservations.delete(sessionId);

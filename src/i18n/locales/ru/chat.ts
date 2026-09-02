@@ -17,6 +17,11 @@ export const ruChat = {
   "chat.slash.mode.arg": "auto|plan|build|polish|deepreep",
   "chat.composer.placeholder": "Сообщение для Kyrei…",
   "chat.composer.connecting": "Подключение…",
+  // Заблокированный композер раньше сообщал о подключении, поэтому ожидающее
+  // решение выглядело как проблема с сетью, и пользователь просто ждал.
+  "chat.composer.blocked.approval": "Ожидается ваше решение по запросу инструмента выше…",
+  "chat.composer.blocked.fileReview": "Примите или отклоните изменения файлов, чтобы продолжить…",
+  "chat.composer.blocked.rewinding": "Откат диалога…",
   "chat.composer.addContext": "Добавить контекст",
   "chat.composer.attach": "Вложить",
   "chat.composer.attachFiles": "Файлы…",

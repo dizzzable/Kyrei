@@ -1443,5 +1443,8 @@ export interface GatewayEvent {
     workflow?: "supervisor" | "consensus";
     completed_tasks?: number;
     failed_tasks?: number;
+    /** `notice`: prompt skills dropped because a team profile owns role skills. */
+    skill_ids?: string[];
+    team_profile_id?: string;
   };
 }

@@ -720,6 +720,32 @@ export class SessionStore {
   }
 
   /**
+   * Receipts that are DECIDED but never consumed — the stranded ones.
+   *
+   * `consumedAt` is written from exactly one place: the callback fired when the
+   * engine EXECUTES the approved tool. A continuation that dies before the
+   * execution layer leaves the receipt open, and an open receipt refuses every
+   * later prompt in the session. There was no TTL sweep, no startup sweep, and no
+   * UI action that could clear it: approving a command bricked the conversation.
+   *
+   * `pending` is deliberately EXCLUDED. A pending receipt is not stranded — it is
+   * waiting for the user, which is the mechanism working as designed. Sweeping it
+   * would silently decide on the user's behalf and defeat approvals entirely.
+   */
+  strandedApprovals(sessionId) {
+    const out = [];
+    for (const message of this.state.messages[sessionId] ?? []) {
+      if (!Array.isArray(message?.parts)) continue;
+      for (const part of message.parts) {
+        if (part?.type !== "approval" || part.consumedAt) continue;
+        if (part.status === "pending") continue;
+        out.push(part);
+      }
+    }
+    return out;
+  }
+
+  /**
    * Replace the full message list for a session (used by engine-primary write-back).
    */
   replaceMessages(sessionId, messages) {
@@ -730,10 +756,15 @@ export class SessionStore {
     return this.state.messages[sessionId];
   }
 
-  resolveApproval(sessionId, approvalId, { approved, reason = "", now = new Date().toISOString() } = {}) {
+  /**
+   * @param {string} sessionId
+   * @param {string} approvalId
+   * @param {{ approved?: boolean, reason?: string, now?: string, force?: boolean }} [options]
+   */
+  resolveApproval(sessionId, approvalId, { approved, reason = "", now = new Date().toISOString(), force = false } = {}) {
     try {
       const list = this.state.messages[sessionId] ?? [];
-      const result = resolveApprovalInMessages(list, approvalId, { approved, reason, now });
+      const result = resolveApprovalInMessages(list, approvalId, { approved, reason, now, force });
       this.state.messages[sessionId] = result.messages;
       this.touch();
       return {

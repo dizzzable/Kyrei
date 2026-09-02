@@ -35,12 +35,29 @@ function findApproval(messages, approvalId) {
 
 /**
  * Immutable resolve of an approval part inside a message list.
+ *
+ * `force` exists as the manual escape from a stranded receipt. Without it a
+ * receipt already marked `approved` could never be re-decided:
+ * `approval_decision_conflict` rejected the only decision that would have
+ * released the session, so an approval whose continuation never reached the
+ * execution layer blocked every later prompt with no way out. A forced decision
+ * consumes the receipt in the same step, because there is no effect left to run.
+ *
+ * The options bag is annotated because a destructured parameter infers its type
+ * from the DEFAULTS alone: `approved` has none, so without this every call site
+ * reported it as an unknown property. `messages` is deliberately left
+ * un-annotated — the stored message shape is not typed here, and pinning it to
+ * `object[]` only trades one set of spurious errors for another.
+ *
+ * @param {*} messages
+ * @param {string} approvalId
+ * @param {{ approved?: boolean, reason?: string, now?: string, force?: boolean }} [options]
  * @returns {{ messages: object[], approval: object, messageId: string, ready: boolean, modelParams?: unknown }}
  */
 export function resolveApprovalInMessages(
   messages,
   approvalId,
-  { approved, reason = "", now = new Date().toISOString() } = {},
+  { approved, reason = "", now = new Date().toISOString(), force = false } = {},
 ) {
   if (typeof approved !== "boolean") throw new SessionMutationError("approval_decision_invalid");
   const list = Array.isArray(messages) ? messages.map((m) => ({
@@ -66,14 +83,16 @@ export function resolveApprovalInMessages(
     };
   } else {
     const status = approved ? "approved" : "denied";
-    if (current.status !== "pending" && current.status !== status) {
+    if (!force && current.status !== "pending" && current.status !== status) {
       throw new SessionMutationError("approval_decision_conflict");
     }
     approval = {
       ...current,
       status,
       resolvedAt: current.resolvedAt ?? decisionAt,
-      ...(!approved ? { consumedAt: current.consumedAt ?? decisionAt } : {}),
+      // A forced decision is terminal by construction: nothing will execute this
+      // call, so leaving the receipt open would keep the session blocked.
+      ...(!approved || force ? { consumedAt: current.consumedAt ?? decisionAt } : {}),
       ...(reason ? { decisionReason: String(reason).slice(0, 500) } : {}),
     };
   }

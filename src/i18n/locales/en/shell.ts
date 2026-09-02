@@ -287,6 +287,10 @@ export const enShell = {
   "shell.error.providerNotConfigured": "Connect a model provider before sending a message.",
   "shell.error.healHandoff": "Kyrei paused this run after repeated tool failures. Partial progress and local diagnostics were saved; review the latest tool error and resume when ready.",
   "shell.error.prefix": "Error: {message}",
+  // Said out loud because a silently degraded turn is indistinguishable from a
+  // broken feature: the user picks skills, nothing happens, and the skill looks
+  // at fault.
+  "shell.notice.promptSkillsIgnoredUnderTeamProfile": "The skills selected in the composer were not applied: a Team profile is active, and role skills are configured per role in Team settings.",
   "shell.stream.reconnecting": "Live updates disconnected — reconnecting. If this persists, reload the window.",
   "shell.stream.reload": "Reload",
   "shell.status.missions": "Missions",

@@ -556,4 +556,84 @@ describe("gateway interactive tool approvals", () => {
       expect.objectContaining({ approvalId: secondApprovalId, status: "approved", consumedAt: expect.any(String) }),
     ]));
   });
+
+  /**
+   * THE DEFECT THESE COVER
+   *
+   * `consumedAt` was written from exactly one place: the callback fired when the
+   * engine EXECUTES the approved tool. A continuation that threw before the
+   * execution layer therefore left the receipt open, and an open receipt refuses
+   * every later prompt in the session — no TTL sweep, no startup sweep, no UI
+   * action able to clear it, and re-deciding rejected as a decision conflict.
+   * Approving one command bricked the conversation permanently. Observed live in
+   * three sessions holding 25 stranded receipts between them.
+   */
+  it("releases the receipt when the continuation executes nothing, and accepts later prompts", async () => {
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Request an action" }),
+    });
+    await waitForPendingApproval(session.id);
+
+    // The continuation dies before the execution layer, exactly as it did when
+    // the SDK could not correlate the approval back to its tool call.
+    runKyreiChat.mockImplementationOnce(async () => {
+      throw new Error("Tool call not found for approval request");
+    });
+    await request(
+      `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
+      { method: "POST", body: JSON.stringify({ approved: true }) },
+    );
+
+    await waitFor(async () => {
+      const parts = (await sessionMessages(session.id))[1]?.parts ?? [];
+      return parts.some((part: Record<string, unknown>) => (
+        part.type === "approval" && part.approvalId === APPROVAL_ID && Boolean(part.consumedAt)
+      ));
+    });
+
+    runKyreiChat.mockImplementationOnce(async (options: Record<string, any>) => {
+      options.emit({ type: "message.complete", payload: { text: "Recovered.", status: "complete" } });
+      return { text: "Recovered.", status: "complete", parts: [], responseMessages: [], attempts: [] };
+    });
+    // The whole point: the session is usable again instead of 409 forever.
+    await expect(request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Continue after the failure" }),
+    })).resolves.toMatchObject({ status: "streaming" });
+  });
+
+  it("force-releases an approved receipt whose continuation already failed", async () => {
+    const session = await request<{ id: string }>("/api/sessions", { method: "POST" });
+    await request("/api/prompt", {
+      method: "POST",
+      body: JSON.stringify({ session: session.id, text: "Request an action" }),
+    });
+    await waitForPendingApproval(session.id);
+
+    // Approve, but keep the receipt open: the continuation neither consumes it
+    // nor runs an effect, which is precisely the stranded state.
+    runKyreiChat.mockImplementationOnce(async (options: Record<string, any>) => {
+      options.emit({ type: "message.complete", payload: { text: "", status: "awaiting_approval" } });
+      return { text: "", status: "awaiting_approval", parts: [], responseMessages: [], attempts: [] };
+    });
+    await request(
+      `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
+      { method: "POST", body: JSON.stringify({ approved: true }) },
+    );
+    await waitFor(async () => runKyreiChat.mock.calls.length === 2);
+
+    // A plain re-decision is still refused — the escape must be explicit.
+    await expect(request(
+      `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
+      { method: "POST", body: JSON.stringify({ approved: false }) },
+    )).rejects.toMatchObject({ status: 409 });
+
+    const forced = await request<{ approval: Record<string, unknown> }>(
+      `/api/sessions/${session.id}/approvals/${APPROVAL_ID}`,
+      { method: "POST", body: JSON.stringify({ approved: false, force: true }) },
+    );
+    expect(forced.approval).toMatchObject({ status: "denied", consumedAt: expect.any(String) });
+  });
 });
