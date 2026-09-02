@@ -10,6 +10,7 @@ import { createGoogleVertex } from "@ai-sdk/google-vertex";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
+import { withNormalizedToolCallIndexes } from "./tool-call-index.js";
 import type {
   ModelParams,
   OpenAICompatibleReasoningTransport,
@@ -128,7 +129,13 @@ export function buildModel(opts: BuildModelOpts): LanguageModel {
         ...(credentials.apiKey ? { apiKey: credentials.apiKey } : {}),
         includeUsage: true,
         headers,
-        ...(opts.fetch ? { fetch: opts.fetch } : {}),
+        // Every OpenAI-compatible endpoint is somebody's reimplementation of
+        // the wire format, and a non-conforming `tool_calls[].index` kills the
+        // whole turn inside the SDK (see tool-call-index.ts). The repair is
+        // applied unconditionally on this protocol — it is a no-op for a
+        // conforming provider, and there is no way to know in advance which
+        // gateway is behind a custom baseURL.
+        fetch: withNormalizedToolCallIndexes(opts.fetch),
       });
       return provider(opts.model);
     }

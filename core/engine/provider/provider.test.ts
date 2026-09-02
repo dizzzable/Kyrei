@@ -227,7 +227,7 @@ describe("native provider builders", () => {
   });
 
   it("does not invent OpenAI-compatible authorization and preserves explicit transport options", async () => {
-    const customFetch = vi.fn() as unknown as typeof fetch;
+    const customFetch = vi.fn(async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
     const noKey = buildModel({
       protocol: "openai-chat",
       baseURL: "http://127.0.0.1:11434/v1",
@@ -256,7 +256,13 @@ describe("native provider builders", () => {
       Object.entries(await keyed.config.headers()).map(([name, value]) => [name.toLowerCase(), value]),
     );
 
-    expect(noKey.config.fetch).toBe(customFetch);
+    // The caller's transport is honoured, but it is WRAPPED rather than used
+    // directly: every openai-chat model gets the tool-call index repair (see
+    // tool-call-index.ts), so identity is asserted by delegation instead.
+    expect(typeof noKey.config.fetch).toBe("function");
+    expect(noKey.config.fetch).not.toBe(customFetch);
+    await noKey.config.fetch?.("https://127.0.0.1:11434/v1/chat/completions");
+    expect(customFetch).toHaveBeenCalledTimes(1);
     expect(noKeyHeaders).not.toHaveProperty("authorization");
     expect(keyedHeaders.authorization).toBe("Bearer custom-key");
   });
