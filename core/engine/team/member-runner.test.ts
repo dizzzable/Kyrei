@@ -551,7 +551,165 @@ describe("createTeamMemberRunner", () => {
       reserveNestedAgent: () => undefined,
     })).rejects.toThrow("team_artifact_structured_output_required");
   });
+
+  /**
+   * THE DEFECT THESE COVER
+   *
+   * The fallback used to delete the whole <team_artifact> block and keep the
+   * remainder. A worker that did exactly as told — put its result inside the
+   * artifact — but mis-shaped the `summary` field had its work erased by the
+   * code meant to rescue it: the remainder was empty, so the artifact carried
+   * "No summary returned." while the task reported success. Observed live at
+   * 232k input tokens with files genuinely read.
+   */
+  it("preserves the raw response when the artifact carries no summary", async () => {
+    const brief = `ORCHESTRATOR BRIEF\n${"detail line\n".repeat(40)}`;
+    generateTextMock.mockResolvedValueOnce({
+      text: `${brief}<team_artifact>${JSON.stringify({
+        // `summary` misspelled: exactly the near-miss that used to destroy the payload.
+        summry: "implemented",
+        confidence: 0.9,
+        evidence: ["read the reference"],
+      })}</team_artifact>`,
+      steps: [],
+      toolCalls: [],
+      usage: {},
+    });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner(baseRunnerOptions());
+
+    const result = await runner(taskContext("brief-task"), runtimeStub());
+
+    expect(result.summary).not.toBe("No summary returned.");
+    expect(result.summary).toContain("ORCHESTRATOR BRIEF");
+    expect(result.summary).toContain("detail line");
+    expect(result.parseError).toBeDefined();
+    expect(result.emptyPayload).toBeUndefined();
+  });
+
+  it("reports an empty response as an empty payload rather than a clean success", async () => {
+    generateTextMock.mockResolvedValueOnce({ text: "   ", steps: [], toolCalls: [], usage: {} });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner(baseRunnerOptions());
+
+    const result = await runner(taskContext("silent-task"), runtimeStub());
+
+    expect(result.summary).toBe("No summary returned.");
+    expect(result.emptyPayload).toBe(true);
+    expect(result.parseError).toContain("no text");
+  });
+
+  it("does not flag a well-formed artifact as degraded", async () => {
+    generateTextMock.mockResolvedValueOnce({
+      text: `<team_artifact>${JSON.stringify({ summary: "clean result", confidence: 0.9 })}</team_artifact>`,
+      steps: [],
+      toolCalls: [],
+      usage: {},
+    });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner(baseRunnerOptions());
+
+    const result = await runner(taskContext("clean-task"), runtimeStub());
+
+    expect(result.summary).toBe("clean result");
+    expect(result.parseError).toBeUndefined();
+    expect(result.emptyPayload).toBeUndefined();
+  });
+
+  it("keeps a long deliverable instead of truncating it at the old 4k budget", async () => {
+    const long = "X".repeat(18_000);
+    generateTextMock.mockResolvedValueOnce({
+      text: `<team_artifact>${JSON.stringify({ summary: long, confidence: 0.9 })}</team_artifact>`,
+      steps: [],
+      toolCalls: [],
+      usage: {},
+    });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner(baseRunnerOptions());
+
+    const result = await runner(taskContext("long-task"), runtimeStub());
+
+    expect(result.summary).toHaveLength(18_000);
+  });
+
+  it("says so when an oversized patch is dropped instead of losing it silently", async () => {
+    // Just past the raised 128 KiB ceiling.
+    const huge = `*** Begin Patch\n+${"y".repeat(140 * 1_024)}\n*** End Patch\n`;
+    generateTextMock.mockResolvedValueOnce({
+      text: `<team_artifact>${JSON.stringify({
+        summary: "produced a very large patch",
+        confidence: 0.9,
+        applicablePatch: huge,
+      })}</team_artifact>`,
+      steps: [],
+      toolCalls: [],
+      usage: {},
+    });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner(baseRunnerOptions());
+
+    const result = await runner(taskContext("huge-patch"), runtimeStub());
+
+    expect(result.applicablePatch).toBeUndefined();
+    expect(result.parseError).toContain("applicablePatch dropped");
+    expect(result.summary).toContain("very large patch");
+  });
+
+  it("accepts a patch that the previous 64 KiB budget would have discarded", async () => {
+    const patch = `*** Begin Patch\n*** Add File: notes/big.txt\n+${"z".repeat(80 * 1_024)}\n*** End Patch\n`;
+    generateTextMock.mockResolvedValueOnce({
+      text: `<team_artifact>${JSON.stringify({
+        summary: "detailed report",
+        confidence: 0.9,
+        applicablePatch: patch,
+      })}</team_artifact>`,
+      steps: [],
+      toolCalls: [],
+      usage: {},
+    });
+    const { createTeamMemberRunner } = await import("./member-runner.js");
+    const runner = createTeamMemberRunner(baseRunnerOptions());
+
+    const result = await runner(taskContext("big-patch"), runtimeStub());
+
+    expect(result.applicablePatch).toBe(patch);
+    expect(result.parseError).toBeUndefined();
+  });
 });
+
+/** Minimal runner options shared by the artifact-parsing regressions. */
+function baseRunnerOptions() {
+  return {
+    role: { ...role, canSpawn: false, maxChildren: 0, capabilities: ["workspace.read"] },
+    model: { id: "model" } as never,
+    tools: {},
+    nestedChildTools: {},
+    skills: [],
+    maxDepth: 1,
+    maxSteps: 3,
+    maxRetries: 1,
+    contextWindow: 64_000,
+    cost: { inputPerM: 1, outputPerM: 2 },
+    emit: () => undefined,
+  } as never;
+}
+
+function taskContext(id: string) {
+  return {
+    task: { id, goal: "write the brief" },
+    dependencyArtifacts: new Map(),
+    signal: new AbortController().signal,
+  };
+}
+
+function runtimeStub() {
+  return {
+    runId: "run",
+    subagentId: "agent",
+    onProgress: () => undefined,
+    reserveNestedAgent: () => undefined,
+  };
+}
 
 function artifact(taskId: string) {
   return {

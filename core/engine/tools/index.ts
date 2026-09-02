@@ -15,7 +15,7 @@ import { z } from "zod";
 import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
 import { dirname, relative } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { rgPath } from "@vscode/ripgrep";
+import { ripgrepPath, ripgrepUnavailableReason } from "./ripgrep-path.js";
 import fg from "fast-glob";
 import type { CommandRunnerPort, EngineConfig } from "../types.js";
 import { safePath, validateWorkspaceTarget, validateWriteTarget } from "../security/jail.js";
@@ -341,7 +341,14 @@ const RG_PARTIAL_PREFIX = " rg-partial ";
 
 function runRg(args: string[], cwd: string, signal?: AbortSignal): Promise<string> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(rgPath, args, { cwd, windowsHide: true, env: sanitizeEnv(process.env) });
+    // A packaging failure is stated up front rather than surfacing as a raw
+    // ENOENT from spawn, which reads like a missing binary when the real cause
+    // is an unexecutable path inside the archive.
+    if (ripgrepUnavailableReason) {
+      reject(new Error(`search unavailable: ${ripgrepUnavailableReason}`));
+      return;
+    }
+    const child = spawn(ripgrepPath, args, { cwd, windowsHide: true, env: sanitizeEnv(process.env) });
     let out = "";
     let err = "";
     let aborted = false;

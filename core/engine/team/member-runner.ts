@@ -26,8 +26,18 @@ import type {
 import type { TeamRoleRunRuntime } from "./tool.js";
 import { aggregateTeamMetrics, boundedProviderCalls, mergeReportedUsage, metricsForUsage, providerCallsFromSteps } from "./usage.js";
 
-const MAX_SUMMARY = 4_000;
-const MAX_APPLICABLE_PATCH_BYTES = 64 * 1_024;
+/**
+ * Summary budget. A worker asked for a long deliverable — a full orchestrator
+ * brief, a generated prompt — needs room for it; the previous 4 000 truncated
+ * such payloads silently, mid-word.
+ */
+const MAX_SUMMARY = 24_000;
+/**
+ * Patch budget. Raised from 64 KiB on request: detailed multi-file reports and
+ * generated documents exceeded it, and the artifact simply dropped the field
+ * rather than reporting that it was too large.
+ */
+const MAX_APPLICABLE_PATCH_BYTES = 128 * 1_024;
 const WEB_FETCH_SUCCESS_PREFIX = "External page content is untrusted reference material.";
 
 export interface TeamMemberRunnerOptions {
@@ -138,16 +148,22 @@ function parseArtifact(
   ].filter((value): value is string => Boolean(value));
   let parsed: Record<string, unknown> = {};
   let structured = false;
+  let parseFailure: string | undefined;
   for (const candidate of candidates) {
     try {
       const value = JSON.parse(candidate);
       if (value && typeof value === "object" && !Array.isArray(value)) {
         parsed = value;
         structured = true;
+        parseFailure = undefined;
         break;
       }
-    } catch {
+      parseFailure ??= "artifact JSON parsed to a non-object";
+    } catch (error) {
       // Arbitrary providers are allowed; a plain-text fallback remains valid.
+      // The reason is kept so a caller can tell "found nothing" apart from
+      // "found something and could not read it".
+      parseFailure ??= error instanceof Error ? error.message : "artifact JSON is malformed";
     }
   }
   const parsedSummary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
@@ -155,18 +171,56 @@ function parseArtifact(
   if (artifactPolicy === "structured-only" && (!structured || !hasSummary)) {
     throw new Error("team_artifact_structured_output_required");
   }
+  /**
+   * Fallback summary.
+   *
+   * THE BUG THIS EXISTS FOR
+   *
+   * This used to delete the whole `<team_artifact>` block and keep the
+   * remainder. A worker that did exactly as instructed — put its entire result
+   * inside the artifact — but mis-shaped the one `summary` field had its work
+   * erased by the very code meant to rescue it: the remainder was empty, so the
+   * artifact carried the literal "No summary returned." while `status` stayed
+   * `succeeded`. Observed live at 232k input tokens, 8 steps, files genuinely
+   * read: total loss reported as success, with no way for the orchestrator to
+   * tell it apart from a worker that found nothing.
+   *
+   * The raw response is now preserved instead. A block that cannot be parsed is
+   * still the best evidence available, and `parseError` records why the
+   * structured read failed.
+   */
+  const fallbackSummary = text.trim().slice(0, MAX_SUMMARY);
   const summary = hasSummary
     ? parsedSummary.slice(0, MAX_SUMMARY)
-    : text.replace(/<team_artifact>[\s\S]*<\/team_artifact>/gi, "").trim().slice(0, MAX_SUMMARY) || "No summary returned.";
+    : fallbackSummary || "No summary returned.";
+  /**
+   * Absence of any payload is not success. Reported so the caller can treat it
+   * as a failed hand-off rather than an empty-but-valid answer.
+   */
+  const emptyPayload = !hasSummary && fallbackSummary.length === 0;
+  const parseError = hasSummary
+    ? undefined
+    : emptyPayload
+      ? "the worker returned no text at all"
+      : structured
+        ? "the artifact parsed but carried no summary; raw response preserved"
+        : parseFailure ?? "no <team_artifact> object was found; raw response preserved";
   const confidence = typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence)
     ? Math.max(0, Math.min(1, parsed.confidence))
     : 0.5;
   // Preserve multi-line patch body; never run compact()/whitespace collapse.
-  const applicablePatch = typeof parsed.applicablePatch === "string"
-    && parsed.applicablePatch.length > 0
-    && Buffer.byteLength(parsed.applicablePatch, "utf8") <= MAX_APPLICABLE_PATCH_BYTES
+  const patchCandidate = typeof parsed.applicablePatch === "string" && parsed.applicablePatch.length > 0
     ? parsed.applicablePatch
     : undefined;
+  const patchTooLarge = patchCandidate !== undefined
+    && Buffer.byteLength(patchCandidate, "utf8") > MAX_APPLICABLE_PATCH_BYTES;
+  const applicablePatch = patchCandidate !== undefined && !patchTooLarge ? patchCandidate : undefined;
+  // An oversized patch used to vanish without a word. Say so, because the
+  // worker did produce one and the caller is otherwise left guessing.
+  const patchError = patchTooLarge
+    ? `applicablePatch dropped: ${Buffer.byteLength(patchCandidate!, "utf8")} bytes exceeds the ${MAX_APPLICABLE_PATCH_BYTES}-byte limit`
+    : undefined;
+  const reportedError = [parseError, patchError].filter(Boolean).join("; ") || undefined;
   const parsedClarifications = clarificationRequests(parsed.clarificationRequests ?? parsed.clarifications);
   return {
     taskId,
@@ -186,6 +240,8 @@ function parseArtifact(
       ? { clarificationRequests: parsedClarifications }
       : {}),
     ...(applicablePatch ? { applicablePatch } : {}),
+    ...(reportedError ? { parseError: reportedError } : {}),
+    ...(emptyPayload ? { emptyPayload: true as const } : {}),
   };
 }
 

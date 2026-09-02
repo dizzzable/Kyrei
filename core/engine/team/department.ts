@@ -104,7 +104,11 @@ function strings(
   });
 }
 
-const MAX_APPLICABLE_PATCH_BYTES = 64 * 1_024;
+/**
+ * Patch budget. Kept in step with member-runner and tool.ts: a smaller value
+ * here would silently discard a patch the runner already accepted.
+ */
+const MAX_APPLICABLE_PATCH_BYTES = 128 * 1_024;
 
 function redactedArtifact(value: TeamArtifact, sensitiveValues: readonly string[]): TeamArtifact {
   // applicablePatch must keep newlines; only drop it if it is empty/oversized.
@@ -144,6 +148,11 @@ function redactedArtifact(value: TeamArtifact, sensitiveValues: readonly string[
         }
       : {}),
     ...(applicablePatch ? { applicablePatch } : {}),
+    // A degraded structured read must survive redaction: dropping it here would
+    // restore the defect it exists to expose — an unreadable payload persisted
+    // as a clean success.
+    ...(value.parseError ? { parseError: text(value.parseError, 600, sensitiveValues) } : {}),
+    ...(value.emptyPayload ? { emptyPayload: true as const } : {}),
     ...(value.metrics ? { metrics: aggregateTeamMetrics([value.metrics], 1) } : {}),
   };
 }

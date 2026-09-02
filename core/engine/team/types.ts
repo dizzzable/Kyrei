@@ -106,6 +106,22 @@ export interface TeamArtifact {
    * deterministic action executor applies it — team roles stay read-only.
    */
   readonly applicablePatch?: string;
+  /**
+   * Why the structured read of this artifact degraded, when it did.
+   *
+   * A parse failure used to be indistinguishable from an honest empty answer:
+   * the artifact carried a placeholder summary and `status: "succeeded"`, so a
+   * caller could not tell "the worker found nothing" from "the worker found
+   * everything and we could not read it". This field makes that difference
+   * inspectable.
+   */
+  readonly parseError?: string;
+  /**
+   * True when the worker returned no text whatsoever. A hand-off with no
+   * payload is not a successful hand-off, and the caller must be able to say so
+   * without string-matching a placeholder summary.
+   */
+  readonly emptyPayload?: true;
   /** Successful direct web-fetches captured by runtime code, never model text. */
   readonly sources?: readonly TeamSourceReceipt[];
   readonly metrics?: TeamArtifactMetrics;
