@@ -295,6 +295,96 @@ describe("read-only child runner", () => {
     });
   });
 
+  /**
+   * THE DEFECT THESE COVER
+   *
+   * The summary picker used to fall back to the last non-empty STEP text when the
+   * final text was empty, and the caller treated that as a completed answer. A
+   * child that ran out of steps mid-investigation therefore returned its opening
+   * line — "I'll start by orienting myself in the workspace" — as the research
+   * result, and by doing so skipped the synthesis pass written for exactly this
+   * case. Three delegated tasks came back as three such utterances while their
+   * findings were discarded.
+   */
+  it("does not return an early step utterance as the research result", async () => {
+    const opener = "I'll start by orienting myself in the workspace and locating the optimizer lab.";
+    generateTextMock
+      .mockResolvedValueOnce({
+        text: "",
+        steps: [{ text: opener }, { text: "" }],
+        toolCalls: [{ toolName: "read_file" }, { toolName: "find_path" }],
+        usage: { inputTokens: 900, outputTokens: 40, totalTokens: 940 },
+        responseMessages: [{ role: "assistant", content: [] }],
+      })
+      .mockResolvedValueOnce({
+        text: "The optimizer lab lives in tools/lab; V14 variants are absent.",
+        steps: [],
+        toolCalls: [],
+        usage: { inputTokens: 30, outputTokens: 12, totalTokens: 42 },
+        responseMessages: [],
+      });
+
+    const runner = createReadOnlyChildRunner({
+      model: { id: "m" } as unknown as LanguageModel,
+      modelId: "m",
+      tools: definitions("read_file"),
+      maxSteps: 2,
+      maxRetries: 0,
+      cost: { inputPerM: 0, outputPerM: 0 },
+    });
+    const result = await runner({
+      childId: "child-early-utterance",
+      goal: "Locate the optimizer lab",
+      index: 0,
+      readOnly: true,
+      allowDelegation: false,
+      onProgress: () => undefined,
+    });
+
+    // The synthesis pass must have run rather than being short-circuited.
+    expect(generateTextMock).toHaveBeenCalledTimes(2);
+    expect(result.summary).toBe("The optimizer lab lives in tools/lab; V14 variants are absent.");
+    expect(result.summary).not.toContain("I'll start by orienting");
+    expect(result.incomplete).toBeUndefined();
+  });
+
+  it("labels a surviving partial as not-a-conclusion when synthesis is impossible", async () => {
+    const opener = "Ripgrep is unavailable, so I'll use find_path plus read_file.";
+    generateTextMock.mockResolvedValueOnce({
+      text: "",
+      steps: [{ text: opener }],
+      toolCalls: [{ toolName: "grep_search" }],
+      usage: {},
+      // No response messages: the synthesis pass cannot be built.
+      responseMessages: [],
+    });
+
+    const runner = createReadOnlyChildRunner({
+      model: { id: "m" } as unknown as LanguageModel,
+      modelId: "m",
+      tools: definitions("read_file"),
+      maxSteps: 2,
+      maxRetries: 0,
+      cost: { inputPerM: 0, outputPerM: 0 },
+    });
+    const result = await runner({
+      childId: "child-labelled-partial",
+      goal: "Find the evidence",
+      index: 0,
+      readOnly: true,
+      allowDelegation: false,
+      onProgress: () => undefined,
+    });
+
+    expect(generateTextMock).toHaveBeenCalledOnce();
+    expect(result.incomplete).toBe(true);
+    // The aside is preserved — it is real information — but it is explicitly
+    // marked so it can never read as the answer.
+    expect(result.summary).toContain("NOT a conclusion");
+    expect(result.summary).toContain("Ripgrep is unavailable");
+    expect(result.summary).toContain("Treat this as non-evidence");
+  });
+
   it("acquires immediately before the provider call and releases the lease once on success", async () => {
     generateTextMock.mockResolvedValueOnce({
       text: "Account-scoped evidence",

@@ -17,10 +17,25 @@ import type {
 } from "./types.js";
 import { compareTeamResults } from "./comparison.js";
 
-const MAX_ARTIFACT_TEXT = 2_400;
+/**
+ * Per-field text budget inside a normalized artifact.
+ *
+ * Raised from 2 400: a worker asked for a long deliverable (an orchestrator
+ * brief, a generated prompt) had its summary truncated here even when
+ * member-runner had preserved it in full.
+ */
+const MAX_ARTIFACT_TEXT = 24_000;
 const MAX_ARTIFACT_ITEMS = 16;
 const MAX_ARTIFACT_ITEM_TEXT = 600;
 const DEFAULT_MODEL_RESULT_CHARS = 12_000;
+/**
+ * Summary budget for what the CALLING model sees per task.
+ *
+ * Was 600, which silently amputated any long deliverable at the last hop: the
+ * worker produced it, member-runner kept it, the artifact carried it, and this
+ * clamp cut it to two sentences.
+ */
+const MODEL_SUMMARY_CHARS = 12_000;
 
 export interface TeamRoleRunRuntime {
   runId: string;
@@ -103,7 +118,11 @@ function sourceReceipts(value: unknown): TeamSourceReceipt[] {
   return receipts;
 }
 
-const MAX_APPLICABLE_PATCH_BYTES = 64 * 1_024;
+/**
+ * Patch budget. Kept in step with member-runner's limit: a value smaller here
+ * would silently drop a patch the runner had already accepted.
+ */
+const MAX_APPLICABLE_PATCH_BYTES = 128 * 1_024;
 
 function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamArtifact): TeamArtifact {
   const sources = sourceReceipts(value?.sources);
@@ -134,6 +153,11 @@ function normalizedArtifact(taskId: string, role: RuntimeTeamRole, value: TeamAr
       ? { clarificationRequests: value.clarificationRequests.slice(0, 8) }
       : {}),
     ...(applicablePatch ? { applicablePatch } : {}),
+    // Carried through so a degraded read stays inspectable end to end. Dropping
+    // it here would restore the exact defect it was added to expose: an
+    // unreadable payload reported as a clean success.
+    ...(value?.parseError ? { parseError: compact(value.parseError, 600) } : {}),
+    ...(value?.emptyPayload ? { emptyPayload: true as const } : {}),
     ...(sources.length ? { sources } : {}),
     ...(value?.metrics
       ? {
@@ -260,7 +284,18 @@ function waitForTaskWithDeadline<T>(task: Promise<T>, deadline: TaskDeadline): P
   });
 }
 
-function taskResultForModel(result: TeamTaskResult, summaryChars = 600): Record<string, unknown> {
+/**
+ * The task view handed back to the CALLING model.
+ *
+ * `applicablePatch` is included deliberately. Team roles are read-only by
+ * design, and the patch field is the sanctioned way for a worker to produce file
+ * content: it emits a diff, someone with write authority applies it. That path
+ * was complete right up to this function, which enumerates fields explicitly and
+ * omitted the patch — so a worker's generated file content reached the boundary
+ * and vanished. Forwarding it keeps the read-only invariant intact while making
+ * the mechanism usable: the caller applies the diff itself.
+ */
+function taskResultForModel(result: TeamTaskResult, summaryChars = MODEL_SUMMARY_CHARS): Record<string, unknown> {
   switch (result.status) {
     case "succeeded":
       return {
@@ -281,6 +316,13 @@ function taskResultForModel(result: TeamTaskResult, summaryChars = 600): Record<
         uncertainties: result.artifact.uncertainties.slice(0, 2).map((item) => compact(item, 300)),
         whatWasNotChecked: result.artifact.whatWasNotChecked.slice(0, 2).map((item) => compact(item, 300)),
         clarificationRequests: (result.artifact.clarificationRequests ?? []).slice(0, 3),
+        // Not truncated by `summaryChars`: a half patch is worse than no patch,
+        // and the byte budget was already enforced when the artifact was built.
+        ...(result.artifact.applicablePatch ? { applicablePatch: result.artifact.applicablePatch } : {}),
+        // A degraded read must be visible to the caller, otherwise a lost
+        // payload is indistinguishable from an empty one.
+        ...(result.artifact.parseError ? { parseError: compact(result.artifact.parseError, 600) } : {}),
+        ...(result.artifact.emptyPayload ? { emptyPayload: true } : {}),
       };
     case "failed":
       return { id: result.task.id, status: result.status, error: compact(errorMessage(result.error), 2_000) };

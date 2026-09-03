@@ -473,4 +473,89 @@ describe("buildTeamDelegateTool", () => {
       what_was_not_checked: ["live deployment"],
     });
   });
+
+  /**
+   * THE DEFECT THIS COVERS
+   *
+   * Team roles are read-only by design, and `applicablePatch` is the sanctioned
+   * way for a worker to produce file content: it emits a diff, someone with
+   * write authority applies it. The path worked right up to the boundary that
+   * builds the caller's view, which enumerates fields explicitly and omitted the
+   * patch — so generated file content reached the last hop and vanished.
+   */
+  it("forwards applicablePatch to the calling model", async () => {
+    const researcher = role("researcher");
+    const patch = "*** Begin Patch\n*** Add File: notes/brief.txt\n+line one\n+line two\n*** End Patch\n";
+    const tools = buildTeamDelegateTool({
+      spec: spec([researcher]),
+      emit: () => undefined,
+      executors: [{
+        role: researcher,
+        run: async (context) => ({ ...artifact(context.task.id), applicablePatch: patch }),
+      }],
+    });
+    const team = tools.team_delegate as unknown as {
+      execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+    };
+
+    const output = JSON.parse(await team.execute({
+      tasks: [{ id: "write-brief", goal: "produce the brief" }],
+    }, { toolCallId: "patch-through" }));
+
+    expect(output.tasks[0].applicablePatch).toBe(patch);
+    // Newlines are load-bearing for a context-anchored patch; whitespace
+    // collapse would make it unappliable.
+    expect(output.tasks[0].applicablePatch).toContain("\n+line one\n");
+  });
+
+  it("keeps a long deliverable instead of clamping it to the old 600 chars", async () => {
+    const researcher = role("researcher");
+    const brief = `ORCHESTRATOR BRIEF ${"detail ".repeat(1_200)}`;
+    const tools = buildTeamDelegateTool({
+      spec: spec([researcher]),
+      // Generous enough that the per-task clamp, not the envelope, is under test.
+      maxResultChars: 60_000,
+      emit: () => undefined,
+      executors: [{
+        role: researcher,
+        run: async (context) => ({ ...artifact(context.task.id), summary: brief }),
+      }],
+    });
+    const team = tools.team_delegate as unknown as {
+      execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+    };
+
+    const output = JSON.parse(await team.execute({
+      tasks: [{ id: "brief", goal: "write the brief" }],
+    }, { toolCallId: "long-summary" }));
+
+    expect(output.tasks[0].summary.length).toBeGreaterThan(5_000);
+    expect(output.tasks[0].summary).toContain("ORCHESTRATOR BRIEF");
+  });
+
+  it("surfaces a degraded artifact read to the calling model", async () => {
+    const researcher = role("researcher");
+    const tools = buildTeamDelegateTool({
+      spec: spec([researcher]),
+      emit: () => undefined,
+      executors: [{
+        role: researcher,
+        run: async (context) => ({
+          ...artifact(context.task.id),
+          parseError: "no <team_artifact> object was found; raw response preserved",
+        }),
+      }],
+    });
+    const team = tools.team_delegate as unknown as {
+      execute: (input: unknown, options: { toolCallId: string }) => Promise<string>;
+    };
+
+    const output = JSON.parse(await team.execute({
+      tasks: [{ id: "degraded", goal: "return something" }],
+    }, { toolCallId: "degraded" }));
+
+    // Without this the caller cannot tell "found nothing" from "found
+    // everything and we could not read it".
+    expect(output.tasks[0].parseError).toContain("team_artifact");
+  });
 });
