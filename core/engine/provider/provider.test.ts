@@ -417,6 +417,47 @@ describe("errors classification", () => {
     expect(retryAfterMsOf({ retryAfterMs: 500 })).toBe(500);
     expect(retryAfterMsOf({ headers: { "Retry-After": "999999" } })).toBe(24 * 60 * 60_000);
   });
+
+  // A gateway that drops the response body mid-stream — routine under
+  // concurrent load — rejects with a bare `TypeError: terminated` carrying no
+  // status and no code. Classified as `unknown` it skipped retries, stopped
+  // candidate fallback, and left the account pool unable to tell a dropped
+  // connection from a real fault: one session died while its neighbours
+  // streamed fine.
+  it("treats a premature stream close as retryable transport noise", () => {
+    const prematureClose = new TypeError("terminated", { cause: new Error("other side closed") });
+
+    expect(isNetworkError(prematureClose)).toBe(true);
+    expect(isRetryable(prematureClose)).toBe(true);
+    expect(classifyProviderFailure(prematureClose)).toBe("network");
+
+    for (const shape of [
+      { message: "terminated" },
+      { message: "terminated", cause: { message: "other side closed" } },
+      { code: "ERR_STREAM_PREMATURE_CLOSE" },
+      { message: "Premature close" },
+      { message: "incomplete chunked encoding" },
+    ]) {
+      expect(isNetworkError(shape)).toBe(true);
+      expect(isRetryable(shape)).toBe(true);
+    }
+  });
+
+  it("does not mistake ordinary prose containing 'terminated' for a transport failure", () => {
+    // `\b` also matches after a hyphen, so a word-boundary pattern would have
+    // classified these as network noise and retried a real failure.
+    expect(isNetworkError({ message: "unterminated string literal" })).toBe(false);
+    expect(isNetworkError({ message: "self-terminated process" })).toBe(false);
+    expect(isNetworkError({ message: "the run was terminated-by-user" })).toBe(false);
+    expect(classifyProviderFailure({ statusCode: 400, message: "unterminated string literal" })).toBe("client");
+  });
+
+  it("still reports a status-bearing response as its HTTP class, not transport", () => {
+    // statusOf() short-circuits isNetworkError, so a 500 whose body happens to
+    // mention a closed stream stays a server error and keeps its own policy.
+    expect(isNetworkError({ statusCode: 500, message: "terminated" })).toBe(false);
+    expect(classifyProviderFailure({ statusCode: 500, message: "terminated" })).toBe("server");
+  });
 });
 
 describe("registry.resolve", () => {

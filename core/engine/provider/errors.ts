@@ -71,9 +71,22 @@ export function errorMessageOf(err: unknown): string {
 /**
  * Transport / connectivity failures that must never permanently park a seat.
  * OmniRoute / codex-lb style: treat flaky links as short cooldowns only.
+ *
+ * `terminated` and `other side closed` are load-bearing, not decoration. When a
+ * gateway drops a response body mid-stream — routine under concurrent load, and
+ * how an upstream timeout surfaces — Node's fetch rejects with a bare
+ * `TypeError: terminated` whose cause reads `other side closed`. It carries no
+ * status and no `code`, so without these alternatives the failure classified as
+ * `unknown`: retries were skipped, candidate fallback stopped, and the account
+ * pool could not tell a dropped connection apart from a real fault. One turn in
+ * a multi-session workload died while its neighbours kept streaming.
+ *
+ * `terminated` is matched as a standalone token rather than with `\b`, because a
+ * word boundary also sits after a hyphen: `\bterminated\b` would classify an
+ * unrelated "self-terminated process" message as a transport failure.
  */
 const NETWORK_CODE_RE =
-  /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|EPIPE|EPROTO|UND_ERR|ERR_NETWORK|ERR_SOCKET|ERR_TLS|CERT_|socket hang up|network|fetch failed|aborted|timeout|timed out/i;
+  /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|EPIPE|EPROTO|UND_ERR|ERR_NETWORK|ERR_SOCKET|ERR_TLS|ERR_STREAM_PREMATURE_CLOSE|CERT_|socket hang up|network|fetch failed|aborted|timeout|timed out|(?:^|\s)terminated(?:\s|$)|other side closed|premature close|stream (?:closed|ended) (?:unexpectedly|prematurely)|incomplete chunked encoding/i;
 
 export function isNetworkError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
