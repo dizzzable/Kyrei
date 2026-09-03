@@ -287,6 +287,11 @@ export const enShell = {
   "shell.error.providerNotConfigured": "Connect a model provider before sending a message.",
   "shell.error.healHandoff": "Kyrei paused this run after repeated tool failures. Partial progress and local diagnostics were saved; review the latest tool error and resume when ready.",
   "shell.error.prefix": "Error: {message}",
+  // A settings save used to abort every running turn, and the turn was stored
+  // with no text and no reason — indistinguishable from the model answering
+  // nothing. Whatever cancels a turn now has to say so here.
+  "shell.error.providerRuntimeChanged": "This run was stopped because the provider settings changed while it was working. Nothing was lost — send the message again to continue.",
+  "shell.error.interruptedByGateway": "This run was stopped by Kyrei ({reason}), not by you. Send the message again to continue.",
   "shell.stream.reconnecting": "Live updates disconnected — reconnecting. If this persists, reload the window.",
   "shell.stream.reload": "Reload",
   "shell.status.missions": "Missions",

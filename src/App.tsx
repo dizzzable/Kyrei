@@ -45,6 +45,7 @@ import { getStored, setStored } from "@/lib/persist";
 import { detectCodingModeSwitch, parseCodingModeArg, suggestedReasoningEffort, type CodingMode } from "@/lib/coding-mode";
 import { getSlashCommands } from "@/lib/slash-commands";
 import { cancelSpeech, speak } from "@/lib/speech";
+import { turnErrorNotice } from "@/lib/turn-error-text";
 import {
   cancelResponseIsTerminal,
   mergeSessionHydration,
@@ -608,6 +609,19 @@ export function App() {
             setMessages((current) => current.map((message) => message.id === pendingId
               ? { ...message, pending: false, parts: settleRunningToolParts(message.parts) }
               : message));
+          }
+          // A turn the gateway cancelled says so on its terminal frame. Show it
+          // without waiting for the refetch below — and independently of whether
+          // that refetch ever succeeds, because the alternative the user saw was
+          // an assistant row that simply stopped with nothing written.
+          if (payload.error_code) {
+            const notice = turnErrorNotice(
+              { errorCode: payload.error_code, turnStatus: payload.status as StoredChatMessage["turnStatus"] },
+            );
+            if (notice) {
+              const translate = translationRef.current;
+              updatePending((parts) => appendText(parts, `\n\n${translate(notice.key, notice.params)}`));
+            }
           }
           // When UI mode is Auto, adopt the phase the model declared
           // (Effective phase: / MODE_SWITCH:) so the next turn matches tools/prompt/model.
@@ -1643,21 +1657,14 @@ function hydrateStoredMessages(
     const persistedParts = sourceParts
       .map((part) => part.type === "text" ? { ...part, text: redactLegacyHealHandoff(part.text) } : part)
       .filter((part) => part.type !== "text" || part.text.length > 0);
-    const errorText = message.errorCode === "provider_not_configured"
-      ? translate?.("shell.error.providerNotConfigured")
-      : message.errorCode === "heal_handoff" || hadLegacyHealHandoff
-        ? translate?.("shell.error.healHandoff")
-      : message.errorMessage
-        ? translate?.("shell.error.prefix", { message: message.errorMessage })
-        : message.turnStatus === "error"
-          ? translate?.("shell.error.fallback")
-          : undefined;
+    const errorNotice = turnErrorNotice(message, hadLegacyHealHandoff);
+    const errorText = errorNotice ? translate?.(errorNotice.key, errorNotice.params) : undefined;
     let parts = (persistedParts.length
       ? persistedParts
       : errorText
         ? [{ type: "text", text: errorText }]
         : []) as MessagePart[];
-    if (errorText && (message.errorCode === "heal_handoff" || hadLegacyHealHandoff) && persistedParts.length > 0) {
+    if (errorText && errorNotice?.appendToContent && persistedParts.length > 0) {
       parts = appendText(parts, `\n\n${errorText}`);
     }
     // Surface image attachment labels on user turns when parts are text-only.
