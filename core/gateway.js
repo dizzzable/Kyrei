@@ -216,6 +216,14 @@ const MAX_PROMPT_SKILLS = 32;
 const PROMPT_SKILL_ID_RE = /^skill_[a-f0-9]{24}$/;
 
 /**
+ * Why a turn was cancelled by the gateway rather than by the user. Travels on
+ * the abort reason, into the stored turn's `errorCode`, onto the terminal SSE
+ * frame, and from there to a translated line in the chat. The renderer and both
+ * locales key off this exact string.
+ */
+const PROVIDER_RUNTIME_CHANGED = "provider_runtime_changed";
+
+/**
  * Kyrei gateway — local HTTP server that the renderer talks to.
  *
  * Transport: Server-Sent Events for the model event stream (one subscription
@@ -3573,7 +3581,7 @@ export async function startGateway({
   const sessionReservations = new Map(); // sessionId -> opaque owner token
   const runtimeStatus = new Map(); // sessionId -> "working" (absent = idle)
   const runtimeActivity = new Map(); // sessionId -> public live/last turn activity
-  const activePromptProviders = new Map(); // sessionId -> provider ids whose credentials may be in flight
+  const activePromptProviders = new Map(); // sessionId -> provider ids this turn may actually send credentials to
   const subagentRuns = new Map(); // subagentId -> cross-session runtime summary
   for (const recovered of recoveredAgentRuns) {
     if (!recovered?.agentId) continue;
@@ -5434,6 +5442,14 @@ export async function startGateway({
     turn.acceptEvents = false;
     turn.finalized = true;
     const terminalStatus = typeof status === "string" && status ? status : "error";
+    // A gateway-initiated cancellation carries its reason on the abort. Without
+    // this the turn was stored `interrupted` with no text, no code and no error
+    // event, so nothing downstream could say why it stopped. A user's own
+    // cancel has no code and stays quiet — the user already knows.
+    if (terminalStatus === "interrupted" && !turn.errorCode) {
+      const abortCode = turn.controller.signal.reason?.code;
+      if (typeof abortCode === "string" && abortCode) turn.errorCode = abortCode;
+    }
     const operation = (async () => {
       // Some providers expose their whole answer exclusively through SSE and
       // return an empty aggregate result. Never let that empty aggregate erase
@@ -5451,7 +5467,11 @@ export async function startGateway({
         finalText = terminalText;
         finalParts = appendTurnStreamPart(finalParts, "text", terminalText);
       }
-      if (finalText || meaningfulTurnParts(finalParts) || terminalStatus === "awaiting_approval") {
+      // `turn.errorCode` keeps a turn whose only content IS the explanation.
+      // Dropping the draft here is what turned a cancelled-by-the-gateway turn
+      // into no chat entry at all, and it did the same to a coded error that
+      // carried no message (`provider_not_configured`).
+      if (finalText || meaningfulTurnParts(finalParts) || terminalStatus === "awaiting_approval" || turn.errorCode) {
         createActiveTurnDraft(turn);
         if (turn.draftId) {
           store.updateMessage(turn.sessionId, turn.draftId, {
@@ -5514,7 +5534,14 @@ export async function startGateway({
         turn.terminalPublished = true;
         publishPublicEvent(turn.sessionId, {
           type: "message.complete",
-          payload: { ...terminalPayload, text: finalText, status: terminalStatus },
+          payload: {
+            ...terminalPayload,
+            text: finalText,
+            status: terminalStatus,
+            // The terminal frame is the only carrier when the durable write
+            // failed and the renderer never refetches the turn.
+            ...(turn.errorCode ? { error_code: turn.errorCode } : {}),
+          },
         });
       }
       // Arm idle auto-curation once a turn concludes and the session is at rest.
@@ -5746,10 +5773,31 @@ export async function startGateway({
     return providerRuntimeGenerations.get(providerId) ?? 0;
   }
 
+  /**
+   * Record providers this turn may actually send credentials to. Unions rather
+   * than replaces: capacity candidates, the worker target and team role targets
+   * become known at different points of a single turn's setup, and each of them
+   * must be fenced by a credential change to its own provider.
+   */
+  function noteActivePromptProviders(sessionId, providerIds) {
+    const known = activePromptProviders.get(sessionId) ?? new Set();
+    for (const providerId of providerIds) {
+      if (typeof providerId === "string" && providerId) known.add(providerId);
+    }
+    activePromptProviders.set(sessionId, known);
+  }
+
+  /**
+   * Carry the reason ON the abort. An AbortError with no code produced a turn
+   * stored as `interrupted` with empty text, no `errorCode` and no error event:
+   * from the user's seat, identical to the model having answered nothing. Any
+   * abort reason with a `code` is surfaced by `finalizeActiveTurn`.
+   */
   function providerRuntimeAbortReason() {
-    const error = new Error("provider_runtime_changed");
-    error.name = "AbortError";
-    return error;
+    return Object.assign(new Error(PROVIDER_RUNTIME_CHANGED), {
+      name: "AbortError",
+      code: PROVIDER_RUNTIME_CHANGED,
+    });
   }
 
   function invalidateProviderRuntime(providerId) {
@@ -5766,14 +5814,52 @@ export async function startGateway({
     }
   }
 
-  function invalidateAllProviderRuntimes(providerIds = []) {
-    const known = [
-      ...providerIds,
-      ...providerRuntimeGenerations.keys(),
-      ...config.providers.map((provider) => provider.id),
-      ...[...activePromptProviders.values()].flatMap((ids) => [...ids]),
-    ];
-    for (const providerId of new Set(known)) invalidateProviderRuntime(providerId);
+  /**
+   * Key order must not decide whether a runtime looks changed: a false
+   * difference here cancels running turns, and `normalizeGatewayConfig`
+   * rebuilds provider records by spreading them in whatever order the mutation
+   * path used.
+   */
+  function stableSerialize(value) {
+    if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+    if (Array.isArray(value)) return `[${value.map(stableSerialize).join(",")}]`;
+    return `{${Object.keys(value).sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(",")}}`;
+  }
+
+  /**
+   * Everything a live provider request is built from: the profile (endpoint,
+   * protocol, model list, headers, account pool) and the credentials that
+   * authenticate it. Values are compared, never logged or emitted.
+   */
+  function providerRuntimeFingerprints(configState, secretState) {
+    const ids = new Set([
+      ...configState.providers.map((provider) => provider.id),
+      ...Object.keys(secretState?.providers ?? {}),
+      ...Object.keys(secretState?.accounts ?? {}),
+    ]);
+    return new Map([...ids].map((providerId) => [providerId, stableSerialize({
+      provider: configState.providers.find((candidate) => candidate.id === providerId) ?? null,
+      credentials: secretState?.providers?.[providerId] ?? null,
+      accounts: secretState?.accounts?.[providerId] ?? null,
+    })]));
+  }
+
+  /**
+   * A configuration save must not be a mass cancellation. `PUT /api/config`
+   * used to invalidate EVERY known provider unconditionally, so an `engine` or
+   * `workspace` patch — the Settings autosave fires one 500 ms after a
+   * keystroke — aborted every in-flight turn in every session, silently. Only a
+   * provider whose profile or credentials actually changed may invalidate its
+   * runtime; the generation bump is withheld too, because it also fences a
+   * running turn's next capacity lease and its account affinity.
+   */
+  function invalidateChangedProviderRuntimes(before, after) {
+    const changed = [...new Set([...before.keys(), ...after.keys()])]
+      .filter((providerId) => before.get(providerId) !== after.get(providerId));
+    for (const providerId of changed) invalidateProviderRuntime(providerId);
+    return changed;
   }
 
   function accountPoolRouterFor(provider, secretState = secrets, configState = config) {
@@ -6851,10 +6937,16 @@ export async function startGateway({
       // answer and may expose an unfinished tool call to the provider.
       if (message.pending === true || message.turnStatus === "streaming") continue;
       const structured = internalModelMessages(message.modelMessages);
+      const responses = approvalResponses(message.parts);
+      // A turn that produced no text and no structured history carries nothing
+      // the model can use — an aborted turn is stored exactly like this, and it
+      // replayed as `{ role: "assistant", content: "" }`. An empty assistant
+      // message is context-free at best and rejected by strict providers at
+      // worst. Its persisted `errorCode` exists for the human, not the model.
+      if (!structured.length && !message.content && !responses.length) continue;
       const history = structured.length
         ? structured
         : [{ role: "assistant", content: message.content }];
-      const responses = approvalResponses(message.parts);
       if (responses.length) out.push(...history, { role: "tool", content: responses });
       else out.push(...history);
     }
@@ -7144,7 +7236,12 @@ export async function startGateway({
       });
     }
 
-    activePromptProviders.set(sessionId, new Set(config.providers.map((provider) => provider.id)));
+    // Only the providers this turn can actually reach. Registering EVERY
+    // configured provider made `invalidateProviderRuntime` abort every running
+    // turn whatever changed: revoking a key on an unused provider, or patching
+    // its account pool, killed sessions that never touched it. The set is
+    // extended below as capacity candidates, the worker and team roles resolve.
+    noteActivePromptProviders(sessionId, mainTargets.map((target) => target.providerId));
 
     try {
       const activeTeamProfile = activeOrchestrationProfile(config);
@@ -7208,6 +7305,14 @@ export async function startGateway({
           )
         : undefined;
       if (activeTeamProfile && !team) throw new TeamConfigError("team_runtime_unavailable");
+      // Every provider this turn can still reach: capacity candidates it may
+      // fail over to, the worker model, and each team role's own target. A
+      // credential change to any of them must reach this turn.
+      noteActivePromptProviders(sessionId, [
+        ...orderedCapacity.map((target) => target.providerId),
+        ...(workerProvider ? [workerProvider.providerId] : []),
+        ...(team?.roles ?? []).map((role) => role.target?.providerId),
+      ]);
       const providerAttemptLifecycle = providerAttemptLifecycleFor({
         generationSnapshot: runtimeGenerationSnapshot,
         sessionId,
@@ -8381,6 +8486,9 @@ export async function startGateway({
           const snapshot = await mutateConfig(async () => {
             let nextConfig = config;
             let nextSecrets = normalizeProviderSecrets(secrets);
+            // Snapshot before anything mutates: the invalidation below must be
+            // driven by what actually changed, not by the fact a save happened.
+            const runtimeBefore = providerRuntimeFingerprints(config, nextSecrets);
             const orchestrationExplicit = Object.hasOwn(body, "orchestration");
             const pipelinesExplicit = Object.hasOwn(body, "pipelines");
             const availableSkillIds = orchestrationExplicit
@@ -8614,7 +8722,7 @@ export async function startGateway({
             }
             config = nextConfig;
             secrets = nextSecrets;
-            invalidateAllProviderRuntimes();
+            invalidateChangedProviderRuntimes(runtimeBefore, providerRuntimeFingerprints(config, secrets));
             if (selectionExplicit) rebindUnreadyIdleSessions(config, secrets);
             const nextWorkspace = typeof nextConfig.workspace === "string" ? nextConfig.workspace.trim() : "";
             const prevWs = previousWorkspace.trim().replace(/\\/g, "/").toLowerCase();

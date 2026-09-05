@@ -1407,6 +1407,11 @@ export interface GatewayEvent {
     status?: string;
     /** False only when the gateway could not durably flush a terminal turn. */
     durable?: boolean;
+    /**
+     * Why the gateway cancelled this turn, on a terminal `message.complete`.
+     * Absent when the user cancelled: they already know.
+     */
+    error_code?: string;
     session_id?: string;
     message_id?: string;
     provider_id?: string;
